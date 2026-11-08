@@ -1,0 +1,13 @@
+/target/
+**/__pycache__/
+*.py[cod]
+web/metadata.sqlite3
+.env
+.DS_Store
+.near-credentials/
+*.pem
+*.key
+*.p12
+*.jks
+credentials.json
+secrets.json
