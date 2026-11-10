@@ -30,6 +30,27 @@ NEAR callbacks can themselves fail. The code keeps a failed refund retryable and
 
 NEAR state and transaction activity are public. This phase does not provide private ballots, private order quantities, or anonymity. The app must not market those properties. See `docs/confidential-compute.md`.
 
+## V3 issue and decision boundary
+
+V3 issue text and decision outcomes are public on NEAR. `raise_issue`, `request_group_vote`, and
+`resolve_issue` use asynchronous reads of the immutable V2 purchase view; the callback is the only
+path that writes the verified result. A decision captures the active funded accounts at open time,
+counts one choice per account, requires a 2/3 matching-choice threshold, rejects votes after
+the deadline, and allows only one active decision per purchase. A supplier-facing pickup decision
+remains pending until the named supplier agrees.
+
+V3 deliberately has no V2 update, withdrawal, payment, refund, price, quantity, supplier, or
+deadline method. Separate V3 instances are deployed on Testnet for V2 and V4; V3 is not a privacy
+layer and is not audited or approved for production use.
+
+Rejected V3 callbacks currently panic after attempting to remove their pending request. Receipt
+rollback restores that request, creating a persistent storage leak that a caller can repeat. This is
+an availability defect, not a path into V4 funds. A new V3 version must use non-panicking rejection
+cleanup and bounded/expiring pending requests before it replaces the deployed prototype.
+Deployment must use a separately controlled account and must verify its configured V2 contract
+before the browser is pointed at it. Callback-backed browser actions must reread V3 state before
+claiming that an asynchronous issue or decision write succeeded.
+
 ### Medium — fulfillment evidence is a claim plus member vote
 
 The contract checks that the named farmer submitted a bounded evidence reference and that funded members approved it; it does not verify a photo, delivery record, GPS, or oracle result. Define evidence formats, dispute handling, and a Sybil-resistant membership process before production.
@@ -37,6 +58,8 @@ The contract checks that the named farmer submitted a bounded evidence reference
 ### Medium — fixed membership and Sybil assumptions
 
 One NEAR account equals one vote only because membership is fixed at initialization. The contract does not prove that an account maps to one real household. Onboarding, account recovery, lost keys, household eligibility, and membership changes require a separately governed contract upgrade or registry.
+
+The additive V2 open-purchase path does not change the global community registry. It gives a purchase-level membership only after an exact native-NEAR commitment succeeds, enforces the funded-household cap during execution, and uses that active commitment for one fulfillment vote. The existing Phase 1 deployment remains fixed-membership until a reviewed upgrade is deployed. The V2/V4 path does not implement NEP-141/USDC; the separate V5 candidate has its own tested `ft_resolve_transfer` unused-token path but remains undeployed and unverified with Circle's live token.
 
 ### Medium — native NEAR price volatility
 

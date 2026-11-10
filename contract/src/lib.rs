@@ -11,10 +11,12 @@ use schemars::JsonSchema;
 const MAX_COMMUNITY_MEMBERS: usize = 100;
 const MAX_PURCHASES: u64 = 100;
 const MAX_PURCHASE_QUANTITY: u32 = 1_000;
+const MAX_FUNDED_MEMBERS: u32 = 20;
 const MAX_EVIDENCE_HASH_BYTES: usize = 256;
 const MAX_ACCOUNT_ID_BYTES: usize = 64;
 const FULL_REFUND_BPS: u16 = 10_000;
 const CALLBACK_GAS: Gas = Gas::from_tgas(20);
+const PURCHASE_CAPACITY_PREFIX: &[u8] = b"harvestpool:v2:purchase-capacity:";
 
 #[derive(BorshSerialize, BorshStorageKey)]
 enum StorageKey {
@@ -139,6 +141,10 @@ pub struct PurchaseView {
     pub fulfillment_yes_votes: u32,
     pub fulfillment_no_votes: u32,
     pub required_fulfillment_yes_votes: Option<u32>,
+    pub open_membership: bool,
+    pub max_funded_members: u32,
+    pub funded_member_count: u32,
+    pub available_funded_member_slots: u32,
     pub commitments: Vec<CommitmentView>,
 }
 
@@ -150,7 +156,18 @@ pub struct ContractConfigView {
     pub max_community_members: u32,
     pub max_purchases: String,
     pub max_purchase_quantity: u32,
+    pub max_funded_members: u32,
+    pub supports_open_membership: bool,
     pub testnet_only: bool,
+}
+
+/// V2 purchase capacity is stored separately so a Phase 1 state can be upgraded without
+/// changing the Borsh layout of the existing Contract or Purchase records. Missing metadata means
+/// the purchase keeps Phase 1's fixed-membership behavior.
+#[derive(BorshDeserialize, BorshSerialize, Clone, Copy)]
+struct PurchaseCapacity {
+    open_membership: bool,
+    max_funded_members: u32,
 }
 
 #[ext_contract(ext_self)]
@@ -231,71 +248,71 @@ impl Contract {
         self.assert_no_attached_deposit();
         let proposer = env::predecessor_account_id();
         self.assert_member(&proposer);
+        self.create_purchase_record(
+            proposer,
+            min_quantity,
+            max_quantity,
+            price_per_unit,
+            deadline_ns,
+            cancellation_deadline_ns,
+            fulfillment_evidence_deadline_ns,
+            farmer_id,
+        )
+    }
 
+    /// Creates a purchase whose funded membership is open after the fixed community approves the
+    /// offer. The proposer must still be an initialized community member so a public link cannot
+    /// unilaterally create a pool. Each account becomes a purchase member only after commit
+    /// succeeds with the exact attached native-NEAR amount.
+    pub fn create_open_purchase(
+        &mut self,
+        min_quantity: u32,
+        max_quantity: u32,
+        max_funded_members: u32,
+        price_per_unit: U128,
+        deadline_ns: U64,
+        cancellation_deadline_ns: U64,
+        fulfillment_evidence_deadline_ns: U64,
+        farmer_id: AccountId,
+    ) -> U64 {
+        self.assert_no_attached_deposit();
+        let proposer = env::predecessor_account_id();
+        self.assert_member(&proposer);
         require!(
-            self.next_purchase_id < MAX_PURCHASES,
-            "purchase limit reached"
-        );
-        require!(min_quantity > 0, "minimum order must be positive");
-        require!(
-            max_quantity >= min_quantity,
-            "maximum must be at least minimum"
+            max_funded_members > 0,
+            "funded-member capacity must be positive"
         );
         require!(
-            max_quantity <= MAX_PURCHASE_QUANTITY,
-            "maximum order exceeds the limit"
+            max_funded_members as usize <= MAX_COMMUNITY_MEMBERS,
+            "funded-member capacity exceeds the limit"
         );
-        require!(price_per_unit.0 > 0, "price must be positive");
+        require!(
+            max_funded_members <= MAX_FUNDED_MEMBERS,
+            "funded-member capacity exceeds the 20-household limit"
+        );
+        require!(
+            max_funded_members <= max_quantity,
+            "funded-member capacity exceeds unit capacity"
+        );
 
-        let now = env::block_timestamp();
-        require!(deadline_ns.0 > now, "deadline must be in the future");
-        require!(
-            cancellation_deadline_ns.0 <= deadline_ns.0,
-            "cancellation deadline must not exceed purchase deadline"
+        let purchase_id = self.create_purchase_record(
+            proposer,
+            min_quantity,
+            max_quantity,
+            price_per_unit,
+            deadline_ns,
+            cancellation_deadline_ns,
+            fulfillment_evidence_deadline_ns,
+            farmer_id,
         );
-        require!(
-            fulfillment_evidence_deadline_ns.0 > deadline_ns.0,
-            "fulfillment deadline must be after purchase deadline"
-        );
-        require!(
-            fulfillment_evidence_deadline_ns
-                .0
-                .checked_sub(deadline_ns.0)
-                .expect("checked above")
-                <= 30 * 24 * 60 * 60 * 1_000_000_000,
-            "fulfillment review window is too long"
-        );
-
-        let purchase_id = self.next_purchase_id;
-        self.next_purchase_id = self
-            .next_purchase_id
-            .checked_add(1)
-            .expect("purchase id overflow");
-
-        self.purchases.insert(
-            &purchase_id,
-            &Purchase {
-                proposer,
-                farmer_id,
-                min_quantity,
-                max_quantity,
-                price_per_unit: price_per_unit.0,
-                deadline_ns: deadline_ns.0,
-                cancellation_deadline_ns: cancellation_deadline_ns.0,
-                fulfillment_evidence_deadline_ns: fulfillment_evidence_deadline_ns.0,
-                cancellation_refund_bps: FULL_REFUND_BPS,
-                failed_order_refund_bps: FULL_REFUND_BPS,
-                state: PurchaseState::Proposed,
-                total_quantity: 0,
-                total_funded_amount: 0,
-                offer_votes: Vec::new(),
-                commitments: Vec::new(),
-                fulfillment_evidence_hash: None,
-                fulfillment_votes: Vec::new(),
+        self.save_purchase_capacity(
+            purchase_id.0,
+            PurchaseCapacity {
+                open_membership: true,
+                max_funded_members,
             },
         );
-
-        U64(purchase_id)
+        purchase_id
     }
 
     /// Each community member may cast exactly one immutable offer vote. A 2/3 supermajority of
@@ -331,8 +348,12 @@ impl Contract {
     #[payable]
     pub fn commit(&mut self, purchase_id: U64, quantity: u32) {
         let account_id = env::predecessor_account_id();
-        self.assert_member(&account_id);
         let mut purchase = self.load_purchase(purchase_id.0);
+        let capacity = self.load_purchase_capacity(purchase_id.0);
+
+        if !capacity.open_membership {
+            self.assert_member(&account_id);
+        }
 
         require!(
             purchase.state == PurchaseState::Open,
@@ -343,6 +364,15 @@ impl Contract {
             "commitment deadline has passed"
         );
         require!(quantity > 0, "quantity must be positive");
+        require!(
+            (purchase
+                .commitments
+                .iter()
+                .filter(|commitment| commitment.state == CommitmentState::Active)
+                .count() as u32)
+                < capacity.max_funded_members,
+            "funded-member capacity reached"
+        );
         require!(
             purchase
                 .total_quantity
@@ -390,8 +420,11 @@ impl Contract {
     pub fn cancel_commitment(&mut self, purchase_id: U64) {
         self.assert_no_attached_deposit();
         let account_id = env::predecessor_account_id();
-        self.assert_member(&account_id);
         let mut purchase = self.load_purchase(purchase_id.0);
+        let capacity = self.load_purchase_capacity(purchase_id.0);
+        if !capacity.open_membership {
+            self.assert_member(&account_id);
+        }
 
         require!(
             purchase.state == PurchaseState::Open,
@@ -661,6 +694,44 @@ impl Contract {
         self.members.clone()
     }
 
+    pub fn get_funded_members(&self, purchase_id: U64) -> Vec<AccountId> {
+        self.load_purchase(purchase_id.0)
+            .commitments
+            .into_iter()
+            .filter(|commitment| commitment.state == CommitmentState::Active)
+            .map(|commitment| commitment.account_id)
+            .collect()
+    }
+
+    pub fn is_funded_member(&self, purchase_id: U64, account_id: AccountId) -> bool {
+        self.load_purchase(purchase_id.0)
+            .commitments
+            .iter()
+            .any(|commitment| {
+                commitment.account_id == account_id && commitment.state == CommitmentState::Active
+            })
+    }
+
+    /// Returns the caller's recorded offer vote, when one exists. This is a read-only projection
+    /// of the immutable on-chain vote record so clients do not need browser storage to decide
+    /// whether the caller may still vote.
+    pub fn get_offer_vote(&self, purchase_id: U64, account_id: AccountId) -> Option<bool> {
+        self.load_purchase(purchase_id.0)
+            .offer_votes
+            .into_iter()
+            .find(|vote| vote.voter == account_id)
+            .map(|vote| vote.approve)
+    }
+
+    /// Returns the caller's recorded fulfillment vote, when one exists.
+    pub fn get_fulfillment_vote(&self, purchase_id: U64, account_id: AccountId) -> Option<bool> {
+        self.load_purchase(purchase_id.0)
+            .fulfillment_votes
+            .into_iter()
+            .find(|vote| vote.voter == account_id)
+            .map(|vote| vote.approve)
+    }
+
     pub fn is_member(&self, account_id: AccountId) -> bool {
         self.is_member_internal(&account_id)
     }
@@ -672,8 +743,87 @@ impl Contract {
             max_community_members: MAX_COMMUNITY_MEMBERS as u32,
             max_purchases: MAX_PURCHASES.to_string(),
             max_purchase_quantity: MAX_PURCHASE_QUANTITY,
+            max_funded_members: MAX_FUNDED_MEMBERS,
+            supports_open_membership: true,
             testnet_only: true,
         }
+    }
+
+    fn create_purchase_record(
+        &mut self,
+        proposer: AccountId,
+        min_quantity: u32,
+        max_quantity: u32,
+        price_per_unit: U128,
+        deadline_ns: U64,
+        cancellation_deadline_ns: U64,
+        fulfillment_evidence_deadline_ns: U64,
+        farmer_id: AccountId,
+    ) -> U64 {
+        require!(
+            self.next_purchase_id < MAX_PURCHASES,
+            "purchase limit reached"
+        );
+        require!(min_quantity > 0, "minimum order must be positive");
+        require!(
+            max_quantity >= min_quantity,
+            "maximum must be at least minimum"
+        );
+        require!(
+            max_quantity <= MAX_PURCHASE_QUANTITY,
+            "maximum order exceeds the limit"
+        );
+        require!(price_per_unit.0 > 0, "price must be positive");
+
+        let now = env::block_timestamp();
+        require!(deadline_ns.0 > now, "deadline must be in the future");
+        require!(
+            cancellation_deadline_ns.0 <= deadline_ns.0,
+            "cancellation deadline must not exceed purchase deadline"
+        );
+        require!(
+            fulfillment_evidence_deadline_ns.0 > deadline_ns.0,
+            "fulfillment deadline must be after purchase deadline"
+        );
+        require!(
+            fulfillment_evidence_deadline_ns
+                .0
+                .checked_sub(deadline_ns.0)
+                .expect("checked above")
+                <= 30 * 24 * 60 * 60 * 1_000_000_000,
+            "fulfillment review window is too long"
+        );
+
+        let purchase_id = self.next_purchase_id;
+        self.next_purchase_id = self
+            .next_purchase_id
+            .checked_add(1)
+            .expect("purchase id overflow");
+
+        self.purchases.insert(
+            &purchase_id,
+            &Purchase {
+                proposer,
+                farmer_id,
+                min_quantity,
+                max_quantity,
+                price_per_unit: price_per_unit.0,
+                deadline_ns: deadline_ns.0,
+                cancellation_deadline_ns: cancellation_deadline_ns.0,
+                fulfillment_evidence_deadline_ns: fulfillment_evidence_deadline_ns.0,
+                cancellation_refund_bps: FULL_REFUND_BPS,
+                failed_order_refund_bps: FULL_REFUND_BPS,
+                state: PurchaseState::Proposed,
+                total_quantity: 0,
+                total_funded_amount: 0,
+                offer_votes: Vec::new(),
+                commitments: Vec::new(),
+                fulfillment_evidence_hash: None,
+                fulfillment_votes: Vec::new(),
+            },
+        );
+
+        U64(purchase_id)
     }
 
     fn load_purchase(&self, purchase_id: u64) -> Purchase {
@@ -692,6 +842,7 @@ impl Contract {
             .iter()
             .filter(|commitment| commitment.state == CommitmentState::Active)
             .count() as u32;
+        let capacity = self.load_purchase_capacity(id);
 
         PurchaseView {
             id: id.to_string(),
@@ -719,6 +870,12 @@ impl Contract {
             } else {
                 Some(required_fulfillment_votes(purchase))
             },
+            open_membership: capacity.open_membership,
+            max_funded_members: capacity.max_funded_members,
+            funded_member_count,
+            available_funded_member_slots: capacity
+                .max_funded_members
+                .saturating_sub(funded_member_count),
             commitments: purchase
                 .commitments
                 .iter()
@@ -753,6 +910,26 @@ impl Contract {
             "this method does not accept an attached deposit"
         );
     }
+
+    fn load_purchase_capacity(&self, purchase_id: u64) -> PurchaseCapacity {
+        env::storage_read(&purchase_capacity_key(purchase_id))
+            .and_then(|bytes| PurchaseCapacity::try_from_slice(&bytes).ok())
+            .unwrap_or(PurchaseCapacity {
+                open_membership: false,
+                max_funded_members: self.members.len() as u32,
+            })
+    }
+
+    fn save_purchase_capacity(&self, purchase_id: u64, capacity: PurchaseCapacity) {
+        let bytes = borsh::to_vec(&capacity).expect("purchase capacity serialization failed");
+        env::storage_write(&purchase_capacity_key(purchase_id), &bytes);
+    }
+}
+
+fn purchase_capacity_key(purchase_id: u64) -> Vec<u8> {
+    let mut key = PURCHASE_CAPACITY_PREFIX.to_vec();
+    key.extend_from_slice(&purchase_id.to_le_bytes());
+    key
 }
 
 fn mark_active_commitments_refundable(purchase: &mut Purchase) {
@@ -842,6 +1019,29 @@ mod tests {
         id.0
     }
 
+    fn create_open_purchase_with_capacity(
+        contract: &mut Contract,
+        max_quantity: u32,
+        max_funded_members: u32,
+    ) -> u64 {
+        context(accounts(0), NOW, 0);
+        let id = contract.create_open_purchase(
+            1,
+            max_quantity,
+            max_funded_members,
+            U128(PRICE),
+            U64(NOW + DAY),
+            U64(NOW + DAY),
+            U64(NOW + 2 * DAY),
+            accounts(3),
+        );
+        for member in [accounts(0), accounts(1)] {
+            context(member, NOW + 1, 0);
+            contract.vote_on_offer(id, true);
+        }
+        id.0
+    }
+
     #[test]
     fn only_funded_commitments_count_and_duplicate_is_rejected() {
         let mut contract = contract();
@@ -880,6 +1080,85 @@ mod tests {
     }
 
     #[test]
+    fn open_membership_separates_unit_capacity_from_funded_household_capacity() {
+        let mut contract = contract();
+        let id = create_open_purchase_with_capacity(&mut contract, 100, 2);
+
+        context(accounts(3), NOW + 2, PRICE * 10);
+        contract.commit(U64(id), 10);
+        context(accounts(4), NOW + 3, PRICE * 10);
+        contract.commit(U64(id), 10);
+
+        let view = contract.get_purchase(U64(id)).unwrap();
+        assert!(view.open_membership);
+        assert_eq!(view.max_quantity, 100);
+        assert_eq!(view.total_quantity, 20);
+        assert_eq!(view.funded_member_count, 2);
+        assert_eq!(view.available_funded_member_slots, 0);
+
+        context(accounts(5), NOW + 4, PRICE);
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            contract.commit(U64(id), 1)
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn open_purchase_caps_funded_households_at_twenty() {
+        let mut contract = contract();
+        context(accounts(0), NOW, 0);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            contract.create_open_purchase(
+                20,
+                25,
+                21,
+                U128(PRICE),
+                U64(NOW + DAY),
+                U64(NOW + DAY),
+                U64(NOW + 2 * DAY),
+                accounts(3),
+            )
+        }));
+        assert!(result.is_err());
+        assert_eq!(contract.get_config().max_funded_members, 20);
+    }
+
+    #[test]
+    fn open_member_can_cancel_and_reclaim_a_funded_spot() {
+        let mut contract = contract();
+        let id = create_open_purchase_with_capacity(&mut contract, 10, 2);
+
+        context(accounts(3), NOW + 2, PRICE);
+        contract.commit(U64(id), 1);
+        context(accounts(3), NOW + 3, 0);
+        contract.cancel_commitment(U64(id));
+
+        let view = contract.get_purchase(U64(id)).unwrap();
+        assert_eq!(view.total_quantity, 0);
+        assert_eq!(view.available_funded_member_slots, 2);
+        assert_eq!(view.commitments[0].state, CommitmentState::Refundable);
+    }
+
+    #[test]
+    fn unfunded_account_cannot_vote_on_fulfillment() {
+        let mut contract = contract();
+        let id = create_open_purchase_with_capacity(&mut contract, 2, 2);
+
+        context(accounts(3), NOW + 2, PRICE);
+        contract.commit(U64(id), 1);
+        context(accounts(0), NOW + DAY, 0);
+        contract.finalize_purchase(U64(id));
+        context(accounts(3), NOW + DAY + 1, 0);
+        contract.submit_fulfillment_evidence(U64(id), "delivery-hash".to_string());
+
+        context(accounts(4), NOW + DAY + 2, 0);
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            contract.vote_on_fulfillment(U64(id), true)
+        }))
+        .is_err());
+    }
+
+    #[test]
     fn offer_requires_two_thirds_and_nonmember_cannot_vote() {
         let mut contract = contract();
         context(accounts(0), NOW, 0);
@@ -900,10 +1179,13 @@ mod tests {
 
         context(accounts(0), NOW + 1, 0);
         contract.vote_on_offer(id, true);
+        assert_eq!(contract.get_offer_vote(id, accounts(0)), Some(true));
+        assert_eq!(contract.get_offer_vote(id, accounts(1)), None);
         let view = contract.get_purchase(id).unwrap();
         assert_eq!(view.state, PurchaseState::Proposed);
         context(accounts(1), NOW + 1, 0);
         contract.vote_on_offer(id, true);
+        assert_eq!(contract.get_offer_vote(id, accounts(1)), Some(true));
         assert_eq!(
             contract.get_purchase(id).unwrap().state,
             PurchaseState::Open

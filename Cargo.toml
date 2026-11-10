@@ -1,5 +1,12 @@
 [workspace]
-members = ["contract"]
+members = [
+    "contract",
+    "contract-v3",
+    "contract-v3-v5",
+    "contract-v4",
+    "contract-v5",
+    "mock-usdc",
+]
 resolver = "2"
 
 [profile.release]

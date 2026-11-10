@@ -11,3 +11,4 @@ web/metadata.sqlite3
 *.jks
 credentials.json
 secrets.json
+.harvestpool-server.pid
