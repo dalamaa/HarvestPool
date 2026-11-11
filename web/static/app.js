@@ -104,6 +104,9 @@
   const RECONCILIATION_MAX_AGE_MS = 5 * 60_000;
   const TRANSACTION_BUNDLE_VERSION = "2026-11-10.2";
   const WALLET_RESULT_TIMEOUT_MS = 15_000;
+  const EXPLORE_REFRESH_INTERVAL_MS = 15_000;
+  const CREATE_SUBMITTED_KEY = "harvestpool:create-submitted:v1";
+  let exploreRefreshTimer = null;
 
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
@@ -170,7 +173,9 @@
           contributeButton.parentNode.insertBefore(discardButton, contributeButton);
         }
       }
-      const restored = draftTools.restore(surface, formId, draftContext(surface));
+      const isCreateForm = surface.id === "create-purchase-form";
+      const savedDraft = draftTools.read(formId, draftContext(surface));
+      const restored = !isCreateForm && draftTools.restore(surface, formId, draftContext(surface));
       const purchaseField = $("[name='purchase_id']", surface);
       if (purchaseField?.value) surface.dataset.draftPurchaseId = purchaseField.value;
       if (restored) {
@@ -181,6 +186,11 @@
           const actions = $(".draft-actions", surface);
           actions?.insertAdjacentHTML("beforebegin", '<p class="draft-restored-note" role="status">Saved draft restored. Continue where you left off or start fresh.</p>');
         }
+      }
+      if (isCreateForm && savedDraft && !surface.dataset.draftRestored && !$(".draft-restoration", surface)) {
+        const actions = $(".draft-actions", surface);
+        const anchor = $(".form-intro", surface) || actions;
+        anchor?.insertAdjacentHTML(anchor === actions ? "beforebegin" : "afterend", '<div class="draft-restoration" role="status"><div><strong>Saved draft available</strong><span>Your last unfinished deal is kept on this device.</span></div><button class="button button-outline button-small" type="button" data-action="restore-draft">Restore saved draft</button></div>');
       }
       if (pendingForDraft(draftReference(surface))) {
         surface.dataset.v3ConfirmationUncertain = "true";
@@ -213,7 +223,7 @@
     const unconnectedContext = { ...connectedContext, walletId: "unconnected" };
     if (draftTools.read(formId, connectedContext)) return false;
     if (!draftTools.copy(formId, unconnectedContext, connectedContext)) return false;
-    draftTools.restore(form, formId, connectedContext);
+    restoreDraftForSurface(form);
     draftTools.clear(formId, unconnectedContext);
     updateSaleUnitFields();
     updateCreationModeCopy();
@@ -242,6 +252,27 @@
     const formId = draftFormId(target);
     if (!target || !formId) return;
     draftTools.clear(formId, { ...draftContext(target), ...context });
+  }
+
+  function restoreDraftForSurface(surface) {
+    const target = draftSurface(surface);
+    const formId = draftFormId(target);
+    if (!target || !formId || !draftTools.restore(target, formId, draftContext(target))) return false;
+    target.dataset.draftRestored = "true";
+    $(".draft-restoration", target)?.remove();
+    const discard = $("[data-action='discard-draft']", target);
+    if (discard) discard.textContent = "Start fresh";
+    if (!$(".draft-restored-note", target)) {
+      const actions = $(".draft-actions", target);
+      actions?.insertAdjacentHTML("beforebegin", '<p class="draft-restored-note" role="status">Saved draft restored. Continue where you left off or start fresh.</p>');
+    }
+    if (target.id === "create-purchase-form") {
+      updateSaleUnitFields();
+      updateSupplierSelection();
+      updateCreationModeCopy();
+      updateTimezoneControls();
+    }
+    return true;
   }
 
   function technicalDetailsMarkup(error) {
@@ -1012,6 +1043,21 @@
     return state.refreshingLiveData;
   }
 
+  function scheduleExploreRefresh() {
+    if (appConfig.page !== "explore" || document.visibilityState !== "visible" || exploreRefreshTimer !== null) return;
+    exploreRefreshTimer = window.setTimeout(async () => {
+      exploreRefreshTimer = null;
+      if (document.visibilityState !== "visible") return;
+      await refreshLiveData({ force: true }).catch(() => null);
+      scheduleExploreRefresh();
+    }, EXPLORE_REFRESH_INTERVAL_MS);
+  }
+
+  function stopExploreRefresh() {
+    if (exploreRefreshTimer !== null) window.clearTimeout(exploreRefreshTimer);
+    exploreRefreshTimer = null;
+  }
+
   async function loadV3Data() {
     state.issues = [];
     state.decisions = [];
@@ -1254,10 +1300,10 @@
     const phase = current.phase || "confirming";
     const title = phase === "wallet" ? "Sending this action through Meteor…" : actionProgressCopy(current.methodName);
     const message = phase === "wallet"
-      ? "Meteor may request approval. If this account already granted a matching limited Testnet permission, it may submit without opening a new popup."
+      ? "Review the request in your wallet. No action is complete until the deal record confirms it."
       : phase === "unresolved"
         ? "We haven't confirmed the result yet. Please don't submit again while we check."
-        : "Your request was submitted. Confirming the authoritative contract state and callbacks…";
+        : "Your request was submitted. We’re checking the result now…";
     notice.innerHTML = `<div><strong>${escapeHtml(title)}</strong><span>${escapeHtml(message)}</span></div>`;
   }
 
@@ -1617,10 +1663,10 @@
     setBusy(button, true, "Waiting for wallet…");
     options.onPhase?.(
       "wallet",
-      "Sending this action through Meteor…",
-      "Meteor may request approval. A matching limited Testnet permission can submit this action without opening a new popup.",
+      "Review the request in your wallet…",
+      "Approve only after checking the account, amount, and action.",
     );
-    showToast("Sending this action through Meteor. It may use an existing limited permission without opening another popup.");
+    showToast("Review the request in your wallet.");
     try {
       const walletWait = await confirmationTools.waitForWalletResult(
         Promise.resolve().then(action),
@@ -1633,8 +1679,8 @@
       }
       if (walletWait.state === "rejected") throw walletWait.error;
       const walletResult = walletWait.value;
-      options.onPhase?.("submitted", "Your request was submitted.", "Confirming your request against authoritative contract state.");
-      showToast("Your request was submitted.");
+      options.onPhase?.("submitted", "Your request was submitted.", "We’re checking the result now.");
+      showToast("Request sent. Checking the result.");
       const outcome = confirmedTransaction(walletResult);
       if (options.confirmOnReturn !== false) {
         options.onPhase?.("confirmed", options.confirmedTitle || "Action confirmed", successMessage);
@@ -1780,9 +1826,8 @@
     const supplierId = supplierAccount(purchase);
     const supplier = purchase.supplier_business_name || (supplierId ? `Supplier · ${shortAccount(supplierId)}` : "Supplier not set");
     const detailsUrl = `/deals/${encodeURIComponent(purchase.id)}`;
-    const spots = fundedMemberCapacity(purchase);
     const memberAlreadyJoined = isFundedMember(purchase) || Boolean(commitmentFor(purchase));
-    const canJoin = !memberAlreadyJoined && purchase.state === "Open" && !deadlineHasPassed(purchase.deadline_ns) && availableCapacity(purchase) > 0 && spots > 0;
+    const canJoin = !memberAlreadyJoined && filterTools.isAvailable(purchase);
     const primaryUrl = canJoin ? `/deals/${encodeURIComponent(purchase.id)}/join` : detailsUrl;
     const primaryLabel = canJoin ? "Join This Deal" : memberAlreadyJoined ? "View Your Group Buy" : "View Deal";
     const price = listedUsd(purchase);
@@ -1809,12 +1854,13 @@
     const allPurchases = state.purchases;
     const visiblePurchases = filterTools.filterPurchases(allPurchases, activeFilter);
     const liveVisible = visiblePurchases;
-    const filterLabel = activeFilter === "all" ? "all purchases" : activeFilter === "live" ? "live purchases" : `${activeFilter} purchases`;
+    const filterLabels = { available: "available deals", "in-progress": "in-progress deals", closed: "closed deals", all: "all deals" };
+    const filterLabel = filterLabels[activeFilter] || "deals";
     const liveContent = state.dataLoaded
-      ? liveVisible.length ? liveVisible.map(renderPurchaseCard).join("") : `<div class="lane-empty"><h3>No ${escapeHtml(activeFilter === "all" ? "available" : activeFilter)} purchases yet.</h3><p>When a purchase is open, its terms and contribution action will appear here.</p><a class="button button-outline button-small" href="/create">Start a purchase</a></div>`
+      ? liveVisible.length ? liveVisible.map(renderPurchaseCard).join("") : `<div class="lane-empty"><h3>No ${escapeHtml(filterLabel)} yet.</h3><p>When a purchase is open, its terms and contribution action will appear here.</p><a class="button button-outline button-small" href="/create">Start a purchase</a></div>`
       : `<div class="live-unavailable"><span class="status status-pending"><span></span>Purchases are temporarily unavailable</span><p>We could not read the available purchase list right now. No membership, vote, or payment is shown until the purchase data is confirmed.</p><button class="button button-outline button-small" type="button" data-action="reload-live-data">Try again</button></div>`;
     const totalVisible = visiblePurchases.length;
-    grid.innerHTML = `<section class="purchase-source live-source"><div class="source-heading source-heading-compact"><strong>${totalVisible} ${totalVisible === 1 ? "deal" : "deals"}</strong><span class="live-source-label"><span class="live-pulse"></span>Live contract status</span></div><div class="purchase-grid purchase-grid-live">${liveContent}</div></section>`;
+    grid.innerHTML = `<section class="purchase-source live-source"><div class="source-heading source-heading-compact"><strong>${totalVisible} ${totalVisible === 1 ? "deal" : "deals"}</strong><span class="live-source-label"><span class="live-pulse"></span>Authoritative Testnet state</span></div><div class="purchase-grid purchase-grid-live">${liveContent}</div></section>`;
     if (empty) {
       empty.hidden = !state.dataLoaded || totalVisible !== 0;
       const heading = $("h2", empty);
@@ -1828,20 +1874,17 @@
   function normalizeExploreFilters() {
     const tabs = $(".filter-tabs");
     if (!tabs) return;
-    const labels = { all: "All", live: "Live", open: "Open", funded: "Funded", completed: "Completed" };
+    const labels = { available: "Available", "in-progress": "In Progress", closed: "Closed", all: "All" };
     $$(".filter-tab", tabs).forEach((button) => {
       const filter = String(button.dataset.filter || "all").toLowerCase();
       button.dataset.filter = filter;
-      if (labels[filter]) button.textContent = labels[filter];
+      if (!labels[filter]) {
+        button.remove();
+        return;
+      }
+      button.textContent = labels[filter];
+      button.setAttribute("aria-pressed", String(button.classList.contains("active")));
     });
-    if (!$(".filter-tab[data-filter=live]", tabs)) {
-      const live = document.createElement("button");
-      live.className = "filter-tab";
-      live.type = "button";
-      live.dataset.filter = "live";
-      live.textContent = "Live";
-      tabs.insertBefore(live, $(".filter-tab[data-filter=open]", tabs) || null);
-    }
   }
 
   function detailsEligibility(purchase, mode = "contribute") {
@@ -1993,7 +2036,7 @@
     const relevantTasks = actionCenterTasks().filter((task) => String(task.purchaseId) === String(purchase.id));
     const failed = purchase.state === "Failed" ? `<div class="deal-state-explanation"><strong>Why this deal failed</strong><span>${escapeHtml(failureReason(purchase))}</span></div>` : "";
     const joinDeadlineCopy = presentationState(purchase) === "DeadlinePassed"
-      ? "New contributions are blocked. The contract still needs finalization before the final result is shown."
+      ? "New contributions are blocked. HarvestPool is processing the authoritative final result automatically."
       : "Buyers can join until this cutoff.";
     const deadlineGuidance = `<section class="deal-deadlines" aria-label="Deal deadlines"><div><span>Last day to join</span><strong>${escapeHtml(formatDate(purchase.deadline_ns, true))}</strong><small>${escapeHtml(dealTimeTools.deadlineSummary(purchase.deadline_ns))} ${escapeHtml(joinDeadlineCopy)}</small></div><div><span>Fulfillment deadline</span><strong>${escapeHtml(formatDate(purchase.fulfillment_evidence_deadline_ns, true))}</strong><small>${escapeHtml(dealTimeTools.fulfillmentWindow(purchase.deadline_ns, purchase.fulfillment_evidence_deadline_ns).summary)} This gives the supplier time to prepare the group order.</small></div></section>`;
     root.innerHTML = `<div class="details-top"><div><p class="eyebrow">Group Deal #${escapeHtml(purchase.id)}</p><h1>${escapeHtml(livePurchaseTitle(purchase))}</h1><p class="supplier-line">From <strong>${escapeHtml(supplierName(purchase))}</strong> · ${escapeHtml(purchase.supplier_location || "Location not listed")}</p></div><div class="details-actions"><button class="share-button" type="button" data-action="share-purchase" data-purchase-id="${escapeHtml(purchase.id)}">${icon("link")}Share Group Deal</button>${action}</div></div>${actionAlertsMarkup(relevantTasks, "This deal needs your attention")}${refundNoticeMarkup(purchase)}${deadlineGuidance}
@@ -2063,7 +2106,7 @@
       ? `Total: ${escapeHtml(listed)} per ${escapeHtml(unit)}. Payment uses ${escapeHtml(testPaymentLabel(purchase, purchase.price_per_unit))} per ${escapeHtml(unit)} through your wallet. No USD card charge.`
       : `Total: ${escapeHtml(paymentLabel(purchase, purchase.price_per_unit))} per ${escapeHtml(unit)} through your NEAR Testnet wallet.`;
     const totalLabel = isV5(purchase) ? "Total" : "Wallet contribution";
-    const closedCopy = presentationState(purchase) === "DeadlinePassed" ? `<div class="eligibility-callout warning"><span><strong>Joining is closed.</strong><br>The deadline passed. The contract must be finalized before the outcome is shown as Funded or Failed.</span></div>` : "";
+    const closedCopy = presentationState(purchase) === "DeadlinePassed" ? `<div class="eligibility-callout warning"><span><strong>Joining is closed.</strong><br>HarvestPool is processing the authoritative result automatically. This status alone does not mean the worker failed.</span></div>` : "";
     root.innerHTML = `<div class="agreement-header"><p class="eyebrow">Deal Terms · #${escapeHtml(purchase.id)}</p><h1>${canContribute || !state.accountId ? "Review the deal before you join." : "Review this deal's current status."}</h1></div>${closedCopy}<div class="agreement-grid"><section class="agreement-copy"><span class="section-kicker">Deal Terms</span><h2>${escapeHtml(livePurchaseTitle(purchase))}</h2><dl class="term-list agreement-terms"><div class="term-row"><dt>What you receive</dt><dd>${escapeHtml(purchase.description)}</dd></div>${contents ? `<div class="term-row"><dt>Package contents</dt><dd>Each ${escapeHtml(unit)} contains ${escapeHtml(contents)}</dd></div>` : ""}<div class="term-row"><dt>Supplier</dt><dd>${escapeHtml(supplierName(purchase))} · ${escapeHtml(purchase.supplier_location)}</dd></div><div class="term-row"><dt>Listed price</dt><dd>${escapeHtml(listed)} per ${escapeHtml(unit)}</dd></div><div class="term-row"><dt>Payment details</dt><dd>${isV5(purchase) ? `${escapeHtml(paymentLabel(purchase, purchase.price_per_unit))} per ${escapeHtml(unit)} using native Circle Testnet USDC. No USD card charge.` : `${escapeHtml(paymentLabel(purchase, purchase.price_per_unit))} per ${escapeHtml(unit)} using native Testnet NEAR.`}</dd></div><div class="term-row"><dt>Group target</dt><dd>${quantityLabel(purchase, purchase.min_quantity)} by ${escapeHtml(formatDate(purchase.deadline_ns, true))}</dd></div><div class="term-row"><dt>Buyer limit</dt><dd>Maximum ${quantityLabel(purchase, purchase.max_quantity_per_household)} per buyer</dd></div><div class="term-row"><dt>Voluntary cancellation ends</dt><dd>${escapeHtml(formatDate(purchase.cancellation_deadline_ns, true))}</dd></div><div class="term-row"><dt>If the deal does not go ahead</dt><dd>${escapeHtml(purchase.cancellation_and_refund_terms)}</dd></div><div class="term-row"><dt>How delivery is confirmed</dt><dd>Each funded buyer gets one public fulfillment vote, regardless of quantity.</dd></div><div class="term-row"><dt>When the supplier is paid</dt><dd>Only after the supplier submits delivery details and enough funded buyers approve fulfillment.</dd></div></dl>${detailsEligibility(purchase)}</section><aside class="contribution-panel"><span class="section-kicker">${canContribute ? "Join This Deal" : escapeHtml(formatStatus(presentationState(purchase)))}</span><h2>${escapeHtml(listed)} per ${escapeHtml(unit)}</h2><p>${paymentCopy}</p><div class="contribution-summary"><div><span>Buyer spots</span><strong>${escapeHtml(spotLabel(fundedSpots))}</strong></div><div><span>Available</span><strong>${quantityLabel(purchase, capacity)}</strong></div><div><span>Buyer limit</span><strong>${quantityLabel(purchase, purchase.max_quantity_per_household)}</strong></div><div><span>Last day to join</span><strong>${escapeHtml(formatDate(purchase.deadline_ns))}</strong></div></div>${contributionState}${!state.accountId ? `<button class="button contribution-connect" type="button" data-connect-wallet>Connect wallet</button>` : ""}<div class="quantity-field"><label for="contribution-quantity">How many ${escapeHtml(pluralUnit(unit))}?</label><div class="quantity-input-wrap"><button type="button" aria-label="Decrease quantity" data-action="quantity-minus" ${canContribute ? "" : "disabled"}>−</button><input id="contribution-quantity" type="number" min="1" max="${Math.max(1, Math.min(capacity, Number(purchase.max_quantity_per_household || capacity)))}" value="1" ${canContribute ? "" : "disabled"}><button type="button" aria-label="Increase quantity" data-action="quantity-plus" ${canContribute ? "" : "disabled"}>+</button></div></div><div class="quantity-total"><span>${totalLabel}</span><strong id="contribution-total">${isV5(purchase) ? escapeHtml(listed) : moneyMarkup(purchase.price_per_unit)}</strong></div><div class="agreement-acceptance"><input id="agreement-acceptance" type="checkbox" required ${canContribute ? "" : "disabled"}><label for="agreement-acceptance">I have read and accept the Deal Terms, contribution amount, cancellation rules, and refund conditions.</label></div><button class="button" type="button" data-action="contribute" data-purchase-id="${escapeHtml(purchase.id)}" data-eligible="${canContribute ? "true" : "false"}" disabled>${confirming ? "Confirming Payment…" : canContribute ? "Join This Deal" : "Joining unavailable"}</button><p class="contribution-footnote">Your spot appears in My Group Buys only after the contribution is confirmed.</p></aside></div>`;
     root.dataset.price = purchase.price_per_unit;
     updateContributionTotal();
@@ -2123,9 +2166,7 @@
     else if (purchase.state === "Open" && (availableCapacity(purchase) === 0 || fundedMemberCapacity(purchase) === 0)) primaryAction = `<span class="group-full-label" role="status">Group Full</span>`;
     else if (purchase.state === "Proposed") primaryAction = `<a class="button button-primary" href="/decisions">Review offer vote <span aria-hidden="true">↗</span></a>`;
     else if (isFundedMember(purchase)) primaryAction = `<a class="button button-dark" href="/dashboard">Open your dashboard <span aria-hidden="true">↗</span></a>`;
-    const finalizeAction = (purchase.state === "Proposed" || purchase.state === "Open") && deadlineHasPassed(purchase.deadline_ns)
-      ? `<button class="button button-outline" type="button" data-action="finalize" data-purchase-id="${escapeHtml(purchase.id)}">Finalize after deadline</button>`
-      : "";
+    const finalizeAction = "";
     const shareUrl = `${window.location.origin}/share/${encodeURIComponent(purchase.id)}`;
     root.innerHTML = `<div class="details-top"><div><p class="eyebrow">Purchase #${escapeHtml(purchase.id)} · existing V2 terms</p><h1>${escapeHtml(livePurchaseTitle(purchase))}</h1><p class="supplier-line">Named supplier wallet: <strong>${escapeHtml(shortAccount(purchase.farmer_id))}</strong></p><p class="details-description">${escapeHtml(livePurchaseDescription(purchase))}</p></div><div class="details-actions"><button class="share-button" type="button" data-action="share-purchase" data-purchase-id="${escapeHtml(purchase.id)}">${icon("link")}Share purchase</button>${finalizeAction}${primaryAction}</div></div><div class="details-layout"><div><section class="detail-panel funding-panel"><span class="section-kicker">Group funding</span><h2>${escapeHtml(formatStatus(purchase.state))}</h2><p class="funding-description">${escapeHtml(livePurchaseDescription(purchase))}</p><div class="funding-big"><strong>${total} / ${max}</strong><span>units funded</span></div><div class="progress-label"><span>${fundedCount} / ${fundedCapacity} funded households</span><span>${progress}% of units</span></div><div class="progress-track"><span style="width: ${progress}%"></span></div><div class="funding-meta"><div><strong>${escapeHtml(formatNear(purchase.price_per_unit))} NEAR</strong><span>price / unit</span></div><div><strong>${escapeHtml(spotLabel(fundedMemberCapacity(purchase)))}</strong><span>household capacity</span></div><div><strong>${availableCapacity(purchase)} units</strong><span>unit capacity left</span></div><div><strong>${escapeHtml(formatDate(purchase.deadline_ns))}</strong><span>last day to contribute</span></div></div></section><section class="detail-panel" style="margin-top: 18px"><span class="section-kicker">Group members</span><h2>Who has a funded place</h2><p class="field-help">Only active contributions count as funded members.</p><div class="members-list">${active.length ? active.map((commitment) => `<div class="member-row"><span class="member-id">${escapeHtml(shortAccount(commitment.account_id))}</span><span class="member-quantity">${commitment.quantity} unit${commitment.quantity === 1 ? "" : "s"} · ${escapeHtml(formatNear(commitment.amount))} NEAR</span></div>`).join("") : '<p class="field-help">No funded members yet.</p>'}</div></section></div><aside><section class="detail-panel detail-panel-dark"><span class="section-kicker">Purchase agreement</span><h2>What you receive, pay, and approve</h2><dl class="term-list"><div class="term-row"><dt>Product</dt><dd>${escapeHtml(livePurchaseTitle(purchase))}</dd></div><div class="term-row"><dt>Minimum order</dt><dd>${purchase.min_quantity} units</dd></div><div class="term-row"><dt>Maximum order</dt><dd>${purchase.max_quantity} units</dd></div><div class="term-row"><dt>Contribution</dt><dd>${escapeHtml(formatNear(purchase.price_per_unit))} Testnet NEAR per unit</dd></div><div class="term-row"><dt>Before contributions open</dt><dd>This existing V2 purchase requires ${purchase.required_offer_yes_votes} community approvals.</dd></div><div class="term-row"><dt>Delivery confirmation</dt><dd>${purchase.required_fulfillment_yes_votes ? `${purchase.required_fulfillment_yes_votes} funded households must approve` : "Set after the group is funded"}</dd></div><div class="term-row"><dt>Cancel by</dt><dd>${escapeHtml(formatDate(purchase.cancellation_deadline_ns, true))}</dd></div><div class="term-row"><dt>Fulfillment review by</dt><dd>${escapeHtml(formatDate(purchase.fulfillment_evidence_deadline_ns, true))}</dd></div><div class="term-row"><dt>Supplier payment</dt><dd>Only after approved delivery evidence</dd></div><div class="term-row"><dt>If the order fails</dt><dd>${refundRateLabel(purchase.failed_order_refund_bps)} refund becomes claimable</dd></div></dl>${detailsEligibility(purchase)}<details class="technical-details"><summary>Wallet and contract details</summary><p>Supplier wallet: ${escapeHtml(purchase.farmer_id)}</p><p>Organizer wallet: ${escapeHtml(purchase.proposer)}</p></details></section></aside></div>`;
     root.insertAdjacentHTML("beforeend", renderPurchaseIssues(purchase));
@@ -2182,7 +2223,6 @@
     const actions = $(".details-actions");
     if (!purchase || !actions) return;
     const actionMarkup = [];
-    if ((purchase.state === "AwaitingSupplier" || purchase.state === "Open") && deadlineHasPassed(purchase.deadline_ns)) actionMarkup.push(`<button class="button button-outline" type="button" data-action="finalize" data-purchase-id="${escapeHtml(purchase.id)}">Review finalization</button>`);
     if ((purchase.state === "Funded" || purchase.state === "FulfillmentPending") && deadlineHasPassed(purchase.fulfillment_evidence_deadline_ns)) actionMarkup.push(`<button class="button button-outline" type="button" data-action="expire-unfulfilled" data-purchase-id="${escapeHtml(purchase.id)}">Mark unfulfilled</button>`);
     if (actionMarkup.length) actions.insertAdjacentHTML("beforeend", actionMarkup.join(""));
     // Contract-wide escrow controls intentionally stay off public purchase pages.
@@ -2297,7 +2337,15 @@
       if (isMember() && offerDecision && purchase.state !== "Proposed") rows.push(`<div class="decision-history-row"><div><strong>Offer decision · purchase #${escapeHtml(purchase.id)}</strong><span>Your recorded decision: ${offerDecision.approve ? "Yes" : "No"} · ${purchase.state === "Failed" ? "Order did not complete" : "Offer moved past proposal"}</span></div><a href="/purchases/${encodeURIComponent(purchase.id)}" target="_blank" rel="noopener noreferrer">Review <span aria-hidden="true">↗</span></a></div>`);
       if (isFundedMember(purchase) && fulfillmentDecision && ["FulfillmentApproved", "PaymentPending", "Completed", "Failed"].includes(purchase.state)) rows.push(`<div class="decision-history-row"><div><strong>${isV5(purchase) ? "Testnet evidence decision" : "Fulfillment decision"} · purchase #${escapeHtml(purchase.id)}</strong><span>Your recorded decision: ${fulfillmentDecision.approve ? "Approve" : "Reject"} · ${purchase.state === "Failed" ? "Order failed; refunds follow contract" : isV5(purchase) ? (purchase.state === "Completed" ? "Simulated evidence approved; Testnet payment completed. No physical delivery is represented." : "Simulated evidence approved. No physical delivery is represented.") : purchase.state === "Completed" ? "Delivery approved; payment completed" : "Delivery approved"}</span></div><a href="/purchases/${encodeURIComponent(purchase.id)}" target="_blank" rel="noopener noreferrer">Review <span aria-hidden="true">↗</span></a></div>`);
     });
-    return rows.length ? `<section class="decision-history"><div class="section-heading-inline"><div><span class="section-kicker">Past decisions</span><h2>Outcomes from the contract</h2></div><span class="meta-label">Public voting record</span></div><div class="decision-history-list">${rows.join("")}</div></section>` : "";
+    state.decisions.forEach((decision) => {
+      const vote = decisionVoteFor(decision);
+      if (!vote || ["Open", "AwaitingSupplier"].includes(decision.state)) return;
+      rows.push("<div class=\"decision-history-row\"><div><strong>" + escapeHtml(decision.proposal) + "</strong><span>" + escapeHtml(decisionStateLabel(decision.state)) + " · your choice: " + escapeHtml(decision.options[vote.option] || "Choice") + "</span></div><a href=\"/purchases/" + encodeURIComponent(decision.purchase_id) + "\">Open purchase <span aria-hidden=\"true\">↗</span></a></div>");
+    });
+    const historyContent = rows.length
+      ? "<div class=\"decision-history-list\">" + rows.join("") + "</div>"
+      : "<div class=\"issues-empty\"><p>No completed actions yet.</p><span>Confirmed votes and resolved actions will appear here.</span></div>";
+    return "<section class=\"action-center-section action-history\" aria-labelledby=\"action-history-heading\"><div class=\"section-heading-inline\"><div><span class=\"section-kicker\">History</span><h2 id=\"action-history-heading\">Completed actions</h2></div><span class=\"meta-label\">Confirmed records</span></div>" + historyContent + "</section>";
   }
 
   function renderRaiseIssueForm(selectedPurchaseId = "") {
@@ -2309,22 +2357,18 @@
     return `<form class="issue-form" id="raise-issue-form" data-issue-form data-draft-form="raise-issue" data-draft-purchase-id="${escapeHtml(selected)}"><div class="form-intro"><span class="form-step">Raise an issue</span><p>Keep it practical. You can ask for a clarification or suggest a safe pickup change.</p></div><div class="field"><label for="issue-purchase">Which purchase is this about?</label><select id="issue-purchase" name="purchase_id" required>${eligiblePurchases.map((purchase) => `<option value="${escapeHtml(purchase.id)}" ${String(purchase.id) === selected ? "selected" : ""}>${escapeHtml(livePurchaseTitle(purchase))} · purchase #${escapeHtml(purchase.id)}</option>`).join("")}</select></div><div class="field"><label for="issue-subject">What is the issue about?</label><input id="issue-subject" name="subject" type="text" maxlength="120" placeholder="Pickup time no longer works" required></div><div class="field"><label for="issue-description">Describe the problem or concern.</label><textarea id="issue-description" name="description" maxlength="2000" rows="5" placeholder="Tell the group what changed and what would help." required></textarea></div><div class="field"><label for="issue-solution">What solution do you suggest? <span class="field-optional">Optional</span></label><textarea id="issue-solution" name="suggested_solution" maxlength="1000" rows="3" placeholder="A practical suggestion, if you have one."></textarea></div><div class="form-error-summary" id="issue-form-error" tabindex="-1" role="alert" hidden></div><div class="form-actions"><span class="form-safety">Only confirmed funded members can raise issues.</span><div class="draft-actions"><button class="button button-outline button-small" type="button" data-action="discard-draft">Discard draft</button><button class="button button-primary" type="submit">Submit issue</button></div></div></form>`;
   }
 
-  function renderV3Dashboard() {
+  function renderV3Dashboard(activeIssueIds = new Set()) {
     if (!appConfig.v3ContractId) {
       return `<section class="issues-section"><div class="section-heading-inline"><div><span class="section-kicker">Issues raised</span><h2>Make room for the practical stuff.</h2></div></div><div class="issues-unavailable"><p>Member issues will appear here when this community turns them on.</p></div></section>`;
     }
     if (!state.v3Available) {
       return `<section class="issues-section"><div class="section-heading-inline"><div><span class="section-kicker">Issues raised</span><h2>Issues are temporarily unavailable.</h2></div></div><div class="issues-unavailable"><p>Refresh to check the latest issues and group decisions.</p></div></section>`;
     }
-    const visibleIssues = state.issues.filter(canSeeIssue);
-    const past = state.decisions.filter((decision) => decisionVoteFor(decision) && !["Open", "AwaitingSupplier"].includes(decision.state));
+    const visibleIssues = state.issues.filter((issue) => canSeeIssue(issue) && !activeIssueIds.has(String(issue.id)));
     const issuesMarkup = visibleIssues.length
       ? `<div class="issue-list">${visibleIssues.map((issue) => renderIssueCard(issue)).join("")}</div>`
       : `<div class="issues-empty"><p>No issues have been raised in your funded purchases.</p><span>Start with a practical concern if something has changed.</span></div>`;
-    const pastMarkup = past.length
-      ? `<div class="decision-history-list">${past.map((decision) => `<div class="decision-history-row"><div><strong>${escapeHtml(decision.proposal)}</strong><span>${escapeHtml(decisionStateLabel(decision.state))} · your choice: ${escapeHtml(decision.options[decisionVoteFor(decision).option] || "Choice")}</span></div><a href="/purchases/${encodeURIComponent(decision.purchase_id)}">Open purchase <span aria-hidden="true">↗</span></a></div>`).join("")}</div>`
-      : `<div class="issues-empty"><p>Your recorded group decisions will show here.</p><span>Votes remain public so everyone can see the same outcome.</span></div>`;
-    return `<section class="issues-section"><div class="section-heading-inline"><div><span class="section-kicker">Issues</span><h2>Open and historical issues</h2></div><a class="button button-primary button-small" href="#raise-an-issue">Raise an issue</a></div>${issuesMarkup}</section><section class="decision-history"><div class="section-heading-inline"><div><span class="section-kicker">Completed community decisions</span><h2>Recorded outcomes</h2></div><span class="meta-label">Public voting record</span></div>${pastMarkup}</section><section class="raise-issue-block" id="raise-an-issue"><div class="section-heading-inline"><div><span class="section-kicker">Start a conversation</span><h2>Raise an issue</h2></div></div>${renderRaiseIssueForm()}</section>`;
+    return `<section class="action-center-section action-issues" aria-labelledby="action-issues-heading"><div class="section-heading-inline"><div><span class="section-kicker">Issues</span><h2 id="action-issues-heading">Open concerns</h2></div><a class="button button-primary button-small" href="#raise-an-issue">Raise an issue</a></div>${issuesMarkup}<div class="raise-issue-block" id="raise-an-issue"><div class="section-heading-inline"><div><span class="section-kicker">Start a conversation</span><h3>Raise an issue</h3></div></div>${renderRaiseIssueForm()}</div></section>`;
   }
 
   function renderDecisions() {
@@ -2335,6 +2379,7 @@
       return;
     }
     const tasks = actionCenterTasks();
+    const activeIssueIds = new Set(tasks.filter((task) => ["community-vote", "supplier-consent"].includes(task.kind)).map((task) => String(task.issueId)));
     const cards = tasks.map((task) => {
       if (["offer-vote", "fulfillment-vote"].includes(task.kind)) {
         const purchase = state.purchases.find((item) => String(item.id) === String(task.purchaseId));
@@ -2360,8 +2405,8 @@
     }).filter(Boolean);
     const active = cards.length
       ? `<section class="action-center-active" aria-labelledby="active-actions-heading"><div class="section-heading-inline"><div><span class="section-kicker">Eligible now</span><h2 id="active-actions-heading">${cards.length} ${cards.length === 1 ? "action" : "actions"} need your attention</h2></div></div><div class="decision-grid">${cards.join("")}</div></section>`
-      : `<section class="action-center-empty"><div class="empty-icon">${icon("shield")}</div><h2>You’re all caught up.</h2><p>No supplier proposal, vote, refund, or unresolved transaction is currently eligible for this account.</p></section>`;
-    root.innerHTML = `<div class="dashboard-toolbar"><div><span class="section-kicker">Connected account</span><h2>${escapeHtml(shortAccount(state.accountId))}</h2></div><span class="wallet-caption">${cards.length} pending</span></div>${active}${renderDecisionHistory(state.purchases)}${renderV3Dashboard()}`;
+      : `<section class="action-center-section action-center-empty" aria-labelledby="pending-actions-heading"><div class="section-heading-inline"><div><span class="section-kicker">Pending</span><h2 id="pending-actions-heading">Nothing needs attention</h2></div></div><div class="empty-icon">${icon("shield")}</div><p>No supplier proposal, vote, refund, or unresolved transaction is currently eligible for this account.</p></section>`;
+    root.innerHTML = `<div class="dashboard-toolbar"><div><span class="section-kicker">Action Center</span><h2>Pending, history, and issues</h2></div><span class="wallet-caption">${cards.length} pending</span></div>${active.replace("Eligible now", "Pending")}${renderDecisionHistory(state.purchases)}${renderV3Dashboard(activeIssueIds)}`;
   }
 
   function renderIssueFormPage() {
@@ -2518,29 +2563,6 @@
       failureMessage: "We couldn't record your vote. Your draft is safe. Please try again.",
       alreadyMessage: `Your recorded choice is already ${approve ? "Yes" : "No"}.`,
     });
-  }
-
-  async function handleFinalize(button, purchase) {
-    if (!purchase) return;
-    const fresh = await loadPurchase(purchase.id).catch(() => null);
-    if (!fresh || !["Open", "AwaitingSupplier"].includes(fresh.state) || !deadlineHasPassed(fresh.deadline_ns)) {
-      showToast("Finalization is unavailable: the finalized purchase state or deadline check did not pass.", "error");
-      return;
-    }
-    const reviewed = await reviewTransaction({
-      title: `Finalize Deal #${fresh.id}`,
-      summary: "Apply the contract's deadline and minimum rules to set the final deal state.",
-      signer: state.accountId,
-      receiver: appConfig.contractId,
-      method: "finalize_purchase",
-      args: { purchase_id: String(fresh.id) },
-      gas: "30 Tgas (30000000000000 gas)",
-      deposit: "0 NEAR",
-      warning: "This does not transfer USDC. The contract, not this interface, decides whether the deal becomes Funded or Failed.",
-      confirmLabel: "Finalize deal",
-    });
-    if (!reviewed) return;
-    return handleSimpleAction(button, "finalize_purchase", { purchase_id: String(fresh.id) }, "Purchase finalized on-chain.");
   }
 
   async function handleReconcile(button) {
@@ -3311,20 +3333,38 @@
   }
 
   function setCreateDefaults() {
-    const deadline = $("#purchase-deadline");
-    const cancel = $("#cancellation-deadline");
-    const fulfillment = $("#fulfillment-deadline");
-    const handoff = $("#handoff-time");
-    if (!deadline || !fulfillment) return;
-    const now = new Date();
-    const orderDeadline = new Date(now.getTime() + 7 * 86400000);
-    const reviewDeadline = new Date(now.getTime() + 14 * 86400000);
-    const zone = businessTimeZone();
-    deadline.value = dealTimeTools.wallTimeValue(orderDeadline, zone);
-    if (cancel) cancel.value = dealTimeTools.wallTimeValue(orderDeadline, zone);
-    fulfillment.value = dealTimeTools.wallTimeValue(reviewDeadline, zone);
-    if (handoff) handoff.value = dealTimeTools.wallTimeValue(reviewDeadline, zone);
+    const form = $("#create-purchase-form");
+    if (!form) return;
+    form.reset();
+    $$("input, textarea, select", form).forEach((field) => {
+      if (field.name === "creation_mode") field.checked = field.value === "organizer_request";
+      else if (field.name === "fulfillment_method") field.value = "Pickup";
+      else if (field.name === "business_timezone") field.value = dealTimeTools.DEFAULT_BUSINESS_TIME_ZONE;
+      else if (field.type === "checkbox" || field.type === "radio") field.checked = false;
+      else field.value = "";
+    });
+    delete form.dataset.draftRestored;
+    $(".draft-restored-note", form)?.remove();
+    $(".draft-restoration", form)?.remove();
+    clearCreateValidationState(form);
     updateTimezoneControls();
+  }
+
+  function clearSubmittedCreateReturn() {
+    if (appConfig.page !== "create") return;
+    let submitted = false;
+    try {
+      submitted = window.sessionStorage.getItem(CREATE_SUBMITTED_KEY) === "true";
+      if (submitted) window.sessionStorage.removeItem(CREATE_SUBMITTED_KEY);
+    } catch (_error) {
+      return;
+    }
+    if (!submitted) return;
+    const form = $("#create-purchase-form");
+    if (!form) return;
+    clearDraft(form);
+    setCreateDefaults();
+    setCreateError("");
   }
 
   function toNanoseconds(value, timeZone = dealTimeTools.browserTimeZone()) {
@@ -3336,12 +3376,137 @@
     setErrorSummary(summary, message, error);
   }
 
+  function createField(form, name) {
+    return form?.elements?.namedItem(name) || form?.querySelector("[name=\"" + name + "\"]");
+  }
+
+  function clearFieldError(field) {
+    if (!field) return;
+    const container = field.closest(".field, .choice-fieldset") || field.parentElement;
+    container?.classList.remove("field-invalid");
+    field.removeAttribute("aria-invalid");
+    const errorId = field.dataset.errorId;
+    if (errorId) document.getElementById(errorId)?.remove();
+    delete field.dataset.errorId;
+    const describedBy = String(field.getAttribute("aria-describedby") || "").split(/\s+/).filter(Boolean);
+    if (errorId) field.setAttribute("aria-describedby", describedBy.filter((id) => id !== errorId).join(" "));
+    if (!field.getAttribute("aria-describedby")) field.removeAttribute("aria-describedby");
+  }
+
+  function clearCreateValidationState(form) {
+    if (!form) return;
+    $$("[data-error-id]", form).forEach(clearFieldError);
+    $$(".field-invalid", form).forEach((field) => field.classList.remove("field-invalid"));
+    const summary = $(".form-error-summary", form);
+    if (summary) {
+      summary.replaceChildren();
+      summary.hidden = true;
+    }
+    delete form.dataset.validationActive;
+  }
+
+  function setFieldError(field, message) {
+    if (!field) return;
+    const container = field.closest(".field, .choice-fieldset") || field.parentElement;
+    clearFieldError(field);
+    const errorId = String(field.id || field.name) + "-error";
+    const error = document.createElement("span");
+    error.id = errorId;
+    error.className = "field-error";
+    error.textContent = message;
+    error.setAttribute("role", "alert");
+    container?.classList.add("field-invalid");
+    container?.appendChild(error);
+    field.dataset.errorId = errorId;
+    field.setAttribute("aria-invalid", "true");
+    const describedBy = String(field.getAttribute("aria-describedby") || "").split(/\s+/).filter(Boolean);
+    field.setAttribute("aria-describedby", [...describedBy, errorId].join(" "));
+  }
+
+  function showCreateValidationErrors(form, errors) {
+    clearCreateValidationState(form);
+    errors.forEach((error) => setFieldError(createField(form, error.name), error.message));
+    const summary = $(".form-error-summary", form);
+    if (!summary) return;
+    summary.innerHTML = "<strong>Check " + (errors.length === 1 ? "this field" : "these fields") + " before continuing.</strong><ul>" + errors.map((error) => "<li><a href=\"#" + escapeHtml(error.id || error.name) + "\">" + escapeHtml(error.message) + "</a></li>").join("") + "</ul>";
+    summary.hidden = false;
+    form.dataset.validationActive = "true";
+    summary.focus();
+  }
+
+  function validateCreateForm(form, version) {
+    const values = new FormData(form);
+    const errors = [];
+    const required = [
+      ["product_name", "Enter a product name."],
+      ["description", "Describe what buyers receive."],
+      ["farmer_id", "Choose a verified supplier."],
+      ["sale_unit", "Choose how the product is sold."],
+      ["listed_price_usd", "Enter the listed price."],
+      ["min_quantity", "Enter the minimum quantity."],
+      ["max_quantity", "Enter the total quantity available."],
+      ["max_quantity_per_household", "Enter the buyer limit."],
+      ["max_funded_members", "Enter the maximum number of buyers."],
+      ["deadline", "Choose the last day to join."],
+      ["fulfillment_deadline", "Choose the fulfillment deadline."],
+      ["handoff_time", "Choose a pickup date and time."],
+      ["fulfillment_location", "Enter a pickup location."],
+      ["cancellation_and_refund_terms", "Explain the cancellation and refund policy."],
+    ];
+    required.forEach(([name, message]) => {
+      if (!String(values.get(name) || "").trim()) errors.push({ name, message });
+    });
+    const minQuantity = Number(values.get("min_quantity"));
+    const maxQuantity = Number(values.get("max_quantity"));
+    const maxFundedMembers = Number(values.get("max_funded_members"));
+    const perBuyer = Number(values.get("max_quantity_per_household"));
+    if (String(values.get("min_quantity") || "").trim() && (!Number.isInteger(minQuantity) || minQuantity < 1)) {
+      errors.push({ name: "min_quantity", message: "Use a whole-number minimum of at least 1." });
+    }
+    if (String(values.get("max_quantity") || "").trim() && (!Number.isInteger(maxQuantity) || maxQuantity < 1 || maxQuantity < minQuantity)) {
+      errors.push({ name: "max_quantity", message: "Use a whole number at least as large as the minimum." });
+    }
+    const maxAllowedFundedMembers = Number(state.config?.max_funded_members || 20);
+    if (String(values.get("max_funded_members") || "").trim() && (!Number.isInteger(maxFundedMembers) || maxFundedMembers < 1 || maxFundedMembers > maxAllowedFundedMembers)) {
+      errors.push({ name: "max_funded_members", message: "Use a whole number from 1 to " + maxAllowedFundedMembers + "." });
+    }
+    if (String(values.get("max_quantity_per_household") || "").trim() && (!Number.isInteger(perBuyer) || perBuyer < 1 || perBuyer > maxQuantity)) {
+      errors.push({ name: "max_quantity_per_household", message: "The buyer limit must be between 1 and the total quantity." });
+    }
+    if ([minQuantity, maxFundedMembers, perBuyer].every(Number.isInteger) && maxFundedMembers * perBuyer < minQuantity) {
+      errors.push({ name: "max_funded_members", message: "These limits cannot reach the minimum of " + minQuantity + ". Increase buyers or the per-buyer limit." });
+    }
+    const listedPrice = Number(values.get("listed_price_usd"));
+    if (String(values.get("listed_price_usd") || "").trim() && (!Number.isFinite(listedPrice) || listedPrice <= 0)) {
+      errors.push({ name: "listed_price_usd", message: "Enter a price greater than $0.00." });
+    }
+    if (version !== "V5" && String(values.get("price_per_unit") || "").trim() && Number(values.get("price_per_unit")) <= 0) {
+      errors.push({ name: "price_per_unit", message: "Enter a Testnet contribution greater than zero." });
+    }
+    try {
+      const zone = String(values.get("business_timezone") || businessTimeZone());
+      const deadline = toNanoseconds(String(values.get("deadline") || ""), zone);
+      const fulfillment = toNanoseconds(String(values.get("fulfillment_deadline") || ""), zone);
+      dealCreationTools.validateDeadlines(deadline, fulfillment);
+    } catch (error) {
+      if (String(values.get("deadline") || "").trim() && String(values.get("fulfillment_deadline") || "").trim()) {
+        errors.push({ name: "fulfillment_deadline", message: error.message || "Choose a valid fulfillment deadline after the join deadline." });
+      }
+    }
+    return { errors, values };
+  }
+
   async function handleCreate(form) {
     setCreateError("");
     const version = String(state.config?.version || appConfig.contractVersion || "").toUpperCase();
     const isV4 = ["V4", "V5"].includes(version);
     if (!isV4) {
       setCreateError("New purchases are paused while this app remains connected to the preserved V2 contract. The corrected supplier-authorized flow requires a separately deployed V4 contract; no transaction was attempted.");
+      return;
+    }
+    const validation = validateCreateForm(form, version);
+    if (validation.errors.length) {
+      showCreateValidationErrors(form, validation.errors);
       return;
     }
     if (!state.wallet || !state.accountId) {
@@ -3353,7 +3518,7 @@
       if (connected) showCreateConnectionFollowup();
       return;
     }
-    const values = new FormData(form);
+    const values = validation.values;
     const minQuantity = Number(values.get("min_quantity"));
     const maxQuantity = Number(values.get("max_quantity"));
     const maxFundedMembers = Number(values.get("max_funded_members"));
@@ -3365,6 +3530,7 @@
     const fulfillmentDeadline = String(values.get("fulfillment_deadline") || "");
     const handoffTime = String(values.get("handoff_time") || "");
     const businessZone = String(values.get("business_timezone") || businessTimeZone());
+    clearCreateValidationState(form);
     if (!Number.isInteger(minQuantity) || !Number.isInteger(maxQuantity) || minQuantity < 1 || maxQuantity < minQuantity) { setCreateError("Check the quantities: the maximum must be at least the positive minimum."); return; }
     const maxAllowedFundedMembers = Number(state.config?.max_funded_members || 20);
     if (!Number.isInteger(maxFundedMembers) || maxFundedMembers < 1 || maxFundedMembers > maxAllowedFundedMembers) { setCreateError(`Funded household capacity must be a whole number from 1 to ${maxAllowedFundedMembers}.`); return; }
@@ -3445,6 +3611,7 @@
         return;
       }
       clearDraft(form);
+      window.sessionStorage.setItem(CREATE_SUBMITTED_KEY, "true");
       window.location.href = `/purchases/${encodeURIComponent(String(id))}`;
     } catch (error) {
       setCreateError("The wallet returned, but the new purchase could not be verified yet. Your draft is safe. Refresh before trying again.", error);
@@ -3452,7 +3619,7 @@
   }
 
   const GUARDED_TRANSACTION_ACTIONS = new Set([
-    "contribute", "accept-supplier-request", "decline-supplier-request", "vote", "finalize",
+    "contribute", "accept-supplier-request", "decline-supplier-request", "vote",
     "cancel-commitment", "claim-refund", "expire-unfulfilled", "reconcile-escrow", "release-payment",
     "decision-vote", "resolve-issue", "agree-decision", "decline-decision", "expire-decision",
   ]);
@@ -3465,7 +3632,6 @@
     if (action === "accept-supplier-request") return handleSupplierRequestAction(button, purchase, "accept");
     if (action === "decline-supplier-request") return handleSupplierRequestAction(button, purchase, "decline");
     if (action === "vote") return handleVote(button);
-    if (action === "finalize") return handleFinalize(button, purchase);
     if (action === "cancel-commitment") return handleSimpleAction(button, "cancel_commitment", { purchase_id: String(button.dataset.purchaseId) }, "Commitment cancelled on-chain. The refund is now claimable.");
     if (action === "claim-refund") return handleSimpleAction(button, "claim_refund", { purchase_id: String(button.dataset.purchaseId) }, `${commitment ? customerPaymentLabel(purchase, commitment.amount) : "Refund"} claim submitted. Wait for confirmation before trying again.`);
     if (action === "expire-unfulfilled") return handleSimpleAction(button, "expire_unfulfilled_purchase", { purchase_id: String(button.dataset.purchaseId) }, "Purchase marked failed on-chain. Refunds are now claimable.");
@@ -3491,7 +3657,11 @@
       $("#menu-toggle").setAttribute("aria-label", open ? "Close navigation" : "Open navigation");
     });
     $$(".filter-tab").forEach((button) => button.addEventListener("click", () => {
-      $$(".filter-tab").forEach((tab) => tab.classList.toggle("active", tab === button));
+      $$(".filter-tab").forEach((tab) => {
+        const active = tab === button;
+        tab.classList.toggle("active", active);
+        tab.setAttribute("aria-pressed", String(active));
+      });
       renderExplore();
     }));
     $("#create-purchase-form")?.addEventListener("submit", (event) => {
@@ -3533,6 +3703,11 @@
       }
       if (action === "discard-draft") {
         discardDraftForSurface(actionButton);
+        return;
+      }
+      if (action === "restore-draft") {
+        const surface = draftSurface(actionButton);
+        if (restoreDraftForSurface(surface)) showToast("Saved draft restored.", "success");
         return;
       }
       if (action === "reload-live-data") {
@@ -3592,6 +3767,13 @@
       }
     });
     document.addEventListener("input", (event) => {
+      const createForm = event.target.closest?.("#create-purchase-form");
+      if (createForm) {
+        clearFieldError(event.target);
+        if (!$(".field-invalid", createForm)) {
+          $(".form-error-summary", createForm)?.setAttribute("hidden", "");
+        }
+      }
       if (event.target.id === "contribution-quantity") updateContributionTotal();
       if (event.target.id === "price-per-unit") updateCreatePricePreview();
       if (event.target.id === "listed-usd-price") updateCreatePricePreview();
@@ -3600,6 +3782,8 @@
       saveDraft(event.target);
     });
     document.addEventListener("change", (event) => {
+      const createForm = event.target.closest?.("#create-purchase-form");
+      if (createForm) clearFieldError(event.target);
       handleDraftContextChange(event.target);
       if (event.target.id === "agreement-acceptance") updateAgreementAcceptance();
       if (event.target.id === "sale-unit") updateSaleUnitFields();
@@ -3632,6 +3816,7 @@
     bindGlobalEvents();
     updateTimezoneControls();
     setCreateDefaults();
+    clearSubmittedCreateReturn();
     updateSaleUnitFields();
     updateCreationModeCopy();
     updateCreatePricePreview();
@@ -3656,11 +3841,22 @@
     document.body.classList.remove("wallet-session-loading");
     renderCurrentPage();
     window.setInterval(loadNearPrice, 60_000);
-    window.addEventListener("pageshow", () => refreshLiveData().catch(() => null));
+    window.addEventListener("pageshow", () => {
+      clearSubmittedCreateReturn();
+      if (document.visibilityState === "visible") {
+        refreshLiveData().catch(() => null);
+        scheduleExploreRefresh();
+      }
+    });
     window.addEventListener("focus", () => refreshLiveData().catch(() => null));
     document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible") refreshLiveData().catch(() => null);
+      if (document.visibilityState === "visible") {
+        refreshLiveData().catch(() => null);
+        scheduleExploreRefresh();
+      } else stopExploreRefresh();
     });
+    window.addEventListener("pagehide", stopExploreRefresh);
+    scheduleExploreRefresh();
     if (["details", "agreement", "issue_form", "supplier_invitation"].includes(appConfig.page)) {
       if (state.currentPurchase) {
         if (appConfig.page === "details") { renderDetailsPage(); decorateDetailsActions(); }

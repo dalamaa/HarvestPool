@@ -8,16 +8,17 @@ uncomfortable confrontations, and protect their pooled funds from unilateral wit
 rules for commitments, payments, and refunds give both buyers and farmers greater confidence.
 
 This is a working NEAR Testnet hackathon prototype, not an audited production marketplace. The
-current configured V4 payment asset is **native Testnet NEAR**. An isolated V5 native-USDC contract
-and corrected V3-for-V5 contract are deployed on Testnet and have completed a low-value Circle USDC
-financial journey. V4 remains the default environment while the V5 path stays isolated for the next
-UX pass. See the [verified V5 financial baseline](docs/v5-financial-baseline.md).
+canonical local application is V5 on **Circle Testnet USDC**, with its dedicated V3-for-V5 governance
+contract. Both are deployed on Testnet and have completed a low-value financial journey. V4 uses
+native Testnet NEAR and remains available only as a legacy application. See the [verified V5
+financial baseline](docs/v5-financial-baseline.md).
 
 The release boundaries are intentional:
 
-- **V4** is deployed and tested on NEAR Testnet with native Testnet NEAR.
-- **V5** is deployed and verified with Circle Testnet USDC for a successful supplier payout and a
-  failed-purchase refund; local Sandbox coverage remains part of the regression suite.
+- **V5** is the canonical local application and is deployed and verified with Circle Testnet USDC
+  for a successful supplier payout and a failed-purchase refund; local Sandbox coverage remains
+  part of the regression suite.
+- **V4** is a legacy application on NEAR Testnet with native Testnet NEAR.
 - **V3-for-V5** is deployed and verified with funded-member voting and supplier consent against V5.
 - **Circle USDC Testnet payments** are verified for the documented low-value Testnet journey only;
   this is not production-payment or delivery evidence.
@@ -42,7 +43,7 @@ HarvestPool assigns those responsibilities to explicit NEAR contract rules:
 The Flask application presents the marketplace. It does not sign for users, hold pooled funds,
 decide eligibility, or release payment.
 
-### Isolated V5 native-USDC candidate
+### V5 native-USDC application
 
 - Exact six-decimal NEP-141 contributions through the configured token's `ft_transfer_call` and
   V5 `ft_on_transfer`; wrong token/message/amount returns the full unused amount.
@@ -109,11 +110,11 @@ recovery. Those limits are stated below and in
 
 ```mermaid
 flowchart LR
-    U[Customer / organizer / supplier] --> A[Flask + Jinja UI<br/>127.0.0.1:5010]
+    U[Customer / organizer / supplier] --> A[Flask + Jinja UI<br/>127.0.0.1:5011]
     U -->|authorizes| W[NEAR wallet]
-    A -->|read-only RPC| P[V4 purchase + escrow<br/>native Testnet NEAR]
+    A -->|read-only RPC| P[V5 purchase + escrow<br/>Circle Testnet USDC]
     W -->|signed change call| P
-    A -->|read-only RPC| D[V3-for-V4 decisions]
+    A -->|read-only RPC| D[V3-for-V5 decisions]
     W -->|signed issue / vote / consent| D
     D -->|verify purchase + funded members| P
     P --> N[NEAR Testnet state + receipts]
@@ -133,8 +134,8 @@ flowchart LR
 
 The contracts use Rust, `near-sdk` 5.30.1, Borsh, promises and callbacks. Integration tests use
 `near-workspaces` 0.24.0-rc.2 with local NEAR Sandbox. The browser uses public JSON-RPC and NEAR
-Wallet Selector. V4 uses native NEAR; isolated V5 uses NEP-141/NEP-145 and remains separate from
-the default V4 configuration.
+Wallet Selector. The canonical V5 app uses NEP-141/NEP-145. V4 uses native NEAR and is kept
+separate as a legacy configuration.
 
 ## Current Testnet contracts
 
@@ -187,12 +188,14 @@ cp .env.example .env
 The example environment contains public identifiers only:
 
 ```dotenv
-PORT=5010
+PORT=5011
 NEAR_NETWORK=testnet
-HARVESTPOOL_CONTRACT_ID=harvestpool-v4-dalamaa-20261109.testnet
-HARVESTPOOL_CONTRACT_VERSION=V4
-HARVESTPOOL_V3_CONTRACT_ID=harvestpool-v3-v4-dalamaa-20261109.testnet
+HARVESTPOOL_CONTRACT_ID=harvestpool-v5-usdc-dalamaa-20261109.testnet
+HARVESTPOOL_CONTRACT_VERSION=V5
+HARVESTPOOL_V3_CONTRACT_ID=harvestpool-v3-v5-dalamaa-20261109.testnet
+HARVESTPOOL_USDC_TOKEN_ID=3e2210e1184b45b64c8a434c0a7e7b23cc04ea7eb7a6c3c32520d03d4afcb8af
 HARVESTPOOL_PUBLIC_BASE_URL=
+HARVESTPOOL_FINALIZER_ENABLED=false
 ```
 
 Never put a seed phrase, private key, wallet credential, or mainnet account secret in `.env`.
@@ -212,9 +215,9 @@ With the virtual environment active:
 ./status.sh
 ```
 
-Open <http://127.0.0.1:5010>. The controlled development process keeps port **5010**, writes its log
-to the system temporary directory, and refuses to terminate an unrelated process that owns the
-port. Stop or restart it with:
+Open <http://127.0.0.1:5011>. The controlled development process keeps port **5011**, writes its log
+to the system temporary directory, validates the V5 contracts and Circle token before starting,
+and refuses to terminate an unrelated process that owns the port. Stop or restart it with:
 
 ```sh
 ./stop.sh
@@ -224,20 +227,29 @@ port. Stop or restart it with:
 Public browsing does not require a wallet. Signed calls require an authorized Testnet wallet and
 may change Testnet state; they are not part of fresh-install verification.
 
-To review the isolated V5 UI without replacing the V4 `.env` or the controlled V4 process, use a
-separate shell and explicit public configuration:
+If port 5011 is occupied, run `./status.sh` and inspect the listener with:
 
 ```sh
-PORT=5011 \
-HARVESTPOOL_CONTRACT_ID=harvestpool-v5-usdc-dalamaa-20261109.testnet \
-HARVESTPOOL_CONTRACT_VERSION=V5 \
-HARVESTPOOL_V3_CONTRACT_ID=harvestpool-v3-v5-dalamaa-20261109.testnet \
-HARVESTPOOL_USDC_TOKEN_ID=3e2210e1184b45b64c8a434c0a7e7b23cc04ea7eb7a6c3c32520d03d4afcb8af \
-python -m flask --app web.app run --host 127.0.0.1 --port 5011
+lsof -nP -iTCP:5011 -sTCP:LISTEN
 ```
 
-`start.sh`, `stop.sh`, and `restart.sh` control only the default V4 service on port 5010. They are
-not V5 launchers.
+Do not kill an unknown PID by port. Stop the owning service through its own supervisor, then rerun
+`./start.sh`; the HarvestPool scripts fail closed when the port is occupied and do not fall back to
+V4.
+
+## Legacy V4 application
+
+V4 on port 5010 is preserved for comparison and historical workflows. It is not controlled by the
+root scripts and is never a V5 fallback. Use the explicitly named legacy launcher only when V4 is
+intentionally required:
+
+```sh
+scripts/restart-v4.sh
+scripts/stop-v4.sh
+```
+
+The legacy launcher uses the documented V4 purchase and V3-for-V4 contracts, its own port, and the
+legacy PID file. Keep V4 and V5 processes separate.
 
 ## Run tests
 
@@ -260,7 +272,20 @@ The optional worker discovers V5 deals whose join deadline has passed and submit
 `finalize_purchase`. It persists the signed transaction before broadcast, reconciles unknown
 outcomes before retrying, and requires a function-call key restricted to that one method and V5
 receiver. It never releases supplier payment or submits buyer refunds. The worker is disabled by
-default; `python -m automation.finalizer --once` is therefore a safe configuration smoke check.
+default. Use `python -m automation.finalizer --once --dry-run --purchase-id 4` for a true live,
+read-only eligibility check that cannot sign or broadcast and is isolated to one purchase.
+
+Use `python -m automation.finalizer` for the portable foreground service. It supports graceful
+SIGINT/SIGTERM shutdown, persistent SQLite recovery, and a stale-heartbeat health check. Judges can
+verify the historical Deal #4 Testnet receipt without credentials using
+`python -m automation.verify_finalization`.
+
+For local operation, `./start.sh` starts the finalizer only when
+`HARVESTPOOL_FINALIZER_ENABLED=true` and a private, permission-checked credential file is
+configured. A credentials file alone never activates it. `./restart.sh` restarts only the V5 web
+process, preserving an active worker; `./stop.sh` stops both locally managed services gracefully;
+`./status.sh` reports web health and finalizer enabled/disabled state, heartbeat, and worker health
+separately. The checked-in default is disabled, so the website works without a finalizer key.
 
 Provisioning, health checks, exact contract semantics, test scope, and remaining manual settlement
 operations are in [Automatic finalization](docs/automatic-finalization.md).
@@ -393,6 +418,9 @@ volatility; it does not guarantee issuer availability, redemption, fulfillment, 
 | `contract-v3-v5/` | Corrected, isolated decision contract for V5 membership |
 | `mock-usdc/` | Local six-decimal NEP-141/NEP-145 test fixture; not Circle's contract |
 | `web/` | Flask/Jinja application, browser wallet/RPC adapter, frontend tests |
+| `start.sh`, `restart.sh`, `stop.sh`, `status.sh` | Canonical V5 local process controls on port 5011 |
+| `scripts/restart-v4.sh`, `scripts/stop-v4.sh` | Explicit legacy V4 process controls on port 5010 |
+| `AGENTS.md` | Permanent V5, wallet-safety, process, and test instructions for coding agents |
 | `automation/` | Disabled-by-default, permission-limited V5 finalization worker and tests |
 | `docs/automatic-finalization.md` | Worker security boundary, runbook, retries, and settlement limits |
 | `docs/release-fitness-report.md` | Clean-checkout, workflow, live-state, and release-gate evidence |

@@ -1,117 +1,223 @@
-# V5 automatic finalization: design, operation, and limits
+# V5 automatic finalization
 
-## Contract rule verified from source
+## Scope and contract rule
 
-The deployed V5 contract's `finalize_purchase(purchase_id)` method is a permissionless,
-zero-deposit lifecycle call. It accepts only `Open` or `AwaitingSupplier` after the join deadline.
-It cannot finalize early, even when the minimum has already been reached.
+`automation/finalizer.py` is the portable Python implementation. It is a separate foreground
+process, not part of Flask, and needs no buyer, supplier, organizer, or browser session. The
+deployed V5 method `finalize_purchase(purchase_id)` is permissionless and accepts zero deposit only
+after the join deadline:
 
-| Authoritative state at/after cutoff | Result |
+| Authoritative state at cutoff | Contract result |
 | --- | --- |
-| `Open` and `total_quantity >= min_quantity` | `Funded` |
-| `Open` below the minimum | `Failed`; active commitments become `Refundable` |
+| `Open`, minimum reached | `Funded` |
+| `Open`, below minimum | `Failed`; active commitments become `Refundable` |
 | `AwaitingSupplier` | `Failed`; active commitments, if any, become `Refundable` |
-| `Funded`, `Failed`, `Completed`, or any other state | Call rejects with no lifecycle change |
+| Any final or other state | Rejected; no lifecycle change |
 
-Anyone may call the method; there is no organizer or owner check. Finalization itself never sends
-USDC. It does not release supplier payment, claim a buyer refund, reconcile escrow, or approve
-fulfillment. Those separations are why a narrowly restricted automation key is safe for this one
-operation.
+Finalization never transfers USDC. It cannot release supplier payment, claim a refund, reconcile
+escrow, approve fulfillment, or modify a deployed contract.
 
-## Worker behavior
+## Portable quick start for judges
 
-`automation/finalizer.py` is an independent polling process. It does not run inside Flask and does
-not require a customer browser to be open. Every poll:
-
-1. verifies the target reports the expected Testnet V5 native-USDC configuration;
-2. reads finalized chain time, purchase count, and every purchase through JSON-RPC;
-3. records only deadline-passed `Open`/`AwaitingSupplier` purchases in SQLite;
-4. obtains a database lease, then rereads the purchase before signing;
-5. verifies the service key is a function-call key restricted to the configured V5 account and
-   exactly `finalize_purchase`;
-6. writes the signed transaction bytes and hash to SQLite before broadcasting;
-7. confirms the final result from authoritative purchase state, never from submission alone; and
-8. records transitions and errors in `finalizations` and append-only `finalization_events` tables.
-
-Two workers sharing the same SQLite database cannot acquire the same purchase lease or global
-signer lease. Only one transaction may remain in flight for the service key, preventing nonce
-collisions even when different deals become eligible together. A restart sees the persisted
-transaction hash. When an RPC response is lost, the worker checks both transaction status
-and purchase state before doing anything else. It may rebroadcast the exact same signed bytes a
-bounded number of times; it never signs a second transaction while the first outcome is unknown.
-A confirmed contract rejection is retained for operator review rather than retried blindly.
-
-The `/healthz` endpoint reports whether automation is enabled, the last poll/error, and durable row
-counts by status. Logs are structured JSON events inside ordinary timestamped process logs.
-
-## Configuration and key boundary
-
-The checked-in default is disabled. A read-only smoke check therefore needs no credential:
+From a fresh clone, Python 3.10+ runs the web app, worker tests, dry runs, and receipt verification;
+Node.js runs the browser tests, and Rust is optional for contract tests. No NEAR credential is
+needed:
 
 ```sh
-python -m automation.finalizer --once
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r web/requirements.txt
+python -m unittest -v automation.test_finalizer
+node --test web/static/*.test.js
 ```
 
-Intentional activation requires a dedicated service account and a function-call access key whose
-on-chain permission has:
+On Windows PowerShell, activate with `.venv\Scripts\Activate.ps1`; the remaining Python and Node
+commands are identical.
 
-- receiver: `harvestpool-v5-usdc-dalamaa-20261109.testnet`;
-- method names: exactly `finalize_purchase`;
-- no attached-deposit capability (inherent to a NEAR function-call key); and
-- a deliberately funded gas allowance/account balance appropriate for Testnet operations.
+On Linux/macOS, copy the public example configuration and use the root launcher:
 
-Store the standard NEAR credential JSON outside the repository with filesystem mode `0600`. The
-worker refuses group/world-readable credential files, Full Access keys, another receiver, an empty
-method list, or any additional method such as `release_payment`.
+```sh
+cp .env.example .env
+./start.sh
+```
+
+This starts the read-only V5 web app on `http://127.0.0.1:5011`. On any platform, set the public
+values from `.env.example` in the current shell and run the same portable Flask command directly:
+
+```sh
+python -m flask --app web.app run --host 127.0.0.1 --port 5011 --no-debugger --no-reload
+```
+
+The browser reads public Testnet purchases from
+`harvestpool-v5-usdc-dalamaa-20261109.testnet`. Flask has no signing key.
+
+### Simulated logic versus real Testnet evidence
+
+These tests are isolated simulations; they never contact Testnet or sign:
+
+```sh
+python -m unittest -v \
+  automation.test_finalizer.FinalizerTests.test_expired_zero_buyer_deal_is_submitted_as_expected_failed \
+  automation.test_finalizer.FinalizerTests.test_minimum_satisfied_deal_expects_funded \
+  automation.test_finalizer.FinalizerTests.test_already_funded_and_failed_rows_confirm_without_submission
+cargo test -p harvest-pool-v5-contract
+```
+
+The Python fixtures demonstrate worker selection and `Open` → expected `Failed`/`Funded`; the Rust
+tests exercise contract lifecycle behavior. The ignored `contract-v5/tests/integration.rs` suite is
+an optional NEAR Sandbox journey and requires the documented WASM prerequisites; it is not needed
+for the default demonstration.
+
+This command is a public, read-only verification of the real Deal #4 canary. It validates the
+receipt's signer, exact V5 receiver, sole `finalize_purchase` action, Deal #4 arguments, zero
+deposit, successful final outcome, and current authoritative final state:
+
+```sh
+python -m automation.verify_finalization
+```
+
+Historical Testnet transaction:
+[`2wJwt7JuDW6NpTQjBh96TBRhiMY9jvVpMaRH9DDBEHzH`](https://testnet.nearblocks.io/txns/2wJwt7JuDW6NpTQjBh96TBRhiMY9jvVpMaRH9DDBEHzH).
+It finalized Deal #4 from `Open` to `Failed` with zero contributions; it did not transfer USDC.
+
+## Worker modes
+
+Read-only one-shot (no credential, no database candidate, one purchase only):
+
+```sh
+python -m automation.finalizer --once --dry-run --purchase-id 4
+```
+
+Credentialed one-shot:
+
+```sh
+python -m automation.finalizer --once --purchase-id PURCHASE_ID
+```
+
+Portable foreground continuous process:
+
+```sh
+python -m automation.finalizer
+```
+
+`HARVESTPOOL_FINALIZER_POLL_SECONDS` controls the interval. SIGINT and SIGTERM stop polling,
+shutdown the health server, and leave SQLite intact. The worker remains disabled unless
+`HARVESTPOOL_FINALIZER_ENABLED=true`.
+
+## Local root-script lifecycle
+
+The root scripts provide one convenient local workflow while keeping Flask and the worker as
+separate processes:
+
+```sh
+./start.sh    # start V5; start/verify finalizer only when explicitly enabled and configured
+./restart.sh  # restart only V5; preserve an active finalizer and its SQLite state
+./stop.sh     # gracefully stop V5 and any locally managed finalizer
+./status.sh   # report V5 health and finalizer process/health/heartbeat separately
+```
+
+`HARVESTPOOL_FINALIZER_ENABLED=false` is the checked-in default. With that setting, the website
+starts normally and `./status.sh` reports `Finalizer: disabled`. A credentials file never activates
+the worker by itself. Setting `HARVESTPOOL_FINALIZER_ENABLED=true` is the explicit approval; root
+startup then requires the credential file to exist with no group/world permissions and refuses to
+start or adopt an unknown worker. The worker itself still validates the exact Testnet contract,
+restricted function-call key, token configuration, and durable state before live work.
+
+Root-script ownership is recorded in `.harvestpool-v5.pid` and `.harvestpool-finalizer.pid`; both
+files are ignored by Git. `restart.sh` does not signal the finalizer, so a poll or an uncertain
+transaction outcome is not interrupted by a web restart. `stop.sh` sends SIGTERM to the managed
+worker process group and retains the SQLite database for crash recovery. An active worker is never
+adopted based only on a port or health endpoint.
+
+Every enabled poll validates the exact canonical V5 receiver, native Circle Testnet USDC token and
+six decimals; reads final chain time and authoritative purchases; leases eligible work; persists
+the exact signed bytes and hash before broadcast; and confirms `Funded`/`Failed` from chain state.
+SQLite WAL storage retains operations and append-only events across restarts. Unknown responses
+are reconciled by transaction hash and state before the identical signed bytes may be rebroadcast
+a bounded number of times. The worker never signs a replacement while an outcome is uncertain.
+
+## Credentials and fail-closed configuration
+
+Live operation requires a private JSON file containing `account_id`, `public_key`, and
+`private_key`, readable only by the service user (`0600` on POSIX). Keep it outside the clone,
+container image, logs, and Git. Dry-run and tests do not read it.
+
+The on-chain key must be a function-call key with:
+
+- receiver exactly `harvestpool-v5-usdc-dalamaa-20261109.testnet`;
+- method list exactly `finalize_purchase`;
+- a finite, positive allowance; and
+- only enough account balance for planned gas.
+
+The worker rejects Full Access, missing/unlimited/zero allowance, another receiver, extra methods,
+another contract, another token, an insecure credential-file mode, or a mismatched keypair.
+
+Use deployment-owned paths rather than checked-in or machine-specific paths:
 
 ```dotenv
-HARVESTPOOL_FINALIZER_ENABLED=true
+HARVESTPOOL_FINALIZER_ENABLED=false
 HARVESTPOOL_FINALIZER_CONTRACT_ID=harvestpool-v5-usdc-dalamaa-20261109.testnet
 HARVESTPOOL_FINALIZER_RPC_URL=https://test.rpc.fastnear.com
-HARVESTPOOL_FINALIZER_CREDENTIALS_FILE=/absolute/private/path/finalizer.json
-HARVESTPOOL_FINALIZER_DB=/var/lib/harvestpool/finalizer.sqlite3
+HARVESTPOOL_FINALIZER_CREDENTIALS_FILE=/path-owned-by-service/finalizer.json
+HARVESTPOOL_FINALIZER_DB=/path-on-persistent-storage/finalizer.sqlite3
 HARVESTPOOL_FINALIZER_POLL_SECONDS=60
 HARVESTPOOL_FINALIZER_HEALTH_HOST=127.0.0.1
 HARVESTPOOL_FINALIZER_HEALTH_PORT=8091
+HARVESTPOOL_FINALIZER_HEALTH_STALE_SECONDS=180
 ```
 
-Run `python -m automation.finalizer` under the existing process supervisor. Back up the SQLite
-database, alert on `ok: false`, `unknown`, or `contract_rejected`, and retain logs. Do not put the
-credential in Flask, JavaScript, the public `.env`, a container image, or Git.
+Do not run the same service key in two active processes. Database leases protect workers sharing
+one database, but cannot coordinate copies using different databases. Use one key, one foreground
+process, and one persistent database; provision a distinct restricted key for any independent
+deployment.
 
-## Verification scope
+## Health, restart, and emergency recovery
 
-`python -m unittest -v automation.test_finalizer` covers the pre-deadline case, zero/below-minimum
-failure, minimum-satisfied funding, `AwaitingSupplier`, already Funded/Failed/Completed, missing
-credentials, restricted-key enforcement, RPC failure, lost response, duplicate polls, two-worker
-races, crash/restart, state races, confirmed rejection, delayed authoritative confirmation, and
-same-transaction rebroadcast. Contract unit and Sandbox suites remain the authority for lifecycle
-and token behavior.
+`GET http://127.0.0.1:8091/healthz` reports enabled/dry-run state, last poll/error, heartbeat age,
+stale threshold, inspected purchases, and durable operation counts. It returns HTTP 503 for an
+error or stale heartbeat. Alert on `stale: true`, `unknown`, or `contract_rejected`. An expired deal
+remaining authoritative `Open` is not, by itself, evidence that the worker failed; the customer UI
+keeps it visible as **Closed · final result pending** while automation resolves it.
 
-Deal #4 is intentionally read-only evidence: it was still `Open`, expired, and unfinalized at the
-2026-11-11 checkpoint. No transaction was submitted to change it during this work.
+After a crash or uncertain RPC result, preserve the original database and key. First stop the
+supervised worker, then run the operator-only recovery command against the same database:
 
-This implementation is operationally cautious, but it is not production-ready merely because its
-unit tests pass. It still needs a provisioned restricted Testnet key, supervised deployment,
-multi-RPC/alerting policy, backup/restore rehearsal, and a controlled non-preserved Testnet canary.
+```sh
+python -m automation.finalizer --once --reconcile-only --purchase-id PURCHASE_ID
+```
 
-## Settlement operations that remain manual
+This command requires enabled live configuration, the restricted credential, an allowlist, and a
+previously persisted signed transaction. It refuses to create a new transaction. It may only
+confirm chain state/status or perform the worker's bounded rebroadcast of the exact persisted
+bytes. Restart continuous mode only after the durable row is reconciled. Never delete the database
+to escape an uncertain state.
 
-| Operation | V5 today | Why it is not automated here |
-| --- | --- | --- |
-| Join-cutoff finalization | Automated by this worker when enabled | Permissionless, deterministic, no token transfer |
-| Failed-purchase refund | Buyer calls `claim_refund` | V5 binds refund to the contributing account and schedules a token transfer/callback |
-| Escrow balance reconciliation | An account calls `reconcile_token_balance` | It is a separate cross-contract observation, not finalization |
-| Supplier payment release | A caller invokes `release_payment` after approval | It moves USDC and must remain outside this worker's key authority |
-| Ambiguous outbound transfer | Operator investigates; contract can freeze as `ReconciliationRequired` | Retrying without evidence could pay twice |
-| Supplier non-fulfillment | Someone calls `expire_unfulfilled_purchase` after cutoff | Separate lifecycle action, not authorized to this service |
-| Fulfillment approval | Funded buyers vote | Current V5 requires a two-thirds approval threshold; silence does not approve |
+## Hosted operation
 
-## Future perishable-goods settlement policy (not in V5)
+The generic command above works under any supervisor. Keep the web and worker as separate
+processes and mount the SQLite directory on persistent storage.
 
-A future contract version should disclose before contribution and enforce: a 72-hour problem-report
-window after contractual review starts; early release when all required buyers approve; automatic
-authorization after the review deadline only if no eligible dispute exists; a valid dispute that
-pauses the relevant settlement; and a dispute ballot with a deadline and safe fallback so inactive
-voters cannot lock funds forever. V5 does none of this. Adding it requires a new reviewed contract,
-not frontend wording or broader keeper credentials.
+- Linux: a systemd unit should use `ExecStart=.../.venv/bin/python -m automation.finalizer`, a
+  protected environment file, `Restart=on-failure`, and a writable persistent state directory.
+- macOS: a launchd plist can run the same command with `KeepAlive`, a private environment/config
+  file, and a persistent database path. launchd is optional, not required by the worker.
+- Containers: run the module as the container's foreground process, inject the credential as a
+  secret, mount the SQLite directory as a volume, and use `/healthz` for the health check. Never
+  bake the key or database into the image.
+- Other hosts: use any supervisor that forwards SIGTERM, restarts on failure, retains the database,
+  and prevents duplicate instances.
+
+## Validation coverage and remaining production steps
+
+`python -m unittest -v automation.test_finalizer` covers disabled/fresh configuration, one-shot and
+dry-run allowlists, zero-buyer failure, minimum-satisfied funding, final states, missing credentials,
+exact contract/token/key restrictions, finite allowance, RPC failure/recovery, uncertain response,
+same-transaction rebroadcast, duplicate polls, concurrent leases, crash/restart, delayed chain
+state, stale heartbeat, graceful shutdown, reconcile-only recovery, and historical receipt parsing.
+JavaScript tests verify expired deals stay visible, joining is blocked, and no customer-facing
+finalization control remains.
+
+Before production-style continuous operation: provision a new restricted key per deployment,
+independently inspect its live permission and allowance, select and back up persistent storage,
+configure alerts and a trusted RPC policy, rehearse restore/recovery, and explicitly approve
+activation. Continuous mode must remain disabled until then.

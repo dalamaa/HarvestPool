@@ -248,7 +248,9 @@ HARVESTPOOL_V3_CONTRACT_ID=harvestpool-v3-v5-dalamaa-20261109.testnet
 HARVESTPOOL_USDC_TOKEN_ID=3e2210e1184b45b64c8a434c0a7e7b23cc04ea7eb7a6c3c32520d03d4afcb8af
 ```
 
-Do not replace the checked-in V4 defaults or the public V4 process during this exercise.
+The canonical root scripts now use this V5 configuration on port 5011. Do not replace a separate
+legacy V4 process on port 5010; use `scripts/restart-v4.sh` only when an explicit V4 comparison is
+required.
 
 ## Authorized 2-USDC smoke-test runbook
 

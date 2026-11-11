@@ -50,5 +50,6 @@ delivery is claimed.
 - JavaScript syntax and `python3 -m py_compile web/app.py`: passed.
 - V5 frontend on port 5011 and preserved V4 frontend on port 5010: HTTP 200.
 
-The current default environment remains V4. V5 is isolated and explicitly configured through the
-documented V5 environment variables; no contract was redeployed for this baseline.
+At the time of this baseline, the default environment remained V4 and V5 was isolated through the
+documented environment variables. The canonical local scripts now select V5; no contract was
+redeployed for that application-default change.

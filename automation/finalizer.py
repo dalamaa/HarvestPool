@@ -13,13 +13,14 @@ import json
 import logging
 import os
 import secrets
+import signal
 import sqlite3
 import stat
 import struct
 import threading
 import time
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
@@ -31,6 +32,9 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 
 FINAL_METHOD = "finalize_purchase"
+V5_CONTRACT_ID = "harvestpool-v5-usdc-dalamaa-20261109.testnet"
+V5_TOKEN_ID = "3e2210e1184b45b64c8a434c0a7e7b23cc04ea7eb7a6c3c32520d03d4afcb8af"
+V5_TOKEN_DECIMALS = 6
 ELIGIBLE_STATES = {"Open", "AwaitingSupplier"}
 FINAL_STATES = {"Funded", "Failed"}
 GAS = 30_000_000_000_000
@@ -160,6 +164,13 @@ class NearSigner:
         methods = restriction.get("method_names") or []
         if restriction.get("receiver_id") != contract_id or set(methods) != {FINAL_METHOD}:
             raise ConfigurationError("service key must be restricted to this contract and finalize_purchase only")
+        allowance = restriction.get("allowance")
+        try:
+            finite_allowance = int(allowance)
+        except (TypeError, ValueError) as error:
+            raise ConfigurationError("service key must have a finite positive gas allowance") from error
+        if finite_allowance <= 0:
+            raise ConfigurationError("service key must have a finite positive gas allowance")
         return access_key
 
     def prepare(self, rpc: NearRpc, contract_id: str, purchase_id: str) -> tuple[str, str]:
@@ -190,7 +201,7 @@ class NearSigner:
 class Config:
     enabled: bool = False
     rpc_url: str = "https://test.rpc.fastnear.com"
-    contract_id: str = "harvestpool-v5-usdc-dalamaa-20261109.testnet"
+    contract_id: str = V5_CONTRACT_ID
     database: Path = Path("automation/finalizer.sqlite3")
     credentials_file: Path | None = None
     poll_seconds: int = 60
@@ -199,21 +210,46 @@ class Config:
     max_same_tx_broadcasts: int = 3
     health_host: str = "127.0.0.1"
     health_port: int = 8091
+    health_stale_seconds: int = 180
+    purchase_ids: tuple[str, ...] | None = None
+    dry_run: bool = False
+    reconcile_only: bool = False
 
     @classmethod
     def from_env(cls) -> "Config":
         enabled = os.environ.get("HARVESTPOOL_FINALIZER_ENABLED", "").lower() in {"1", "true", "yes"}
         credential_value = os.environ.get("HARVESTPOOL_FINALIZER_CREDENTIALS_FILE")
+        purchase_ids_value = os.environ.get("HARVESTPOOL_FINALIZER_PURCHASE_IDS")
+        purchase_ids = None
+        if purchase_ids_value is not None:
+            purchase_ids = tuple(part.strip() for part in purchase_ids_value.split(",") if part.strip())
+            if not purchase_ids:
+                raise ConfigurationError("HARVESTPOOL_FINALIZER_PURCHASE_IDS must contain at least one purchase ID")
+            _validate_purchase_ids(purchase_ids)
+        poll_seconds = max(15, int(os.environ.get("HARVESTPOOL_FINALIZER_POLL_SECONDS", cls.poll_seconds)))
+        stale_default = max(poll_seconds * 3, poll_seconds + 30)
+        health_stale_seconds = int(os.environ.get("HARVESTPOOL_FINALIZER_HEALTH_STALE_SECONDS", stale_default))
+        if health_stale_seconds <= poll_seconds:
+            raise ConfigurationError("HARVESTPOOL_FINALIZER_HEALTH_STALE_SECONDS must exceed the polling interval")
         return cls(
             enabled=enabled,
             rpc_url=os.environ.get("HARVESTPOOL_FINALIZER_RPC_URL", cls.rpc_url),
             contract_id=os.environ.get("HARVESTPOOL_FINALIZER_CONTRACT_ID", cls.contract_id),
             database=Path(os.environ.get("HARVESTPOOL_FINALIZER_DB", str(cls.database))),
             credentials_file=Path(credential_value) if credential_value else None,
-            poll_seconds=max(15, int(os.environ.get("HARVESTPOOL_FINALIZER_POLL_SECONDS", cls.poll_seconds))),
+            poll_seconds=poll_seconds,
             health_host=os.environ.get("HARVESTPOOL_FINALIZER_HEALTH_HOST", cls.health_host),
             health_port=int(os.environ.get("HARVESTPOOL_FINALIZER_HEALTH_PORT", cls.health_port)),
+            health_stale_seconds=health_stale_seconds,
+            purchase_ids=purchase_ids,
         )
+
+
+def _validate_purchase_ids(purchase_ids: tuple[str, ...]) -> None:
+    if any(not value.isdecimal() or str(int(value)) != value for value in purchase_ids):
+        raise ConfigurationError("purchase IDs must be canonical non-negative integers")
+    if len(set(purchase_ids)) != len(purchase_ids):
+        raise ConfigurationError("purchase IDs must not be duplicated")
 
 
 class Store:
@@ -325,13 +361,24 @@ class Finalizer:
         self.signer = signer
         self.last_error: str | None = None
         self.last_poll: float | None = None
+        self.inspections: list[dict[str, Any]] = []
 
     def _validate_startup(self) -> None:
         if not self.config.enabled:
             return
+        if self.config.contract_id != V5_CONTRACT_ID:
+            raise ConfigurationError(f"finalizer receiver must be the canonical V5 contract {V5_CONTRACT_ID}")
         config = self.rpc.view(self.config.contract_id, "get_config")
-        if config.get("version") != "V5" or config.get("payment_asset") != "native-usdc-nep141" or not config.get("testnet_only"):
+        if (
+            config.get("version") != "V5"
+            or config.get("payment_asset") != "native-usdc-nep141"
+            or not config.get("testnet_only")
+            or config.get("token_contract_id") != V5_TOKEN_ID
+            or int(config.get("token_decimals", -1)) != V5_TOKEN_DECIMALS
+        ):
             raise ConfigurationError("finalizer requires the verified Testnet V5 native-USDC contract interface")
+        if self.config.dry_run:
+            return
         if self.signer is None:
             if self.config.credentials_file is None:
                 raise ConfigurationError("enabled finalizer requires HARVESTPOOL_FINALIZER_CREDENTIALS_FILE")
@@ -347,12 +394,43 @@ class Finalizer:
             self._validate_startup()
             chain_now = self.rpc.chain_time_ns()
             count = int(self.rpc.view(self.config.contract_id, "get_purchase_count"))
-            for number in range(count):
-                purchase = self.rpc.view(self.config.contract_id, "get_purchase", {"purchase_id": str(number)})
-                if self._eligible(purchase, chain_now):
+            target_ids = self.config.purchase_ids or tuple(str(number) for number in range(count))
+            _validate_purchase_ids(target_ids)
+            if any(int(purchase_id) >= count for purchase_id in target_ids):
+                raise ConfigurationError(f"purchase allowlist contains an ID outside current purchase count {count}")
+            self.inspections = []
+            for purchase_id in target_ids:
+                purchase = self.rpc.view(self.config.contract_id, "get_purchase", {"purchase_id": purchase_id})
+                eligible = self._eligible(purchase, chain_now)
+                expected = None
+                if eligible:
                     expected = "Funded" if purchase["state"] == "Open" and int(purchase["total_quantity"]) >= int(purchase["min_quantity"]) else "Failed"
-                    self.store.discover(self.config.contract_id, str(number), expected)
-            for purchase_id in self.store.candidates():
+                self.inspections.append({
+                    "purchase_id": purchase_id,
+                    "state": purchase.get("state") if purchase else None,
+                    "join_deadline_ns": purchase.get("join_deadline_ns") if purchase else None,
+                    "chain_time_ns": chain_now,
+                    "eligible": eligible,
+                    "expected_state": expected,
+                    "total_quantity": purchase.get("total_quantity") if purchase else None,
+                    "total_funded_amount": purchase.get("total_funded_amount") if purchase else None,
+                    "commitment_count": len(purchase.get("commitments", [])) if purchase else None,
+                })
+                if eligible and not self.config.dry_run and not self.config.reconcile_only:
+                    self.store.discover(self.config.contract_id, purchase_id, expected)
+            if self.config.dry_run:
+                self.last_error = None
+                return self.health()
+            candidate_ids = list(target_ids) if self.config.reconcile_only else self.store.candidates()
+            for purchase_id in candidate_ids:
+                if self.config.purchase_ids is not None and purchase_id not in self.config.purchase_ids:
+                    continue
+                if self.config.reconcile_only:
+                    existing = self.store.get(purchase_id)
+                    if existing is None or not existing["tx_hash"] or not existing["signed_tx"]:
+                        raise ConfigurationError(
+                            f"reconcile-only requires a durable signed transaction for purchase {purchase_id}"
+                        )
                 row = self.store.claim(purchase_id, self.owner, self.config.lease_seconds)
                 if not row:
                     continue
@@ -432,7 +510,25 @@ class Finalizer:
             self.store.update(purchase_id, "unknown", last_error="transaction outcome not yet known; no new transaction will be signed", lease_owner=None, lease_until=None)
 
     def health(self) -> dict[str, Any]:
-        return {"enabled": self.config.enabled, "ok": self.last_error is None, "last_poll": self.last_poll, "last_error": self.last_error, "states": self.store.summary()}
+        heartbeat_age = None if self.last_poll is None else max(0.0, self.now() - self.last_poll)
+        stale = bool(
+            self.config.enabled
+            and not self.config.dry_run
+            and (heartbeat_age is None or heartbeat_age > self.config.health_stale_seconds)
+        )
+        return {
+            "enabled": self.config.enabled,
+            "dry_run": self.config.dry_run,
+            "purchase_ids": list(self.config.purchase_ids) if self.config.purchase_ids is not None else None,
+            "ok": self.last_error is None and not stale,
+            "last_poll": self.last_poll,
+            "heartbeat_age_seconds": heartbeat_age,
+            "stale_after_seconds": self.config.health_stale_seconds,
+            "stale": stale,
+            "last_error": self.last_error,
+            "inspections": self.inspections,
+            "states": self.store.summary(),
+        }
 
 
 def serve_health(worker: Finalizer) -> ThreadingHTTPServer:
@@ -456,24 +552,64 @@ def serve_health(worker: Finalizer) -> ThreadingHTTPServer:
     return server
 
 
+def run_continuous(
+    worker: Finalizer,
+    stop_event: threading.Event,
+    server_factory: Callable[[Finalizer], ThreadingHTTPServer] = serve_health,
+) -> None:
+    """Poll in the foreground until SIGINT/SIGTERM asks for a graceful stop."""
+    server = server_factory(worker)
+    try:
+        while not stop_event.is_set():
+            worker.run_once()
+            stop_event.wait(worker.config.poll_seconds)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="HarvestPool V5 automatic finalizer")
     parser.add_argument("--once", action="store_true", help="run one poll and exit")
+    parser.add_argument("--purchase-id", action="append", help="restrict discovery and processing to this purchase ID")
+    parser.add_argument("--dry-run", action="store_true", help="read eligibility without loading a key, signing, or broadcasting")
+    parser.add_argument(
+        "--reconcile-only",
+        action="store_true",
+        help="recover an allowlisted persisted transaction without signing a new transaction",
+    )
     args = parser.parse_args()
+    if args.dry_run and not args.once:
+        parser.error("--dry-run requires --once")
+    if args.reconcile_only and (not args.once or args.dry_run or not args.purchase_id):
+        parser.error("--reconcile-only requires --once and --purchase-id, and cannot be combined with --dry-run")
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
     config = Config.from_env()
+    if args.purchase_id:
+        purchase_ids = tuple(args.purchase_id)
+        _validate_purchase_ids(purchase_ids)
+        config = replace(config, purchase_ids=purchase_ids)
+    if args.dry_run:
+        config = replace(config, enabled=True, dry_run=True)
+    if args.reconcile_only:
+        config = replace(config, reconcile_only=True)
     store = Store(config.database)
     worker = Finalizer(config, NearRpc(config.rpc_url), store)
     if args.once:
         print(json.dumps(worker.run_once(), sort_keys=True))
         return 0 if worker.last_error is None else 1
-    server = serve_health(worker)
+    stop_event = threading.Event()
+
+    def request_stop(_signum: int, _frame: Any) -> None:
+        stop_event.set()
+
+    signal.signal(signal.SIGINT, request_stop)
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, request_stop)
     try:
-        while True:
-            worker.run_once()
-            time.sleep(config.poll_seconds)
+        run_continuous(worker, stop_event)
     except KeyboardInterrupt:
-        server.shutdown()
+        stop_event.set()
     return 0
 
 

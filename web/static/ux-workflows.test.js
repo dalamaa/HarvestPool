@@ -55,6 +55,68 @@ test("wallet restoration and live state refresh are explicit and bounded", () =>
   assert.doesNotMatch(appSource, /setInterval\(\(\) => \{[\s\S]*reconcilePendingActions/);
 });
 
+test("Explore uses only the four customer-facing marketplace filters", () => {
+  assert.match(templateSource, /data-filter="available"[^>]*>Available/);
+  assert.match(templateSource, /data-filter="in-progress"[^>]*>In Progress/);
+  assert.match(templateSource, /data-filter="closed"[^>]*>Closed/);
+  assert.match(templateSource, /data-filter="all"[^>]*>All/);
+  assert.match(templateSource, /data-filter="available"[^>]*aria-pressed="true"/);
+  assert.doesNotMatch(templateSource, /data-filter="(?:live|open|funded|completed)"/);
+  assert.doesNotMatch(appSource, /dataset\.filter = "live"/);
+  assert.match(appSource, /Authoritative Testnet state/);
+});
+
+test("Explore polls authoritative state so delayed finalization moves cards without a manual refresh", () => {
+  assert.match(appSource, /const EXPLORE_REFRESH_INTERVAL_MS = 15_000/);
+  assert.match(appSource, /function scheduleExploreRefresh\(\)/);
+  assert.match(appSource, /refreshLiveData\(\{ force: true \}\)/);
+  assert.match(appSource, /function stopExploreRefresh\(\)/);
+  assert.match(appSource, /document\.visibilityState !== "visible"/);
+  assert.match(appSource, /if \(state\.refreshingLiveData\) return state\.refreshingLiveData/);
+  assert.match(appSource, /scheduleExploreRefresh\(\);/);
+});
+
+test("create forms start empty and offer explicit draft restoration", () => {
+  assert.match(templateSource, /id="create-purchase-form" data-draft-form="create-purchase"/);
+  assert.doesNotMatch(templateSource, /name="min_quantity"[^>]*value="10"/);
+  assert.doesNotMatch(templateSource, /name="max_quantity"[^>]*value="20"/);
+  assert.doesNotMatch(templateSource, /name="cancellation_and_refund_terms"[^>]*>Members receive/);
+  assert.match(appSource, /isCreateForm && savedDraft/);
+  assert.match(appSource, /data-action="restore-draft"/);
+  assert.match(appSource, /CREATE_SUBMITTED_KEY/);
+  assert.match(appSource, /window\.sessionStorage\.setItem\(CREATE_SUBMITTED_KEY, "true"\)/);
+});
+
+test("create validation gives linked inline errors and visible invalid borders", () => {
+  assert.match(appSource, /function showCreateValidationErrors\(form, errors\)/);
+  assert.match(appSource, /aria-invalid/);
+  assert.match(appSource, /field-error/);
+  assert.match(stylesSource, /\.field-invalid input, \.field-invalid select, \.field-invalid textarea/);
+  assert.match(stylesSource, /\.field-error/);
+});
+
+test("Action Center separates Pending, History, and Issues without reusing active issue cards", () => {
+  assert.match(appSource, /section-kicker">Pending/);
+  assert.match(appSource, /History.*Completed actions/);
+  assert.match(appSource, /section-kicker">Issues/);
+  assert.match(appSource, /activeIssueIds/);
+  assert.match(appSource, /!activeIssueIds\.has\(String\(issue\.id\)\)/);
+});
+
+test("normal views keep wallet and transaction internals out of the main reading path", () => {
+  assert.match(stylesSource, /#agreement-content \.technical-details/);
+  assert.match(stylesSource, /#supplier-invitation-content \.technical-details/);
+  assert.match(appSource, /Approve only after checking the account, amount, and action/);
+  assert.match(templateSource, /Testnet only: this uses Circle Testnet USDC, not a USD card charge or redeemable dollars/);
+});
+
+test("supplier response colors are explicit and tooltips stay compact and dark", () => {
+  assert.match(stylesSource, /\.button-accept \{[^}]*background: var\(--success\)/);
+  assert.match(stylesSource, /\.supplier-invitation-actions \.button-reject \{[^}]*background: var\(--danger\)/);
+  assert.match(stylesSource, /\.info-tooltip-content \{[^}]*width: min\(210px/);
+  assert.match(stylesSource, /\.info-tooltip-content \{[^}]*background: #17251f/);
+});
+
 test("summary values are left aligned in stable two-column grids", () => {
   assert.match(stylesSource, /\.term-row \{ display: grid; grid-template-columns:/);
   assert.match(stylesSource, /\.term-row dd \{[^}]*text-align: left/);

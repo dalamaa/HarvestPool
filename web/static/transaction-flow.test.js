@@ -15,7 +15,7 @@ test("all important forms enter the shared guard before asynchronous work", () =
 
 test("all wallet-action buttons use the shared guarded dispatcher", () => {
   for (const action of [
-    "contribute", "vote", "finalize", "claim-refund", "reconcile-escrow", "release-payment",
+    "contribute", "vote", "claim-refund", "reconcile-escrow", "release-payment",
     "decision-vote", "agree-decision",
   ]) {
     assert.match(appSource, new RegExp(action.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
@@ -46,7 +46,7 @@ test("ordinary wallet and callback confirmation do not show an unknown-outcome w
   assert.match(appSource, /phase: "wallet"/);
   assert.match(appSource, /phase: "confirming"/);
   assert.match(appSource, /phase: "unresolved"/);
-  assert.match(appSource, /Your request was submitted\. Confirming the authoritative contract state and callbacks/);
+  assert.match(appSource, /Your request was submitted\. We’re checking the result now/);
 });
 
 test("a lost Meteor promise cannot prevent authoritative polling", () => {
@@ -96,14 +96,16 @@ test("financial operations are absent from public deal rendering and owner-gated
 
 test("native confirmation popups are replaced by the application review dialog", () => {
   assert.doesNotMatch(appSource, /window\.confirm\(/);
-  assert.match(appSource, /title: `Finalize Deal/);
   assert.match(appSource, /title: `Submit Testnet evidence/);
 });
 
 test("expired open deals are presented as awaiting finalization and cannot render a join action", () => {
   assert.match(appSource, /function presentationState\(purchase\)/);
   assert.match(appSource, /DeadlinePassed:\s*"Closed · final result pending"/);
-  assert.match(appSource, /const canJoin = !alreadyJoined && purchase\.state === "Open" && !deadlineHasPassed/);
+  assert.match(appSource, /processing the authoritative (?:final )?result automatically/);
+  assert.doesNotMatch(appSource, /data-action="finalize"/);
+  assert.doesNotMatch(appSource, /function handleFinalize/);
+  assert.match(appSource, /const canJoin = !memberAlreadyJoined && filterTools\.isAvailable\(purchase\)/);
   assert.match(appSource, /verifyContributionEligibility[\s\S]*if \(deadlineHasPassed\(purchase\.deadline_ns\)\) throw/);
 });
 
@@ -115,12 +117,12 @@ test("failed deals preserve participant counts and expose eligible refund action
 });
 
 test("transaction phases distinguish Meteor handoff, submission, and confirmation", () => {
-  assert.match(appSource, /Sending this action through Meteor/);
-  assert.match(appSource, /matching limited Testnet permission/);
-  assert.match(appSource, /without opening (?:a new|another) popup/);
+  assert.match(appSource, /Review the request in your wallet/);
+  assert.match(appSource, /Approve only after checking the account, amount, and action/);
+  assert.match(appSource, /No action is complete until the deal record confirms it/);
   assert.doesNotMatch(appSource, /Approve this action in your wallet\./);
   assert.match(appSource, /Your request was submitted\./);
-  assert.match(appSource, /Confirming your request against authoritative contract state\./);
+  assert.match(appSource, /We’re checking the result now\./);
 });
 
 test("reconciliation has a durable success state and a complete pre-wallet review", () => {

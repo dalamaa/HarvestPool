@@ -14,3 +14,5 @@ automation/*.sqlite3-*
 credentials.json
 secrets.json
 .harvestpool-server.pid
+.harvestpool-v5.pid
+.harvestpool-finalizer.pid
