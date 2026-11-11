@@ -199,6 +199,10 @@ Never put a seed phrase, private key, wallet credential, or mainnet account secr
 `HARVESTPOOL_PUBLIC_BASE_URL` may remain empty for localhost; set it only to the final public app URL
 when share links should leave localhost.
 
+The Flask app has no wallet credential setting. If Meteor is not installed or connected, public
+read-only pages still load and signed controls explain that a Testnet wallet is required. Do not add
+a private key to make reviewer setup easier.
+
 ## Run the app
 
 With the virtual environment active:
@@ -220,6 +224,21 @@ port. Stop or restart it with:
 Public browsing does not require a wallet. Signed calls require an authorized Testnet wallet and
 may change Testnet state; they are not part of fresh-install verification.
 
+To review the isolated V5 UI without replacing the V4 `.env` or the controlled V4 process, use a
+separate shell and explicit public configuration:
+
+```sh
+PORT=5011 \
+HARVESTPOOL_CONTRACT_ID=harvestpool-v5-usdc-dalamaa-20261109.testnet \
+HARVESTPOOL_CONTRACT_VERSION=V5 \
+HARVESTPOOL_V3_CONTRACT_ID=harvestpool-v3-v5-dalamaa-20261109.testnet \
+HARVESTPOOL_USDC_TOKEN_ID=3e2210e1184b45b64c8a434c0a7e7b23cc04ea7eb7a6c3c32520d03d4afcb8af \
+python -m flask --app web.app run --host 127.0.0.1 --port 5011
+```
+
+`start.sh`, `stop.sh`, and `restart.sh` control only the default V4 service on port 5010. They are
+not V5 launchers.
+
 ## Run tests
 
 ### Fast default checks
@@ -231,8 +250,8 @@ node --check web/static/app.js
 python -m py_compile web/app.py
 ```
 
-Audit result on 2026-11-09: 32 Rust unit tests passed and 16 opt-in Sandbox tests were ignored by
-the default command; 26/26 JavaScript tests passed; JavaScript syntax and Python compilation passed.
+The exact test count changes as regressions are added. A successful fresh run must report no failed
+Rust or JavaScript tests; ignored opt-in Sandbox journeys are expected in the default Cargo command.
 
 ### Local NEAR Sandbox journeys
 
@@ -365,6 +384,7 @@ volatility; it does not guarantee issuer availability, redemption, fulfillment, 
 | `docs/engineering-decisions.md` | Evidence-grounded challenge and NEAR innovation story |
 | `docs/HACKATHON_DEMO_SCRIPT.md` | Exact demo narrative, actions, results, and evidence |
 | `docs/infrastructure-reliability-audit.md` | Contract findings, test outcomes, USDC plan, screening checklist |
+| `docs/ux-issue-register.md` | Deferred findings retained for the final visual-cleanup pass |
 | `docs/v5-financial-baseline.md` | Verified V5/V3-for-V5 Testnet financial state and artifact hashes |
 | `docs/v4-deployment.md` | V4/V3-for-V4 accounts, transactions, artifacts, and hashes |
 | `docs/testnet-evidence.md` | Historical Phase 1/V2/V3 evidence |

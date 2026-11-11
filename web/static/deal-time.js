@@ -106,6 +106,52 @@
     }
   }
 
+  function durationLabel(milliseconds) {
+    const totalMinutes = Math.max(0, Math.round(Number(milliseconds) / 60000));
+    const days = Math.floor(totalMinutes / 1440);
+    const hours = Math.floor((totalMinutes % 1440) / 60);
+    const minutes = totalMinutes % 60;
+    const parts = [];
+    if (days) parts.push(`${days} day${days === 1 ? "" : "s"}`);
+    if (hours) parts.push(`${hours} hour${hours === 1 ? "" : "s"}`);
+    if (minutes || !parts.length) parts.push(`${minutes} minute${minutes === 1 ? "" : "s"}`);
+    return parts.slice(0, 2).join(" ");
+  }
+
+  function deadlineSummary(value, nowMs = Date.now()) {
+    if (!value) return "Deadline not set.";
+    try {
+      const date = value instanceof Date ? value : dateFromNanoseconds(value);
+      const difference = date.getTime() - Number(nowMs);
+      if (!Number.isFinite(difference)) return "Deadline not set.";
+      if (Math.abs(difference) < 60000) return "Deadline is now.";
+      return difference > 0
+        ? `Closes in ${durationLabel(difference)}.`
+        : `Closed ${durationLabel(Math.abs(difference))} ago.`;
+    } catch (_error) {
+      return "Deadline not set.";
+    }
+  }
+
+  function fulfillmentWindow(joinValue, fulfillmentValue, shortWindowHours = 24) {
+    try {
+      const join = joinValue instanceof Date ? joinValue : dateFromNanoseconds(joinValue);
+      const fulfillment = fulfillmentValue instanceof Date ? fulfillmentValue : dateFromNanoseconds(fulfillmentValue);
+      const milliseconds = fulfillment.getTime() - join.getTime();
+      if (!Number.isFinite(milliseconds) || milliseconds <= 0) {
+        return { valid: false, short: false, milliseconds, summary: "Fulfillment must be after joining closes." };
+      }
+      return {
+        valid: true,
+        short: milliseconds < Number(shortWindowHours) * 3600000,
+        milliseconds,
+        summary: `The supplier has ${durationLabel(milliseconds)} after joining closes.`,
+      };
+    } catch (_error) {
+      return { valid: false, short: false, milliseconds: NaN, summary: "Choose both deadlines to review the fulfillment window." };
+    }
+  }
+
   function parseWallTime(value) {
     const match = String(value || "").match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
     if (!match) throw new Error("Enter a valid date and time.");
@@ -160,6 +206,9 @@
     DEFAULT_BUSINESS_TIME_ZONE,
     assertTimeZone,
     browserTimeZone,
+    deadlineSummary,
+    durationLabel,
+    fulfillmentWindow,
     formatInstant,
     formatZoned,
     instantFromWallTime,

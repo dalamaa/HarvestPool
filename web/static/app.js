@@ -1933,7 +1933,8 @@
     const { unit } = unitDetails(purchase);
     const relevantTasks = actionCenterTasks().filter((task) => String(task.purchaseId) === String(purchase.id));
     const failed = purchase.state === "Failed" ? `<div class="deal-state-explanation"><strong>Why this deal failed</strong><span>${escapeHtml(failureReason(purchase))}</span></div>` : "";
-    root.innerHTML = `<div class="details-top"><div><p class="eyebrow">Group Deal #${escapeHtml(purchase.id)}</p><h1>${escapeHtml(livePurchaseTitle(purchase))}</h1><p class="supplier-line">From <strong>${escapeHtml(supplierName(purchase))}</strong> · ${escapeHtml(purchase.supplier_location || "Location not listed")}</p></div><div class="details-actions"><button class="share-button" type="button" data-action="share-purchase" data-purchase-id="${escapeHtml(purchase.id)}">${icon("link")}Share Group Deal</button>${action}</div></div>${actionAlertsMarkup(relevantTasks, "This deal needs your attention")}${refundNoticeMarkup(purchase)}
+    const deadlineGuidance = `<section class="deal-deadlines" aria-label="Deal deadlines"><div><span>Last day to join</span><strong>${escapeHtml(formatDate(purchase.deadline_ns, true))}</strong><small>${escapeHtml(dealTimeTools.deadlineSummary(purchase.deadline_ns))} Buyers can join until this cutoff.</small></div><div><span>Fulfillment deadline</span><strong>${escapeHtml(formatDate(purchase.fulfillment_evidence_deadline_ns, true))}</strong><small>${escapeHtml(dealTimeTools.fulfillmentWindow(purchase.deadline_ns, purchase.fulfillment_evidence_deadline_ns).summary)} This gives the supplier time to prepare the group order.</small></div></section>`;
+    root.innerHTML = `<div class="details-top"><div><p class="eyebrow">Group Deal #${escapeHtml(purchase.id)}</p><h1>${escapeHtml(livePurchaseTitle(purchase))}</h1><p class="supplier-line">From <strong>${escapeHtml(supplierName(purchase))}</strong> · ${escapeHtml(purchase.supplier_location || "Location not listed")}</p></div><div class="details-actions"><button class="share-button" type="button" data-action="share-purchase" data-purchase-id="${escapeHtml(purchase.id)}">${icon("link")}Share Group Deal</button>${action}</div></div>${actionAlertsMarkup(relevantTasks, "This deal needs your attention")}${refundNoticeMarkup(purchase)}${deadlineGuidance}
       <div class="details-layout"><div><section class="detail-panel funding-panel">${statusPill(presentationState(purchase))}<h2>${escapeHtml(listed)} per ${escapeHtml(unit)}</h2><p class="funding-description">${escapeHtml(livePurchaseDescription(purchase))}</p>${failed}<div class="funding-big"><strong>${total} / ${max}</strong><span>${escapeHtml(pluralUnit(unit, max))} reserved</span></div><div class="progress-label"><span>${participantCount(purchase)} ${participantCount(purchase) === 1 ? "buyer participated" : "buyers participated"}</span><span>${quantityLabel(purchase, availableCapacity(purchase))} available</span></div><div class="progress-track"><span style="width: ${progress}%"></span></div><div class="funding-meta"><div><strong>${quantityLabel(purchase, purchase.min_quantity)}</strong><span>minimum needed</span></div><div><strong>Maximum ${quantityLabel(purchase, purchase.max_quantity_per_household)}</strong><span>per buyer</span></div><div><strong>${escapeHtml(formatDate(purchase.deadline_ns))}</strong><span>last day to join or cancel</span></div><div><strong>${escapeHtml(formatDate(purchase.fulfillment_evidence_deadline_ns))}</strong><span>fulfillment due</span></div></div></section><section class="detail-panel" style="margin-top:18px"><span class="section-kicker">Pickup or delivery</span><h2>How members receive the order</h2><p>${escapeHtml(purchase.pickup_or_delivery)}</p><p><strong>Contact the supplier:</strong> ${escapeHtml(purchase.supplier_public_contact)}</p></section></div>
       <aside><section class="detail-panel detail-panel-dark"><span class="section-kicker">Deal Terms</span><h2>What everyone agreed to</h2><dl class="term-list"><div class="term-row"><dt>You receive</dt><dd>${escapeHtml(purchase.description)}${unitDetails(purchase).contents ? ` · ${escapeHtml(unitDetails(purchase).contents)}` : ""}</dd></div><div class="term-row"><dt>Listed price</dt><dd>${escapeHtml(listed)} per ${escapeHtml(unit)}</dd></div><div class="term-row"><dt>Payment details</dt><dd>${isV5(purchase) ? `${escapeHtml(listed)} per ${escapeHtml(unit)}, settled as exactly ${escapeHtml(paymentLabel(purchase, purchase.price_per_unit))} on Testnet. Test tokens are not a real USD card charge and are not promised to be redeemable for dollars.` : `${escapeHtml(paymentLabel(purchase, purchase.price_per_unit))} per ${escapeHtml(unit)}`}</dd></div><div class="term-row"><dt>Group target</dt><dd>At least ${quantityLabel(purchase, purchase.min_quantity)} by ${escapeHtml(formatDate(purchase.deadline_ns, true))}</dd></div><div class="term-row"><dt>Buyer limit</dt><dd>Maximum ${quantityLabel(purchase, purchase.max_quantity_per_household)} per buyer</dd></div><div class="term-row"><dt>Voluntary cancellation</dt><dd>Available until the same group closing time</dd></div><div class="term-row"><dt>If the order fails</dt><dd>${escapeHtml(purchase.cancellation_and_refund_terms)}</dd></div><div class="term-row"><dt>${isV5(purchase) ? "Testnet fulfillment test" : "Delivery and payment"}</dt><dd>${isV5(purchase) ? "For this smoke test, the supplier submits a simulation reference and funded buyers approve only that Testnet evidence. This does not claim physical delivery. The contract still uses its fulfillment and payment methods." : "The supplier submits a delivery reference. Funded buyers confirm fulfillment before payment can be released."}</dd></div></dl>${detailsEligibility(purchase)}<details class="technical-details"><summary>Agreement record</summary><p>Supplier wallet: ${escapeHtml(purchase.supplier_id)}</p><p>Terms fingerprint: <code>${escapeHtml(purchase.terms_hash)}</code></p>${agreement ? `<p>Accepted on ${escapeHtml(formatDate(agreement.accepted_at_ns, true))}.</p>` : "<p>The named supplier has not accepted these terms.</p>"}</details></section></aside></div>`;
   }
@@ -3078,11 +3079,32 @@
     }
     try {
       const instant = dealTimeTools.instantFromWallTime(input.value, businessTimeZone());
-      preview.textContent = dealTimeTools.formatInstant(instant, businessTimeZone(), dealTimeTools.browserTimeZone());
+      const nanoseconds = (BigInt(instant.getTime()) * 1000000n).toString();
+      preview.textContent = `${dealTimeTools.formatInstant(instant, businessTimeZone(), dealTimeTools.browserTimeZone())} · ${dealTimeTools.deadlineSummary(nanoseconds)}`;
       preview.classList.remove("is-error");
     } catch (error) {
       preview.textContent = error.message || "Choose a valid date and time.";
       preview.classList.add("is-error");
+    }
+  }
+
+  function updateFulfillmentWindow() {
+    const joinInput = $("#purchase-deadline");
+    const fulfillmentInput = $("#fulfillment-deadline");
+    const summary = $("#fulfillment-window-summary");
+    const warning = $("#fulfillment-window-warning");
+    if (!joinInput || !fulfillmentInput || !summary || !warning) return;
+    try {
+      const join = dealTimeTools.instantFromWallTime(joinInput.value, businessTimeZone());
+      const fulfillment = dealTimeTools.instantFromWallTime(fulfillmentInput.value, businessTimeZone());
+      const windowState = dealTimeTools.fulfillmentWindow(join, fulfillment);
+      summary.textContent = windowState.summary;
+      summary.classList.toggle("is-error", !windowState.valid);
+      warning.hidden = !windowState.valid || !windowState.short;
+    } catch (_error) {
+      summary.textContent = "Choose both deadlines to review the supplier’s preparation time.";
+      summary.classList.remove("is-error");
+      warning.hidden = true;
     }
   }
 
@@ -3096,6 +3118,7 @@
     }
     updateDeadlinePreview("#purchase-deadline", "#purchase-deadline-preview");
     updateDeadlinePreview("#fulfillment-deadline", "#fulfillment-deadline-preview");
+    updateFulfillmentWindow();
   }
 
   function updateSaleUnitFields() {
