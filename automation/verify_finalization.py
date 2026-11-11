@@ -57,7 +57,7 @@ def verify(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--rpc-url", default="https://test.rpc.fastnear.com")
+    parser.add_argument("--rpc-url", default="https://rpc.testnet.fastnear.com")
     parser.add_argument("--transaction-hash", default=DEAL_4_TRANSACTION)
     parser.add_argument("--signer-id", default=DEAL_4_SIGNER)
     parser.add_argument("--purchase-id", default="4")

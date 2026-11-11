@@ -82,15 +82,19 @@ def _borsh_string(value: str) -> bytes:
 
 
 class NearRpc:
-    def __init__(self, url: str, timeout: float = 10.0):
+    def __init__(self, url: str, timeout: float = 10.0, api_key: str | None = None):
         self.url = url
         self.timeout = timeout
+        self.api_key = api_key
         self._request_id = 0
 
     def request(self, method: str, params: Any) -> Any:
         self._request_id += 1
         body = json.dumps({"jsonrpc": "2.0", "id": self._request_id, "method": method, "params": params}).encode()
-        request = Request(self.url, data=body, headers={"Content-Type": "application/json", "User-Agent": "HarvestPool-Finalizer/1"})
+        headers = {"Content-Type": "application/json", "User-Agent": "HarvestPool-Finalizer/1"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        request = Request(self.url, data=body, headers=headers)
         try:
             with urlopen(request, timeout=self.timeout) as response:
                 payload = json.loads(response.read().decode("utf-8"))
@@ -200,7 +204,9 @@ class NearSigner:
 @dataclass(frozen=True)
 class Config:
     enabled: bool = False
-    rpc_url: str = "https://test.rpc.fastnear.com"
+    rpc_url: str = "https://rpc.testnet.fastnear.com"
+    rpc_timeout_seconds: float = 10.0
+    rpc_api_key: str | None = None
     contract_id: str = V5_CONTRACT_ID
     database: Path = Path("automation/finalizer.sqlite3")
     credentials_file: Path | None = None
@@ -231,9 +237,14 @@ class Config:
         health_stale_seconds = int(os.environ.get("HARVESTPOOL_FINALIZER_HEALTH_STALE_SECONDS", stale_default))
         if health_stale_seconds <= poll_seconds:
             raise ConfigurationError("HARVESTPOOL_FINALIZER_HEALTH_STALE_SECONDS must exceed the polling interval")
+        rpc_timeout_seconds = float(os.environ.get("HARVESTPOOL_FINALIZER_RPC_TIMEOUT_SECONDS", cls.rpc_timeout_seconds))
+        if not 1 <= rpc_timeout_seconds <= 60:
+            raise ConfigurationError("HARVESTPOOL_FINALIZER_RPC_TIMEOUT_SECONDS must be between 1 and 60")
         return cls(
             enabled=enabled,
             rpc_url=os.environ.get("HARVESTPOOL_FINALIZER_RPC_URL", cls.rpc_url),
+            rpc_timeout_seconds=rpc_timeout_seconds,
+            rpc_api_key=os.environ.get("FASTNEAR_API_KEY") or None,
             contract_id=os.environ.get("HARVESTPOOL_FINALIZER_CONTRACT_ID", cls.contract_id),
             database=Path(os.environ.get("HARVESTPOOL_FINALIZER_DB", str(cls.database))),
             credentials_file=Path(credential_value) if credential_value else None,
@@ -594,7 +605,11 @@ def main() -> int:
     if args.reconcile_only:
         config = replace(config, reconcile_only=True)
     store = Store(config.database)
-    worker = Finalizer(config, NearRpc(config.rpc_url), store)
+    worker = Finalizer(
+        config,
+        NearRpc(config.rpc_url, timeout=config.rpc_timeout_seconds, api_key=config.rpc_api_key),
+        store,
+    )
     if args.once:
         print(json.dumps(worker.run_once(), sort_keys=True))
         return 0 if worker.last_error is None else 1

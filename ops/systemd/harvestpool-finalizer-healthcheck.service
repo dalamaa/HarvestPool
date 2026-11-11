@@ -1,0 +1,11 @@
+[Unit]
+Description=Check HarvestPool finalizer health
+After=harvestpool-finalizer.service
+
+[Service]
+Type=oneshot
+User=harvestpool
+Group=harvestpool
+WorkingDirectory=/opt/harvestpool
+EnvironmentFile=/etc/harvestpool/finalizer.env
+ExecStart=/opt/harvestpool/.venv/bin/python -m automation.healthcheck

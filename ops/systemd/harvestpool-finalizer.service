@@ -1,0 +1,31 @@
+[Unit]
+Description=HarvestPool V5 automatic finalizer
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=harvestpool
+Group=harvestpool
+WorkingDirectory=/opt/harvestpool
+EnvironmentFile=/etc/harvestpool/finalizer.env
+UMask=0077
+RuntimeDirectory=harvestpool-finalizer
+StateDirectory=harvestpool-finalizer
+ExecStart=/usr/bin/flock --nonblock /run/harvestpool-finalizer/signing-key.lock /opt/harvestpool/.venv/bin/python -m automation.finalizer
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=30
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadOnlyPaths=/opt/harvestpool /etc/harvestpool/finalizer.env /etc/harvestpool/finalizer.json
+ReadWritePaths=/var/lib/harvestpool-finalizer
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

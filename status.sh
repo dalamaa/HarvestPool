@@ -35,11 +35,11 @@ finalizer_ok=true
 finalizer_enabled=false
 if v5_finalizer_is_enabled; then
     finalizer_enabled=true
-    finalizer_ok=false
 fi
 
 if $QUIET; then
     if $finalizer_enabled; then
+        finalizer_ok=false
         if [ -f "$V5_FINALIZER_PID_FILE" ]; then
             finalizer_pid="$(v5_finalizer_read_pid || true)"
             if [[ "$finalizer_pid" =~ ^[1-9][0-9]*$ ]] && v5_pid_is_alive "$finalizer_pid" && v5_finalizer_pid_is_owned "$finalizer_pid" && [ "$(v5_finalizer_http_status)" = "200" ]; then
@@ -125,6 +125,9 @@ IFS=$'\t' read -r finalizer_worker_ok heartbeat_age stale_after stale last_error
 $health_report
 EOF
 printf 'Finalizer worker: %s\n' "$([ "$finalizer_worker_ok" = "True" ] && printf 'OK' || printf 'NOT OK')"
+if [ "$finalizer_worker_ok" != "True" ]; then
+    finalizer_ok=false
+fi
 printf 'Finalizer heartbeat: %s seconds ago (stale after %s seconds; stale=%s)\n' "$heartbeat_age" "$stale_after" "$stale"
 if [ "$last_error" != "none" ]; then
     printf 'Finalizer last error: %s\n' "$last_error"
@@ -135,7 +138,7 @@ fi
 if $owned_ok && $http_ok && $finalizer_ok; then
     exit 0
 fi
-if $http_ok; then
+if $http_ok && ! $owned_ok; then
     printf 'No process was terminated; the responding listener is not controlled by the V5 PID file.\n'
 fi
 exit 1

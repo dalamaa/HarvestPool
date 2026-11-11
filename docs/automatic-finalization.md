@@ -157,7 +157,9 @@ Use deployment-owned paths rather than checked-in or machine-specific paths:
 ```dotenv
 HARVESTPOOL_FINALIZER_ENABLED=false
 HARVESTPOOL_FINALIZER_CONTRACT_ID=harvestpool-v5-usdc-dalamaa-20261109.testnet
-HARVESTPOOL_FINALIZER_RPC_URL=https://test.rpc.fastnear.com
+HARVESTPOOL_FINALIZER_RPC_URL=https://rpc.testnet.fastnear.com
+HARVESTPOOL_FINALIZER_RPC_TIMEOUT_SECONDS=10
+# FASTNEAR_API_KEY is a hosted-service secret; omit it from Git and prefer secret injection.
 HARVESTPOOL_FINALIZER_CREDENTIALS_FILE=/path-owned-by-service/finalizer.json
 HARVESTPOOL_FINALIZER_DB=/path-on-persistent-storage/finalizer.sqlite3
 HARVESTPOOL_FINALIZER_POLL_SECONDS=60
@@ -179,6 +181,18 @@ error or stale heartbeat. Alert on `stale: true`, `unknown`, or `contract_reject
 remaining authoritative `Open` is not, by itself, evidence that the worker failed; the customer UI
 keeps it visible as **Closed · final result pending** while automation resolves it.
 
+The dependency-free operator probe applies the same alert conditions and exits nonzero for an
+unavailable endpoint, HTTP 503, `ok=false`, a stale heartbeat, a last error, or durable `unknown`
+or `contract_rejected` work:
+
+```sh
+python -m automation.healthcheck
+```
+
+It is suitable for a systemd timer, cron, or an external monitor. A nonzero exit and journal entry
+are alert signals, not notification delivery; configure the deployment's email, pager, webhook, or
+monitoring receiver separately and test that receiver before claiming operator notifications work.
+
 After a crash or uncertain RPC result, preserve the original database and key. First stop the
 supervised worker, then run the operator-only recovery command against the same database:
 
@@ -197,8 +211,11 @@ to escape an uncertain state.
 The generic command above works under any supervisor. Keep the web and worker as separate
 processes and mount the SQLite directory on persistent storage.
 
-- Linux: a systemd unit should use `ExecStart=.../.venv/bin/python -m automation.finalizer`, a
-  protected environment file, `Restart=on-failure`, and a writable persistent state directory.
+- Linux: example service, health-check service/timer, and private environment templates live in
+  `ops/systemd/`. The service uses `Restart=on-failure`, forwards SIGTERM, gives SQLite a persistent
+  state directory, and holds a host-level `flock` for the full worker lifetime. Install exactly one
+  copy for a signing key. Do not also let the root scripts manage that same worker; use either the
+  root-script lifecycle or systemd as the sole supervisor.
 - macOS: a launchd plist can run the same command with `KeepAlive`, a private environment/config
   file, and a persistent database path. launchd is optional, not required by the worker.
 - Containers: run the module as the container's foreground process, inject the credential as a
@@ -206,6 +223,42 @@ processes and mount the SQLite directory on persistent storage.
   bake the key or database into the image.
 - Other hosts: use any supervisor that forwards SIGTERM, restarts on failure, retains the database,
   and prevents duplicate instances.
+
+For a conventional Linux/VPS layout, install the application at `/opt/harvestpool`, the restricted
+credential at `/etc/harvestpool/finalizer.json` (owned by the `harvestpool` service user and mode
+`0600`), the root-owned private environment at
+`/etc/harvestpool/finalizer.env` (`0600`), and persistent state at
+`/var/lib/harvestpool-finalizer`. Review the `User`, paths, and sandbox restrictions in the unit,
+then install the templates and verify them while activation remains false:
+
+```sh
+sudo install -o root -g root -m 0644 ops/systemd/harvestpool-finalizer.service /etc/systemd/system/
+sudo install -o root -g root -m 0644 ops/systemd/harvestpool-finalizer-healthcheck.service /etc/systemd/system/
+sudo install -o root -g root -m 0644 ops/systemd/harvestpool-finalizer-healthcheck.timer /etc/systemd/system/
+sudo install -o root -g root -m 0600 ops/systemd/finalizer.env.example /etc/harvestpool/finalizer.env
+sudo systemctl daemon-reload
+sudo systemd-analyze verify /etc/systemd/system/harvestpool-finalizer*.service /etc/systemd/system/harvestpool-finalizer-healthcheck.timer
+```
+
+Do not start or enable the service until activation is approved. After approval, set
+`HARVESTPOOL_FINALIZER_ENABLED=true` in the private environment, start the service, then enable the
+tested health timer. `systemctl restart harvestpool-finalizer` uses the same database and service
+key; `flock` makes a second systemd-managed instance fail before Python starts.
+
+### RPC policy
+
+The supported FastNEAR Testnet endpoint is `https://rpc.testnet.fastnear.com`. Hosted operation
+should inject `FASTNEAR_API_KEY`; the worker sends it only as an `Authorization: Bearer` header and
+never includes it in the URL. Use the regular, non-archival endpoint because the worker needs only
+current final state.
+
+Keep polling at 60 seconds, the RPC timeout at 10 seconds, and the stale threshold at 180 seconds.
+Calls are sequential; with eight purchases an idle poll uses about eleven RPC requests per minute.
+The worker does not retry a failed view call within the same poll: HTTP/RPC failure makes health
+unhealthy and the next poll retries after 60 seconds. A possibly accepted submission is different:
+its exact signed bytes and hash are already durable, no replacement is signed, and only those same
+bytes may be rebroadcast up to three total attempts after the reconciliation delay. This bounds
+provider load and preserves transaction identity during 429, timeout, and unknown-result failures.
 
 ## Validation coverage and remaining production steps
 
