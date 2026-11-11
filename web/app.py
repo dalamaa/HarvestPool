@@ -131,21 +131,25 @@ def index():
 
 
 @app.get("/purchases")
+@app.get("/deals")
 def purchases():
     return render_page("explore")
 
 
 @app.get("/purchases/<int:purchase_id>")
+@app.get("/deals/<int:purchase_id>")
 def purchase_details(purchase_id):
     return render_page("details", purchase_id=purchase_id)
 
 
 @app.get("/purchases/<int:purchase_id>/join")
+@app.get("/deals/<int:purchase_id>/join")
 def join_purchase(purchase_id):
     return render_page("agreement", purchase_id=purchase_id)
 
 
 @app.get("/purchases/<int:purchase_id>/issue")
+@app.get("/deals/<int:purchase_id>/issue")
 def raise_issue(purchase_id):
     return render_page("issue_form", purchase_id=purchase_id)
 

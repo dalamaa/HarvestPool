@@ -47,3 +47,19 @@ test("an unresolved submission replaces rather than duplicates its eligible task
   });
   assert.deepEqual(tasks.map((task) => task.kind), ["pending-transaction"]);
 });
+
+test("supplier invitations are eligible only for the named supplier", () => {
+  const purchase = { id: 8, state: "AwaitingSupplier", supplier_id: "supplier.testnet", proposer: "organizer.testnet" };
+  assert.deepEqual(eligibleTasks({ accountId: "supplier.testnet", purchases: [purchase] }).map((task) => task.kind), ["supplier-invitation"]);
+  assert.equal(eligibleTasks({ accountId: "organizer.testnet", purchases: [purchase] }).length, 0);
+  assert.equal(eligibleTasks({ accountId: "outsider.testnet", purchases: [purchase] }).length, 0);
+});
+
+test("a pending supplier response replaces the invitation action", () => {
+  const tasks = eligibleTasks({
+    accountId: "supplier.testnet",
+    purchases: [{ id: 8, state: "AwaitingSupplier", supplier_id: "supplier.testnet" }],
+    pending: [{ id: "reply", signerId: "supplier.testnet", methodName: "accept_supplier_request", args: { purchase_id: "8" } }],
+  });
+  assert.deepEqual(tasks.map((task) => task.kind), ["pending-transaction"]);
+});

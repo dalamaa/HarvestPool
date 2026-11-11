@@ -20,6 +20,10 @@
     purchases.forEach((purchase) => {
       const commitment = commitmentFor(purchase, accountId);
       const funded = commitment?.state === "Active";
+      const supplierId = purchase.supplier_id || purchase.farmer_id;
+      if (purchase.state === "AwaitingSupplier" && String(supplierId) === String(accountId)) {
+        tasks.push({ id: `invitation-${purchase.id}`, kind: "supplier-invitation", purchaseId: String(purchase.id) });
+      }
       if (purchase.state === "Proposed" && isMember && !votes.get(`offer:${purchase.id}`)) {
         tasks.push({ id: `offer-${purchase.id}`, kind: "offer-vote", purchaseId: String(purchase.id) });
       }
@@ -46,6 +50,7 @@
     pending.filter((action) => String(action.signerId) === String(accountId)).forEach((action) => {
       const purchaseId = String(action.context?.purchaseId ?? action.args?.purchase_id ?? "");
       const supersededId = action.methodName === "claim_refund" ? `refund-${purchaseId}`
+        : ["accept_supplier_request", "decline_supplier_request"].includes(action.methodName) ? `invitation-${purchaseId}`
         : action.methodName === "vote_on_fulfillment" ? `fulfillment-${purchaseId}`
           : action.methodName === "vote_on_offer" ? `offer-${purchaseId}`
             : action.methodName === "vote_on_decision" ? `community-${action.args?.decision_id}`

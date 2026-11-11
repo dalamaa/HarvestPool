@@ -102,7 +102,7 @@ test("native confirmation popups are replaced by the application review dialog",
 
 test("expired open deals are presented as awaiting finalization and cannot render a join action", () => {
   assert.match(appSource, /function presentationState\(purchase\)/);
-  assert.match(appSource, /DeadlinePassed:\s*"Deadline passed · awaiting finalization"/);
+  assert.match(appSource, /DeadlinePassed:\s*"Closed · final result pending"/);
   assert.match(appSource, /const canJoin = !alreadyJoined && purchase\.state === "Open" && !deadlineHasPassed/);
   assert.match(appSource, /verifyContributionEligibility[\s\S]*if \(deadlineHasPassed\(purchase\.deadline_ns\)\) throw/);
 });
@@ -156,5 +156,5 @@ test("financial success waits for the outbound callback operation, not only purc
 test("reconciliation refresh recovery reloads the affected purchase from pending context", () => {
   assert.match(appSource, /context: \{ previousReconciledAt:.*purchaseId: String\(freshPurchase\.id\)/s);
   assert.match(appSource, /action\.context\?\.purchaseId \?\?/);
-  assert.match(appSource, /options\.context\?\.purchaseId/);
+  assert.match(appSource, /await refreshLiveData\(\{ force: true \}\)/);
 });
