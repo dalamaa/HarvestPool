@@ -24,6 +24,109 @@ The release boundaries are intentional:
   this is not production-payment or delivery evidence.
 - Card payments and US bank payouts are not implemented.
 
+## Quick Start
+
+Public browsing needs Git, Python **3.10 or newer**, and internet access. Node.js 20+ is needed only
+for browser tests; Rust/Cargo is needed only for contract tests. No npm install, Docker, NEAR CLI,
+private key, or local finalizer is required.
+
+### Windows PowerShell
+
+```powershell
+git clone https://github.com/dalamaa/HarvestPool.git
+cd HarvestPool
+py -3 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r web\requirements.txt
+.\.venv\Scripts\python.exe run.py
+```
+
+### macOS or Linux
+
+```sh
+git clone https://github.com/dalamaa/HarvestPool.git
+cd HarvestPool
+python3 -m venv .venv
+.venv/bin/python -m pip install -r web/requirements.txt
+.venv/bin/python run.py
+```
+
+Open <http://127.0.0.1:5011>, then choose **Explore Deals**. The launcher prints the network and
+purchase contract at startup and uses these public defaults even when `.env` is absent:
+
+- network: `testnet`;
+- purchase/escrow: `harvestpool-v5-usdc-dalamaa-20261109.testnet`;
+- decisions: `harvestpool-v3-v5-dalamaa-20261109.testnet`;
+- Circle Testnet USDC: `3e2210e1184b45b64c8a434c0a7e7b23cc04ea7eb7a6c3c32520d03d4afcb8af`.
+
+The portable launcher reads an optional repository-root `.env`; copy `.env.example` only when you
+need to change a public setting such as the local port. It refuses legacy V4/V2 or mismatched token
+configuration. Never put a seed phrase, private key, or wallet credential in `.env`.
+
+Browsing deals, states, public votes, issues, and decisions needs no wallet. Existing receipt links
+in the documentation can also be checked directly in a Testnet explorer. Signed actions need a
+Meteor-compatible NEAR Testnet wallet and free Testnet NEAR for gas. Joining additionally needs
+Circle Testnet USDC in that wallet and any token storage registration requested by the flow.
+Creating, proposing, joining, voting, refunding, reconciling, and paying are real Testnet
+transactions; inspect the receiver, method, arguments, amount, and explorer result before approval.
+
+### Common setup problems
+
+- **`py` or `python3` is not found:** install Python 3.10+ with `venv`, reopen the terminal, and
+  rerun the commands above. Python 3.11 and 3.13 have been exercised locally.
+- **Port 5011 is busy:** stop the service that owns it, or append `--port 5511` to the platform
+  startup command and open the printed URL. The launcher never kills another process.
+- **Package installation fails:** confirm internet access and that a corporate proxy or certificate
+  policy permits PyPI. Do not use `sudo pip`.
+- **Deals or wallet controls do not load:** allow HTTPS access to FastNEAR and `esm.sh`, allow wallet
+  popups/redirects for the local URL, and confirm the wallet is on Testnet—not Mainnet.
+- **The launcher rejects configuration:** compare `.env` with `.env.example`; the default launcher
+  intentionally runs only the canonical V5 contract pair and Circle Testnet token.
+
+On macOS/Linux, the existing managed scripts remain available:
+
+```sh
+cp .env.example .env
+. .venv/bin/activate
+./start.sh
+./status.sh
+```
+
+Use `./restart.sh` and `./stop.sh` for the managed process. These scripts require `lsof`, always
+manage V5 on port 5011, and refuse an unrelated listener. Windows does not need Git Bash or WSL;
+use `run.py` in the foreground and stop it with `Ctrl+C`.
+
+### Focused checks
+
+Run the Python and JavaScript checks after installing Node.js 20+:
+
+```sh
+python -m unittest -v web.test_portable_startup automation.test_finalizer automation.test_healthcheck automation.test_rpc_config
+node --test web/static/*.test.js
+node --check web/static/app.js
+```
+
+On Windows, replace `python` with `.\.venv\Scripts\python.exe`. Contract developers can additionally
+run `cargo test -p harvest-pool-v5-contract` and
+`cargo test -p harvest-pool-v3-v5-contract`; Rust is not needed to run the website.
+
+### Finalization and independent deployments
+
+Every local client reads and writes the same public V5 Testnet contract. Because
+`finalize_purchase` is permissionless, one separately hosted worker can finalize eligible deals
+created by any client; each local UI then sees the result through fresh authoritative contract
+reads. The judge's Flask process, SQLite file, browser, and computer do not participate in that
+state change.
+
+The shared worker is currently **disabled**, and no continuously running hosted worker has been
+verified. Automatic finalization is therefore not currently live or guaranteed. Normal local use
+does not need finalizer credentials. Running an independent worker requires a separately
+provisioned restricted Testnet key and durable SQLite storage; continuously hosting the shared
+worker additionally requires a VPS supervisor, health monitoring, backups, and explicit
+activation. See [Automatic finalization](docs/automatic-finalization.md) for the reproducible
+credential, foreground, systemd, health, and recovery setup. See [V5 readiness](docs/v5-usdc.md)
+for an independent contract deployment; never reuse the project's private credentials or point a
+new governance deployment at the wrong purchase contract.
+
 ## What problem it solves
 
 An informal group buy often makes the organizer the bank, bookkeeper, and final decision-maker.
@@ -34,7 +137,7 @@ resolve later coordination questions.
 HarvestPool assigns those responsibilities to explicit NEAR contract rules:
 
 - a supplier signs before an organizer's proposed deal can open;
-- a contribution counts only when the exact native-NEAR amount reaches the purchase contract;
+- a V5 contribution counts only when the exact Testnet USDC amount reaches the purchase contract;
 - one active paid commitment creates one funded membership, regardless of quantity;
 - only eligible funded members approve fulfillment and participate in supported group decisions;
 - the organizer has no withdrawal, arbitrary payout, or generic sweep method;
@@ -51,8 +154,8 @@ decide eligibility, or release payment.
   observed-failure retry, and frozen reconciliation state for ambiguous missing callbacks.
 - Contract balance/liability reconciliation and a dedicated V3-for-V5 with bounded, cleanable
   pending membership validations.
-- Local Sandbox coverage with a standards-based mock USDC token. This is not evidence that Circle
-  Testnet transactions already work.
+- Local Sandbox coverage with a standards-based mock USDC token, plus the separately documented
+  Circle Testnet payout/refund baseline.
 
 See [V5 native-USDC architecture and readiness](docs/v5-usdc.md) for the identity check, state
 machine, artifacts, and isolated-account runbook. The current verified state is recorded in the
@@ -119,7 +222,6 @@ flowchart LR
     D -->|verify purchase + funded members| P
     P --> N[NEAR Testnet state + receipts]
     D --> N
-    A -. future, not connected .-> T[Separate USDC version<br/>NEP-141 + NEP-145]
 ```
 
 | Layer | Authority |
@@ -146,96 +248,8 @@ separate as a legacy configuration.
 | V5 USDC purchase/escrow | [`harvestpool-v5-usdc-dalamaa-20261109.testnet`](https://explorer.testnet.near.org/accounts/harvestpool-v5-usdc-dalamaa-20261109.testnet) | Isolated V5; Circle Testnet USDC; live payout/refund baseline verified |
 | V3 decisions for V5 | [`harvestpool-v3-v5-dalamaa-20261109.testnet`](https://explorer.testnet.near.org/accounts/harvestpool-v3-v5-dalamaa-20261109.testnet) | Reads V5 funded membership; live two-buyer decision baseline verified |
 
-Read-only verification on 2026-11-09 found one open V4 purchase with one active native-NEAR
-commitment, and zero V3 issues/decisions at that observation time. Live state may change. Account
-creation, deployment, initialization transactions, source/artifact hashes, and reproducibility
-limits are in [V4 deployment evidence](docs/v4-deployment.md). Earlier Phase 1 and V2 evidence is
-kept separately in [Testnet evidence](docs/testnet-evidence.md) and must not be presented as V4
-journey proof.
-
-## Requirements
-
-- Git.
-- Python 3.10+ and `venv` (verified locally with Python 3.11.9).
-- Rust and Cargo (verified with Rust/Cargo 1.99.1; release metadata targets Rust 1.85.1).
-- Node.js 20+ for the dependency-free frontend tests (verified with Node 20.15.0).
-- Internet access for live Testnet RPC, wallet/CDN modules, and the optional NEAR/USD display.
-- A browser with Meteor Wallet and a faucet-funded `.testnet` account only for signed demo actions.
-- Optional: `cargo-near` 0.23.0 for deployable WASM builds (the version currently verified in the
-  audit workspace). It is not needed for ordinary unit tests. The contract metadata still names an
-  older 0.22.0 reproducible-build image and must be refreshed and verified on native x86_64 Linux
-  before claiming reproducibility.
-
-No npm install is required. The browser loads the pinned wallet modules from `esm.sh`.
-
-## Fresh installation
-
-The public repository is the source of truth for the submission revision. A clean clone should be
-able to reproduce the documented local checks below; live Testnet state and wallet transactions are
-separate evidence and are not created by installation.
-
-Once the submission revision is public:
-
-```sh
-git clone https://github.com/dalamaa/HarvestPool.git
-cd HarvestPool
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install -r web/requirements.txt
-cp .env.example .env
-```
-
-The example environment contains public identifiers only:
-
-```dotenv
-PORT=5011
-NEAR_NETWORK=testnet
-HARVESTPOOL_CONTRACT_ID=harvestpool-v5-usdc-dalamaa-20261109.testnet
-HARVESTPOOL_CONTRACT_VERSION=V5
-HARVESTPOOL_V3_CONTRACT_ID=harvestpool-v3-v5-dalamaa-20261109.testnet
-HARVESTPOOL_USDC_TOKEN_ID=3e2210e1184b45b64c8a434c0a7e7b23cc04ea7eb7a6c3c32520d03d4afcb8af
-HARVESTPOOL_PUBLIC_BASE_URL=
-HARVESTPOOL_FINALIZER_ENABLED=false
-```
-
-Never put a seed phrase, private key, wallet credential, or mainnet account secret in `.env`.
-`HARVESTPOOL_PUBLIC_BASE_URL` may remain empty for localhost; set it only to the final public app URL
-when share links should leave localhost.
-
-The Flask app has no wallet credential setting. If Meteor is not installed or connected, public
-read-only pages still load and signed controls explain that a Testnet wallet is required. Do not add
-a private key to make reviewer setup easier.
-
-## Run the app
-
-With the virtual environment active:
-
-```sh
-./start.sh
-./status.sh
-```
-
-Open <http://127.0.0.1:5011>. The controlled development process keeps port **5011**, writes its log
-to the system temporary directory, validates the V5 contracts and Circle token before starting,
-and refuses to terminate an unrelated process that owns the port. Stop or restart it with:
-
-```sh
-./stop.sh
-./restart.sh
-```
-
-Public browsing does not require a wallet. Signed calls require an authorized Testnet wallet and
-may change Testnet state; they are not part of fresh-install verification.
-
-If port 5011 is occupied, run `./status.sh` and inspect the listener with:
-
-```sh
-lsof -nP -iTCP:5011 -sTCP:LISTEN
-```
-
-Do not kill an unknown PID by port. Stop the owning service through its own supervisor, then rerun
-`./start.sh`; the HarvestPool scripts fail closed when the port is occupied and do not fall back to
-V4.
+Earlier V4 and V2 observation evidence remains in [V4 deployment evidence](docs/v4-deployment.md)
+and [Testnet evidence](docs/testnet-evidence.md); it is not the canonical V5 judge configuration.
 
 ## Legacy V4 application
 
@@ -250,45 +264,6 @@ scripts/stop-v4.sh
 
 The legacy launcher uses the documented V4 purchase and V3-for-V4 contracts, its own port, and the
 legacy PID file. Keep V4 and V5 processes separate.
-
-## Run tests
-
-### Fast default checks
-
-```sh
-cargo test --workspace --all-targets
-node --test web/static/*.test.js
-node --check web/static/app.js
-python -m py_compile web/app.py
-python -m unittest -v automation.test_finalizer
-```
-
-The exact test count changes as regressions are added. A successful fresh run must report no failed
-Rust or JavaScript tests; ignored opt-in Sandbox journeys are expected in the default Cargo command.
-
-### Independent V5 finalization worker
-
-The optional worker discovers V5 deals whose join deadline has passed and submits only
-`finalize_purchase`. It persists the signed transaction before broadcast, reconciles unknown
-outcomes before retrying, and requires a function-call key restricted to that one method and V5
-receiver. It never releases supplier payment or submits buyer refunds. The worker is disabled by
-default. Use `python -m automation.finalizer --once --dry-run --purchase-id 4` for a true live,
-read-only eligibility check that cannot sign or broadcast and is isolated to one purchase.
-
-Use `python -m automation.finalizer` for the portable foreground service. It supports graceful
-SIGINT/SIGTERM shutdown, persistent SQLite recovery, and a stale-heartbeat health check. Judges can
-verify the historical Deal #4 Testnet receipt without credentials using
-`python -m automation.verify_finalization`.
-
-For local operation, `./start.sh` starts the finalizer only when
-`HARVESTPOOL_FINALIZER_ENABLED=true` and a private, permission-checked credential file is
-configured. A credentials file alone never activates it. `./restart.sh` restarts only the V5 web
-process, preserving an active worker; `./stop.sh` stops both locally managed services gracefully;
-`./status.sh` reports web health and finalizer enabled/disabled state, heartbeat, and worker health
-separately. The checked-in default is disabled, so the website works without a finalizer key.
-
-Provisioning, health checks, exact contract semantics, test scope, and remaining manual settlement
-operations are in [Automatic finalization](docs/automatic-finalization.md).
 
 ### Local NEAR Sandbox journeys
 

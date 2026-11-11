@@ -21,7 +21,7 @@ escrow, approve fulfillment, or modify a deployed contract.
 
 From a fresh clone, Python 3.10+ runs the web app, worker tests, dry runs, and receipt verification;
 Node.js runs the browser tests, and Rust is optional for contract tests. No NEAR credential is
-needed:
+needed for any command in this section:
 
 ```sh
 python3 -m venv .venv
@@ -31,25 +31,49 @@ python -m unittest -v automation.test_finalizer
 node --test web/static/*.test.js
 ```
 
-On Windows PowerShell, activate with `.venv\Scripts\Activate.ps1`; the remaining Python and Node
-commands are identical.
+On Windows PowerShell, activation is optional. Use
+`.\.venv\Scripts\python.exe -m unittest -v automation.test_finalizer` if script execution policy
+blocks `Activate.ps1`.
 
-On Linux/macOS, copy the public example configuration and use the root launcher:
+The website has a portable foreground launcher on Windows, macOS, and Linux:
+
+```sh
+python run.py
+```
+
+This starts the V5 web app on `http://127.0.0.1:5011`. It reads an optional `.env`, supplies the
+canonical public Testnet values when that file is absent, and refuses a legacy or mismatched
+contract/token configuration. On Windows use `.\.venv\Scripts\python.exe run.py`; no Git Bash or WSL
+is required. On macOS/Linux, the managed root scripts remain available after copying
+`.env.example` and activating the virtual environment:
 
 ```sh
 cp .env.example .env
 ./start.sh
 ```
 
-This starts the read-only V5 web app on `http://127.0.0.1:5011`. On any platform, set the public
-values from `.env.example` in the current shell and run the same portable Flask command directly:
-
-```sh
-python -m flask --app web.app run --host 127.0.0.1 --port 5011 --no-debugger --no-reload
-```
-
 The browser reads public Testnet purchases from
 `harvestpool-v5-usdc-dalamaa-20261109.testnet`. Flask has no signing key.
+
+## Three distinct operating modes
+
+1. **Local website against the shared Testnet contracts:** `python run.py` needs no finalizer key,
+   private database, or developer machine. Browser reads come from the public V5 and V3-for-V5
+   contracts, and wallet-approved actions go directly to those contracts.
+2. **Independent finalizer against the shared V5 contract:** an operator provisions a new
+   restricted Testnet function-call key, private credential file, and durable SQLite path, then
+   runs one worker. Because `finalize_purchase` is permissionless, this worker can process eligible
+   deals created from any local or hosted client of the shared contract.
+3. **Continuously hosted shared finalizer:** the same worker runs under a VPS supervisor with
+   persistent storage, health monitoring, alert delivery, backups, and an explicit activation
+   decision. The checked-in service templates help with that deployment, but they do not prove the
+   service is running.
+
+The shared finalizer is currently disabled and no continuously running hosted worker has been
+verified. Do not describe automatic finalization as live or guaranteed. Until an operator
+activates and monitors a worker, an expired deal may remain `Open` and the UI truthfully shows
+**Closed · final result pending**. Any later finalization result is visible to every local app via
+authoritative contract reads; it is not copied from the worker's SQLite database.
 
 ### Simulated logic versus real Testnet evidence
 

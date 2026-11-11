@@ -18,17 +18,27 @@ from pathlib import Path
 
 from flask import Flask, g, jsonify, render_template
 
+from web.config import (
+    CANONICAL_CONTRACT_ID,
+    CANONICAL_CONTRACT_VERSION,
+    CANONICAL_NETWORK,
+    CANONICAL_PORT,
+    CANONICAL_V3_CONTRACT_ID,
+)
+
 
 BASE_DIR = Path(__file__).resolve().parent
 DATABASE = Path(os.environ.get("HARVESTPOOL_METADATA_DB", BASE_DIR / "metadata.sqlite3"))
 
 app = Flask(__name__)
 
-CONTRACT_ID = os.environ.get("HARVESTPOOL_CONTRACT_ID", "harvestpool-v2-dalamaa-20261108.testnet")
-V3_CONTRACT_ID = os.environ.get("HARVESTPOOL_V3_CONTRACT_ID", "")
-CONTRACT_VERSION = os.environ.get("HARVESTPOOL_CONTRACT_VERSION", "V2").upper()
+CONTRACT_ID = os.environ.get("HARVESTPOOL_CONTRACT_ID", CANONICAL_CONTRACT_ID)
+V3_CONTRACT_ID = os.environ.get("HARVESTPOOL_V3_CONTRACT_ID", CANONICAL_V3_CONTRACT_ID)
+CONTRACT_VERSION = os.environ.get(
+    "HARVESTPOOL_CONTRACT_VERSION", CANONICAL_CONTRACT_VERSION
+).upper()
 PUBLIC_BASE_URL = os.environ.get("HARVESTPOOL_PUBLIC_BASE_URL", "").rstrip("/")
-NETWORK = os.environ.get("NEAR_NETWORK", "testnet")
+NETWORK = os.environ.get("NEAR_NETWORK", CANONICAL_NETWORK)
 NEAR_PRICE_URL = os.environ.get(
     "HARVESTPOOL_NEAR_PRICE_URL",
     "https://api.coingecko.com/api/v3/simple/price?ids=near&vs_currencies=usd&include_last_updated_at=true",
@@ -190,4 +200,8 @@ def farmer():
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=int(os.environ.get("PORT", "5010")), debug=False)
+    app.run(
+        host="127.0.0.1",
+        port=int(os.environ.get("PORT", str(CANONICAL_PORT))),
+        debug=False,
+    )
