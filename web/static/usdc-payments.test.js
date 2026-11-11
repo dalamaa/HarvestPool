@@ -15,3 +15,42 @@ test("ft_transfer_call uses a versioned commit message and decimal strings", () 
   assert.equal(args.amount, "100000000");
   assert.deepEqual(JSON.parse(args.msg), { v: 1, action: "commit", purchase_id: "7", quantity: 2 });
 });
+
+test("payment labels follow the configured contract version", () => {
+  assert.deepEqual(usdc.paymentAsset("V5", 6), {
+    symbol: "USDC",
+    displayName: "Native Testnet USDC",
+    decimals: 6,
+  });
+  assert.equal(usdc.formatPayment("2000000", "V5", 6), "2 USDC");
+  assert.equal(usdc.formatPayment("2000000000000000000000000", "V4"), "2 Testnet NEAR");
+  assert.equal(usdc.paymentAsset("V4").displayName, "Native Testnet NEAR");
+});
+
+test("USD listings derive exact six-decimal USDC without rounding or divergence", () => {
+  assert.deepEqual(usdc.usdPrice("50.00", 6), { cents: "5000", tokenUnits: "50000000" });
+  assert.deepEqual(usdc.usdPrice("2.00", 6), { cents: "200", tokenUnits: "2000000" });
+  assert.deepEqual(usdc.usdPrice("0.01", 6), { cents: "1", tokenUnits: "10000" });
+  assert.equal(usdc.usdPrice("2.001", 6), null);
+  assert.equal(usdc.usdPrice("0", 6), null);
+});
+
+test("reconciliation readiness requires matching values and a fresh callback timestamp", () => {
+  const checkedAt = 1_794_347_400_000;
+  const accounting = {
+    reconciliation_status: "balanced",
+    last_observed_token_balance: "4000000",
+    last_reconciled_liability: "4000000",
+    last_reconciled_at_ns: String(BigInt(checkedAt - 30_000) * 1_000_000n),
+  };
+  assert.deepEqual(usdc.reconciliationSnapshot(accounting, "4000000", "4000000", checkedAt, 300_000), {
+    matches: true,
+    fresh: true,
+    ready: true,
+    reconciledAtMs: checkedAt - 30_000,
+    ageMs: 30_000,
+  });
+  assert.equal(usdc.reconciliationSnapshot(accounting, "3999999", "4000000", checkedAt, 300_000).ready, false);
+  assert.equal(usdc.reconciliationSnapshot(accounting, "4000000", "4000000", checkedAt + 400_000, 300_000).ready, false);
+  assert.equal(usdc.reconciliationSnapshot({ reconciliation_status: "not-reconciled" }, "4000000", "4000000", checkedAt).ready, false);
+});

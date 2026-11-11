@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { actionId, classifyOutcome, pendingStore, waitForState } = require("./v3-confirmation.js");
+const { actionGate, actionId, classifyOutcome, errorKind, friendlyError, issueMatches, pendingForWalletCallback, pendingStore, transactionHash, waitForState, waitForWalletResult, walletCallbackHashes } = require("./v3-confirmation.js");
 
 test("waitForState rereads until a callback-created record is visible", async () => {
   let reads = 0;
@@ -43,6 +43,102 @@ test("classifyOutcome handles Wallet Selector wrappers and confirmed failures", 
   assert.equal(result.state, "failed");
   assert.equal(result.message, "member already voted");
   assert.equal(classifyOutcome({}).state, "uncertain");
+});
+
+test("confirmed contract failures retain their exact reason and transaction hash", () => {
+  const failure = new Error("Smart contract panicked: join deadline must be in the future");
+  failure.transactionState = "failed";
+  assert.equal(errorKind(failure), "contract-rejected");
+  assert.equal(
+    friendlyError(failure),
+    "The contract rejected this action: join deadline must be in the future. Your draft is safe.",
+  );
+  assert.equal(transactionHash({ final_execution_outcome: { transaction: { hash: "tx-hash" } } }), "tx-hash");
+  assert.equal(transactionHash({ outcomes: [{ finalExecutionOutcome: { transaction: { hash: "array-hash" } } }] }), "array-hash");
+});
+
+test("a lost Meteor redirect hash attaches to the newest unresolved action", () => {
+  const chosen = pendingForWalletCallback([
+    { id: "old", savedAt: 10 },
+    { id: "already-known", savedAt: 30, transactionHash: "known" },
+    { id: "new", savedAt: 20 },
+  ]);
+  assert.equal(chosen.id, "new");
+});
+
+test("an incomplete Meteor response becomes pending without waiting forever", async () => {
+  const unresolved = new Promise(() => {});
+  const result = await waitForWalletResult(unresolved, {
+    timeoutMs: 1,
+    sleep: async () => undefined,
+  });
+  assert.equal(result.state, "pending");
+});
+
+test("a successful delayed Meteor response remains available for authoritative verification", async () => {
+  const result = await waitForWalletResult(Promise.resolve({ transaction: { hash: "tx" } }), {
+    timeoutMs: 100,
+  });
+  assert.equal(result.state, "returned");
+  assert.equal(transactionHash(result.value), "tx");
+});
+
+test("transaction feedback distinguishes wallet, permission, network, and unknown outcomes", () => {
+  assert.equal(errorKind(new Error("User rejected request")), "wallet-rejected");
+  assert.equal(errorKind(new Error("Access key does not allow this method")), "wallet-permission");
+  assert.equal(errorKind(new Error("Failed to fetch RPC")), "network-error");
+  const pending = new Error("No final status");
+  pending.transactionState = "pending";
+  assert.equal(errorKind(pending), "unknown-outcome");
+  assert.match(friendlyError(pending), /Please don't submit again while we check/);
+  pending.networkFailure = true;
+  assert.match(friendlyError(pending), /connection was interrupted/);
+});
+
+test("submission gate blocks rapid repeats throughout delayed wallet authorization", async () => {
+  const gate = actionGate();
+  const target = {};
+  assert.equal(gate.begin(target), true);
+  assert.equal(gate.begin(target), false);
+  assert.equal(gate.isLocked(target), true);
+  gate.finish(target, { keepLocked: true });
+  assert.equal(gate.begin(target), false);
+  gate.finish(target);
+  assert.equal(gate.begin(target), true);
+});
+
+test("confirmed failure releases the submission gate for a safe explicit retry", () => {
+  const gate = actionGate();
+  const target = {};
+  assert.equal(gate.begin(target), true);
+  gate.finish(target);
+  assert.equal(gate.begin(target), true);
+});
+
+test("wallet callback hash capture accepts redirect and direct parameter names", () => {
+  assert.deepEqual(walletCallbackHashes("?transactionHashes=hash-a"), ["hash-a"]);
+  assert.deepEqual(walletCallbackHashes("?transactionHash=hash-b"), ["hash-b"]);
+  assert.deepEqual(walletCallbackHashes("?transactionHashes=hash-a,hash-b"), ["hash-a", "hash-b"]);
+});
+
+test("authoritative issue matching confirms the async membership callback and prevents duplicates", () => {
+  const issue = {
+    id: "0",
+    purchase_id: "0",
+    raised_by: "buyer.testnet",
+    subject: "Pickup clarification",
+    description: "No physical pickup or delivery occurred.",
+    suggested_solution: "Clarify in the issue thread.",
+  };
+  const expected = {
+    purchaseId: "0",
+    requesterId: "buyer.testnet",
+    subject: issue.subject,
+    description: issue.description,
+    suggestedSolution: issue.suggested_solution,
+  };
+  assert.equal(issueMatches(issue, expected), true);
+  assert.equal(issueMatches(issue, { ...expected, subject: "Different issue" }), false);
 });
 
 test("pending actions survive refresh and remain scoped to the signer", () => {

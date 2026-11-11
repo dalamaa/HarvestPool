@@ -1635,6 +1635,48 @@ mod tests {
     }
 
     #[test]
+    fn failed_purchase_refund_rejects_outsider_and_duplicate_pending_claim() {
+        let mut contract = contract();
+        let mut failed_terms = terms();
+        failed_terms.min_quantity = 2;
+        context(pilot(), accounts(5), NOW);
+        let id = contract.create_supplier_offer(failed_terms);
+        let message = near_sdk::serde_json::to_string(&ContributionMessage {
+            v: 1,
+            action: "commit".into(),
+            purchase_id: id,
+            quantity: 1,
+        })
+        .unwrap();
+
+        context(accounts(4), accounts(5), NOW);
+        assert_eq!(
+            returned_amount(contract.ft_on_transfer(accounts(0), U128(PRICE), message)),
+            0
+        );
+        context(accounts(1), accounts(5), NOW + DAY);
+        contract.finalize_purchase(id);
+        assert_eq!(contract.get_purchase(id).unwrap().state, PurchaseState::Failed);
+
+        context(accounts(1), accounts(5), NOW + DAY);
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = contract.claim_refund(id);
+        }))
+        .is_err());
+
+        context(accounts(0), accounts(5), NOW + DAY);
+        let _promise = contract.claim_refund(id);
+        assert_eq!(
+            contract.get_purchase(id).unwrap().commitments[0].state,
+            CommitmentState::RefundPending
+        );
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = contract.claim_refund(id);
+        }))
+        .is_err());
+    }
+
+    #[test]
     fn accounting_distinguishes_liability_from_reconciled_balance() {
         let mut contract = contract();
         contract.total_accepted = 100_000_000;

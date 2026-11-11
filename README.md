@@ -8,17 +8,19 @@ uncomfortable confrontations, and protect their pooled funds from unilateral wit
 rules for commitments, payments, and refunds give both buyers and farmers greater confidence.
 
 This is a working NEAR Testnet hackathon prototype, not an audited production marketplace. The
-current configured V4 payment asset is **native Testnet NEAR**. An isolated V5 native-USDC contract,
-corrected V3-for-V5 contract, mock token, frontend path, and Sandbox suite are implemented locally,
-but V5 is **not deployed and has not completed an official-USDC Testnet transaction journey**.
+current configured V4 payment asset is **native Testnet NEAR**. An isolated V5 native-USDC contract
+and corrected V3-for-V5 contract are deployed on Testnet and have completed a low-value Circle USDC
+financial journey. V4 remains the default environment while the V5 path stays isolated for the next
+UX pass. See the [verified V5 financial baseline](docs/v5-financial-baseline.md).
 
 The release boundaries are intentional:
 
 - **V4** is deployed and tested on NEAR Testnet with native Testnet NEAR.
-- **V5** is implemented and Sandbox-tested locally with a standards-based mock USDC token.
-- **V3-for-V5** is implemented and Sandbox-tested locally against V5's membership views.
-- **Circle USDC Testnet payments** have not yet been verified through a live contribution, refund,
-  and supplier-payout journey.
+- **V5** is deployed and verified with Circle Testnet USDC for a successful supplier payout and a
+  failed-purchase refund; local Sandbox coverage remains part of the regression suite.
+- **V3-for-V5** is deployed and verified with funded-member voting and supplier consent against V5.
+- **Circle USDC Testnet payments** are verified for the documented low-value Testnet journey only;
+  this is not production-payment or delivery evidence.
 - Card payments and US bank payouts are not implemented.
 
 ## What problem it solves
@@ -52,7 +54,8 @@ decide eligibility, or release payment.
   Testnet transactions already work.
 
 See [V5 native-USDC architecture and readiness](docs/v5-usdc.md) for the identity check, state
-machine, artifacts, deployment gates, and NO-GO recommendation for replacing the V4 demo today.
+machine, artifacts, and isolated-account runbook. The current verified state is recorded in the
+[V5 financial baseline](docs/v5-financial-baseline.md).
 
 ## Why NEAR
 
@@ -124,11 +127,14 @@ flowchart LR
 | NEAR wallet | User-controlled account authorization |
 | V4 contract | Supplier agreement, contributions, membership, lifecycle, refund and payout rules |
 | V3-for-V4 contract | Issues, voter snapshots, thresholds and decision outcomes; no financial authority |
+| V5 contract | Isolated Circle Testnet USDC purchase, accounting, refund and supplier payout rules |
+| V3-for-V5 contract | Issues, voter snapshots, thresholds and supplier consent for V5; no financial authority |
 | NEAR Testnet | Public contract state and transaction/receipt evidence |
 
 The contracts use Rust, `near-sdk` 5.30.1, Borsh, promises and callbacks. Integration tests use
 `near-workspaces` 0.24.0-rc.2 with local NEAR Sandbox. The browser uses public JSON-RPC and NEAR
-Wallet Selector. V4 uses native NEAR; isolated V5 uses NEP-141/NEP-145 and remains undeployed.
+Wallet Selector. V4 uses native NEAR; isolated V5 uses NEP-141/NEP-145 and remains separate from
+the default V4 configuration.
 
 ## Current Testnet contracts
 
@@ -136,6 +142,8 @@ Wallet Selector. V4 uses native NEAR; isolated V5 uses NEP-141/NEP-145 and remai
 | --- | --- | --- |
 | V4 purchase/escrow | [`harvestpool-v4-dalamaa-20261109.testnet`](https://explorer.testnet.near.org/accounts/harvestpool-v4-dalamaa-20261109.testnet) | `V4`, `supplier-authorized-no-offer-vote`, `native-testnet-near` |
 | V3 decisions for V4 | [`harvestpool-v3-v4-dalamaa-20261109.testnet`](https://explorer.testnet.near.org/accounts/harvestpool-v3-v4-dalamaa-20261109.testnet) | Configured only for the V4 account; public Yes/No and multiple-choice voting |
+| V5 USDC purchase/escrow | [`harvestpool-v5-usdc-dalamaa-20261109.testnet`](https://explorer.testnet.near.org/accounts/harvestpool-v5-usdc-dalamaa-20261109.testnet) | Isolated V5; Circle Testnet USDC; live payout/refund baseline verified |
+| V3 decisions for V5 | [`harvestpool-v3-v5-dalamaa-20261109.testnet`](https://explorer.testnet.near.org/accounts/harvestpool-v3-v5-dalamaa-20261109.testnet) | Reads V5 funded membership; live two-buyer decision baseline verified |
 
 Read-only verification on 2026-11-09 found one open V4 purchase with one active native-NEAR
 commitment, and zero V3 issues/decisions at that observation time. Live state may change. Account
@@ -253,8 +261,8 @@ Build and run the isolated V5 suite separately:
 cargo test -p harvest-pool-v5-contract --test integration -- --ignored --nocapture
 ```
 
-The V5 result on 2026-11-09 was 4/4 Sandbox journeys passed. These use the local mock token, not
-Circle's live Testnet contract. See [V5 readiness](docs/v5-usdc.md).
+The V5 result on 2026-11-09 was 4/4 Sandbox journeys passed. These use the local mock token; the
+subsequent Circle Testnet financial result is recorded in the [V5 financial baseline](docs/v5-financial-baseline.md).
 
 These use local `near-sandbox`; they do not deploy or transact on Testnet/Mainnet. The audit run
 passed V4 4/4, the two existing V3-for-V4 journeys 2/2, and V3/V2 regressions 2/2. A separate V3
@@ -281,8 +289,8 @@ cargo test -p harvest-pool-contract
 6. Use **Supplier dashboard** for delivery evidence; then show funded-member fulfillment approval.
 7. Show a prepared successful supplier payout and a separate failed-purchase pull refund. Never
    describe `PaymentPending` or `RefundPending` as complete.
-8. End with the architecture, known defects, and the locally implemented—but undeployed and not
-   official-token-Testnet-verified—V5 USDC candidate.
+8. End with the architecture, known defects, and the verified isolated V5 USDC baseline. Do not
+   present the Testnet smoke result as production payment or delivery evidence.
 
 The exact screens, actions, expected contract changes, evidence, spoken narrative, and truthful
 fallback path are in the [Hackathon demo script](docs/HACKATHON_DEMO_SCRIPT.md).
@@ -350,13 +358,14 @@ volatility; it does not guarantee issuer availability, redemption, fulfillment, 
 | `contract/` | Earlier Phase 1/V2 purchase lifecycle and regressions |
 | `contract-v3/` | Separate issue/decision contract and V2/V4 compatibility tests |
 | `contract-v4/` | Current supplier-authorized native-NEAR purchase/escrow contract |
-| `contract-v5/` | Isolated, undeployed native-USDC purchase contract and Sandbox journeys |
+| `contract-v5/` | Isolated native-USDC purchase contract, tests, and Sandbox journeys |
 | `contract-v3-v5/` | Corrected, isolated decision contract for V5 membership |
 | `mock-usdc/` | Local six-decimal NEP-141/NEP-145 test fixture; not Circle's contract |
 | `web/` | Flask/Jinja application, browser wallet/RPC adapter, frontend tests |
 | `docs/engineering-decisions.md` | Evidence-grounded challenge and NEAR innovation story |
 | `docs/HACKATHON_DEMO_SCRIPT.md` | Exact demo narrative, actions, results, and evidence |
 | `docs/infrastructure-reliability-audit.md` | Contract findings, test outcomes, USDC plan, screening checklist |
+| `docs/v5-financial-baseline.md` | Verified V5/V3-for-V5 Testnet financial state and artifact hashes |
 | `docs/v4-deployment.md` | V4/V3-for-V4 accounts, transactions, artifacts, and hashes |
 | `docs/testnet-evidence.md` | Historical Phase 1/V2/V3 evidence |
 

@@ -1,8 +1,8 @@
 # V5 native-USDC architecture and readiness
 
-Status: implemented and tested locally in NEAR Sandbox; **not deployed**. V4 remains the configured
-Testnet demonstration and fallback. No Testnet account, token transfer, deployment, or contract
-mutation was performed for this work.
+Status: implemented, Sandbox-tested, deployed to isolated Testnet accounts, and verified through
+the low-value Circle USDC journey. V4 remains the configured Testnet demonstration and fallback;
+the verified live state is recorded in [the V5 financial baseline](v5-financial-baseline.md).
 
 ## Verified token identity
 
@@ -147,7 +147,7 @@ Host-built, non-reproducible artifacts from Rust/Cargo 1.99.1 and `cargo-near` 0
 
 These hashes are build evidence, not reproducible-build claims.
 
-Proposed accounts (confirmed nonexistent by finality reads at blocks 276,992,293-296):
+Deployed accounts:
 
 - V5: `harvestpool-v5-usdc-dalamaa-20261109.testnet`
 - V3-for-V5: `harvestpool-v3-v5-dalamaa-20261109.testnet`
@@ -290,17 +290,14 @@ Capture transaction hashes, every receipt status, before/after raw balances, ope
 final purchase/accounting views. A wallet return or top-level transaction alone is not acceptance
 evidence.
 
-1. claim official Testnet USDC from Circle's now-verified Near Testnet faucet route;
-2. deploy V5 and V3-for-V5 to new accounts, initialized with the exact Circle account;
-3. register V5 and all journey participants with the token;
-4. execute and capture one exact contribution, rejection/unused return, refund, and supplier payout;
-5. reconcile operation records, final receipt outcomes, and `ft_balance_of` at finality;
-6. only then enable V5 environment configuration or claim Testnet USDC support.
+1. keep V5 isolated from the default V4 configuration;
+2. preserve the exact Circle token identity and registered participants;
+3. capture final receipt graphs, operation records, and `ft_balance_of` values for every future
+   authorized Testnet action;
+4. investigate any missing callback or balance mismatch before authorizing another financial call.
 
 ## Recommendation
 
-**GO for an explicitly authorized, low-value Circle-USDC Testnet smoke test after deployment and
-registration checks. NO-GO for replacing the hackathon V4 demo or claiming live USDC support yet.**
-The official faucet route is now verified, but no official token has been claimed and no real
-contribution/refund/payout receipts exist. Preserve V4 as the public demo until the full runbook
-passes.
+**The low-value Circle-USDC Testnet smoke test is complete. NO-GO for replacing the hackathon V4
+demo or treating this prototype as production payment/delivery infrastructure.** Preserve V4 as the
+public default while the isolated V5 path proceeds through the next UX review.

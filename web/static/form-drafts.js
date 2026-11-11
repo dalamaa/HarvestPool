@@ -103,5 +103,18 @@
     }
   }
 
-  return { clear, collect, draftKey, fields, read, restore, save };
+  function copy(formId, fromContext, toContext, storage) {
+    const target = storageFor(storage);
+    if (!target || !formId) return false;
+    try {
+      const source = target.getItem(draftKey(formId, fromContext));
+      if (!source) return false;
+      target.setItem(draftKey(formId, toContext), source);
+      return true;
+    } catch (_error) {
+      return false;
+    }
+  }
+
+  return { clear, collect, copy, draftKey, fields, read, restore, save };
 }));

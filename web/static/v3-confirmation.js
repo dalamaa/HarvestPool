@@ -32,6 +32,17 @@
     return null;
   }
 
+  async function waitForWalletResult(walletPromise, options = {}) {
+    const timeoutMs = Math.max(1, Number(options.timeoutMs ?? 15_000));
+    const pause = options.sleep || sleep;
+    const timeout = pause(timeoutMs).then(() => ({ state: "pending" }));
+    const returned = Promise.resolve(walletPromise).then(
+      (value) => ({ state: "returned", value }),
+      (error) => ({ state: "rejected", error }),
+    );
+    return Promise.race([returned, timeout]);
+  }
+
   function finalOutcome(value) {
     return value?.final_execution_outcome || value?.finalExecutionOutcome || value?.transaction_outcome || value;
   }
@@ -53,6 +64,60 @@
     return { state: "uncertain", outcome };
   }
 
+  function transactionHash(value) {
+    if (!value) return null;
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const hash = transactionHash(item);
+        if (hash) return hash;
+      }
+      return null;
+    }
+    const direct = value?.transaction?.hash
+      || value?.final_execution_outcome?.transaction?.hash
+      || value?.finalExecutionOutcome?.transaction?.hash
+      || value?.transaction_outcome?.id;
+    if (direct) return direct;
+    for (const key of ["outcomes", "final_execution_outcomes", "finalExecutionOutcomes", "result"]) {
+      const hash = transactionHash(value?.[key]);
+      if (hash) return hash;
+    }
+    return null;
+  }
+
+  function errorKind(error) {
+    if (error?.transactionState === "pending") return "unknown-outcome";
+    const message = String(error?.message || error || "").toLowerCase();
+    if (/reject|denied|cancelled|canceled|user rejected|declined/.test(message)) return "wallet-rejected";
+    if (/access key|permission|not allowed.*method|method.*not allowed|unauthorized/.test(message)) return "wallet-permission";
+    if (/not enough.*near|insufficient.*near|insufficient balance|lack balance|gas.*balance/.test(message)) return "network-fees";
+    if (/capacity|full|oversubscribed|last spot|already has a commitment|duplicate/.test(message)) return "state-changed";
+    if (error?.transactionState === "failed" || /smart contract panicked|contract rejected|functioncallerror/.test(message)) return "contract-rejected";
+    if (/failed to fetch|network error|rpc|timeout|timed out|connection/.test(message)) return "network-error";
+    return "failed";
+  }
+
+  function contractReason(error) {
+    return String(error?.message || error || "")
+      .replace(/^Error:\s*/i, "")
+      .replace(/^Smart contract panicked:\s*/i, "")
+      .trim()
+      .slice(0, 400);
+  }
+
+  function friendlyError(error, fallback) {
+    const kind = errorKind(error);
+    if (kind === "unknown-outcome" && error?.networkFailure) return "We haven't confirmed the result yet because the wallet or Testnet connection was interrupted. Please don't submit again while we check.";
+    if (kind === "unknown-outcome") return "We haven't confirmed the result yet. Please don't submit again while we check.";
+    if (kind === "wallet-rejected") return "Meteor declined or cancelled this action. No deal was published, and your draft is safe.";
+    if (kind === "wallet-permission") return "Meteor is connected but does not have permission for this contract action. Reconnect the intended Testnet account, then review the draft again.";
+    if (kind === "network-fees") return "This wallet does not have enough Testnet NEAR for network fees. No deal was published.";
+    if (kind === "state-changed") return "The latest contract state no longer permits this action. Your draft is safe; refresh the live state before trying again.";
+    if (kind === "contract-rejected") return `The contract rejected this action: ${contractReason(error) || "no contract reason was returned"}. Your draft is safe.`;
+    if (kind === "network-error") return "The wallet or Testnet RPC could not be reached. The result is not being treated as successful; check on-chain state before trying again.";
+    return fallback || "The action failed before blockchain confirmation. Your draft is safe.";
+  }
+
   function stableValue(value) {
     if (Array.isArray(value)) return `[${value.map(stableValue).join(",")}]`;
     if (value && typeof value === "object") {
@@ -63,6 +128,39 @@
 
   function actionId(action) {
     return [action.networkId || "testnet", action.signerId, action.receiverId, action.methodName, stableValue(action.args || {})].join("|");
+  }
+
+  function actionGate() {
+    const active = new Set();
+    return {
+      begin(target) {
+        if (!target || active.has(target)) return false;
+        active.add(target);
+        return true;
+      },
+      finish(target, options = {}) {
+        if (!options.keepLocked) active.delete(target);
+      },
+      isLocked(target) { return active.has(target); },
+    };
+  }
+
+  function walletCallbackHashes(search = "") {
+    const params = new URLSearchParams(String(search || "").replace(/^\?/, ""));
+    return String(params.get("transactionHashes") || params.get("transactionHash") || "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean);
+  }
+
+  function issueMatches(issue, expected = {}) {
+    return Boolean(issue)
+      && String(issue.purchase_id) === String(expected.purchaseId)
+      && String(issue.raised_by) === String(expected.requesterId)
+      && String(issue.subject) === String(expected.subject)
+      && String(issue.description) === String(expected.description)
+      && (expected.suggestedSolution === undefined
+        || String(issue.suggested_solution || "") === String(expected.suggestedSolution || ""));
   }
 
   function pendingStore(storage, key = "harvestpool:pending-actions:v1") {
@@ -90,5 +188,11 @@
     };
   }
 
-  return { actionId, classifyOutcome, pendingStore, waitForState };
+  function pendingForWalletCallback(actions = []) {
+    return actions
+      .filter((item) => !item.transactionHash)
+      .sort((left, right) => Number(right.savedAt || 0) - Number(left.savedAt || 0))[0] || null;
+  }
+
+  return { actionGate, actionId, classifyOutcome, errorKind, friendlyError, issueMatches, pendingForWalletCallback, pendingStore, transactionHash, waitForState, waitForWalletResult, walletCallbackHashes };
 }));

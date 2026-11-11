@@ -10,6 +10,7 @@
 
   const STANDARD_TRANSACTION_GAS = "30000000000000";
   const V3_ASYNC_TRANSACTION_GAS = "60000000000000";
+  const RECONCILIATION_TRANSACTION_GAS = "50000000000000";
   const TOKEN_ASYNC_TRANSACTION_GAS = "100000000000000";
   const V3_ASYNC_METHODS = new Set(["raise_issue", "request_group_vote", "resolve_issue"]);
   const TOKEN_ASYNC_METHODS = new Set(["ft_transfer_call", "claim_refund", "release_payment"]);
@@ -65,6 +66,7 @@
 
   function gasForMethod(receiverId, v3ContractId, methodName) {
     if (TOKEN_ASYNC_METHODS.has(methodName)) return TOKEN_ASYNC_TRANSACTION_GAS;
+    if (methodName === "reconcile_token_balance") return RECONCILIATION_TRANSACTION_GAS;
     return receiverId === v3ContractId && V3_ASYNC_METHODS.has(methodName)
       ? V3_ASYNC_TRANSACTION_GAS
       : STANDARD_TRANSACTION_GAS;

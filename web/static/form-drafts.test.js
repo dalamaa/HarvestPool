@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { clear, draftKey, restore, save } = require("./form-drafts.js");
+const { clear, copy, draftKey, restore, save } = require("./form-drafts.js");
 
 class MemoryStorage {
   constructor() { this.values = new Map(); }
@@ -42,4 +42,22 @@ test("drafts restore text and checkbox values without persisting secrets", () =>
   assert.equal(fields[1].checked, true);
   assert.equal(clear("issue", context, storage), true);
   assert.equal(restore(form, "issue", context, storage), false);
+});
+
+test("an unconnected creation draft can be transferred to the connected wallet", () => {
+  const storage = new MemoryStorage();
+  const fields = [
+    { name: "product_name", id: "product-name", type: "text", value: "Deal A", checked: false },
+    { name: "creation_mode", id: "supplier-mode", type: "radio", value: "supplier_offer", checked: true },
+  ];
+  const form = surface(fields);
+  const unconnected = { walletId: "unconnected", purchaseId: "global" };
+  const connected = { walletId: "harvestpool-farmer-1.testnet", purchaseId: "global" };
+  assert.equal(save(form, "create-purchase", unconnected, storage), true);
+  assert.equal(copy("create-purchase", unconnected, connected, storage), true);
+  fields[0].value = "";
+  fields[1].checked = false;
+  assert.equal(restore(form, "create-purchase", connected, storage), true);
+  assert.equal(fields[0].value, "Deal A");
+  assert.equal(fields[1].checked, true);
 });

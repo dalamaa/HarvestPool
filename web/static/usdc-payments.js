@@ -22,6 +22,29 @@
     } catch (_error) { return "—"; }
   }
 
+  function paymentAsset(version, tokenDecimals = 6) {
+    const isUsdc = String(version || "").toUpperCase() === "V5";
+    return isUsdc
+      ? { symbol: "USDC", displayName: "Native Testnet USDC", decimals: Number(tokenDecimals) }
+      : { symbol: "NEAR", displayName: "Native Testnet NEAR", decimals: 24 };
+  }
+
+  function formatPayment(value, version, tokenDecimals = 6) {
+    const asset = paymentAsset(version, tokenDecimals);
+    return `${formatUnits(value, asset.decimals)} ${asset.symbol === "NEAR" ? "Testnet NEAR" : asset.symbol}`;
+  }
+
+  function usdPrice(value, tokenDecimals = 6) {
+    const decimals = Number(tokenDecimals);
+    if (!Number.isInteger(decimals) || decimals < 2) return null;
+    const cents = parseUnits(value, 2);
+    if (cents === null || BigInt(cents) <= 0n) return null;
+    return {
+      cents,
+      tokenUnits: (BigInt(cents) * (10n ** BigInt(decimals - 2))).toString(),
+    };
+  }
+
   function contributionMessage(purchaseId, quantity) {
     return JSON.stringify({ v: 1, action: "commit", purchase_id: String(purchaseId), quantity: Number(quantity) });
   }
@@ -35,5 +58,25 @@
     };
   }
 
-  return { contributionMessage, formatUnits, parseUnits, transferCall };
+  function reconciliationSnapshot(accounting, balance, liability, checkedAtMs = Date.now(), maxAgeMs = 300_000) {
+    const observed = String(accounting?.last_observed_token_balance ?? "");
+    const reconciledLiability = String(accounting?.last_reconciled_liability ?? "");
+    const expectedBalance = String(balance ?? "");
+    const expectedLiability = String(liability ?? "");
+    const matches = accounting?.reconciliation_status === "balanced"
+      && observed === expectedBalance
+      && reconciledLiability === expectedLiability;
+    let reconciledAtMs = null;
+    try {
+      const raw = BigInt(String(accounting?.last_reconciled_at_ns ?? ""));
+      reconciledAtMs = Number(raw / 1_000_000n);
+    } catch (_error) {
+      reconciledAtMs = null;
+    }
+    const ageMs = reconciledAtMs === null ? null : Number(checkedAtMs) - reconciledAtMs;
+    const fresh = ageMs !== null && ageMs >= -60_000 && ageMs <= Number(maxAgeMs);
+    return { matches, fresh, ready: matches && fresh, reconciledAtMs, ageMs };
+  }
+
+  return { contributionMessage, formatPayment, formatUnits, parseUnits, paymentAsset, reconciliationSnapshot, transferCall, usdPrice };
 }));

@@ -13,6 +13,14 @@
   }
   const usdcTools = window.HarvestPoolUsdc;
   if (!usdcTools) throw new Error("HarvestPool USDC payment helpers did not load.");
+  const dealFormTools = window.HarvestPoolDealForm;
+  if (!dealFormTools) throw new Error("HarvestPool deal form helpers did not load.");
+  const dealTimeTools = window.HarvestPoolDealTime;
+  if (!dealTimeTools) throw new Error("HarvestPool deal time helpers did not load.");
+  const checkoutStateTools = window.HarvestPoolCheckoutState;
+  if (!checkoutStateTools) throw new Error("HarvestPool checkout state helpers did not load.");
+  const dealCreationTools = window.HarvestPoolDealCreation;
+  if (!dealCreationTools) throw new Error("HarvestPool deal creation helpers did not load.");
   const draftTools = window.HarvestPoolDrafts;
   if (!draftTools) {
     throw new Error("HarvestPool form draft module did not load.");
@@ -26,6 +34,7 @@
     throw new Error("HarvestPool voting format module did not load.");
   }
   const pendingActionStore = confirmationTools.pendingStore(window.localStorage);
+  const submissionGate = confirmationTools.actionGate();
   const state = {
     near: null,
     selector: null,
@@ -51,6 +60,8 @@
     v3Error: null,
     pendingTransactions: new Set(),
     reconcilingPending: false,
+    financialReadiness: null,
+    confirmedIssueId: null,
   };
 
   const CHANGE_METHODS = [
@@ -69,6 +80,7 @@
     "vote_on_fulfillment",
     "expire_unfulfilled_purchase",
     "release_payment",
+    "reconcile_token_balance",
     "claim_refund",
     "raise_issue",
     "request_group_vote",
@@ -82,6 +94,9 @@
   const METEOR_SDK_NEAR_API_VERSION = "6.5.1";
   const YOCTO_PER_NEAR = 10n ** 24n;
   const PRICE_SCALE = 1_000_000n;
+  const RECONCILIATION_MAX_AGE_MS = 5 * 60_000;
+  const TRANSACTION_BUNDLE_VERSION = "2026-11-10.2";
+  const WALLET_RESULT_TIMEOUT_MS = 15_000;
 
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
@@ -132,8 +147,38 @@
       const purchaseField = $("[name='purchase_id']", surface);
       if (purchaseField?.value) surface.dataset.draftPurchaseId = purchaseField.value;
       if (restored) surface.dataset.draftRestored = "true";
-      if (surface.id === "create-purchase-form") updateSaleUnitFields();
+      if (surface.id === "create-purchase-form") {
+        updateSaleUnitFields();
+        updateCreationModeCopy();
+        updateTimezoneControls();
+      }
     });
+  }
+
+  function migrateUnconnectedCreateDraft() {
+    const form = $("#create-purchase-form");
+    if (!form || !state.accountId) return false;
+    const formId = draftFormId(form);
+    const connectedContext = draftContext(form);
+    const unconnectedContext = { ...connectedContext, walletId: "unconnected" };
+    if (draftTools.read(formId, connectedContext)) return false;
+    if (!draftTools.copy(formId, unconnectedContext, connectedContext)) return false;
+    draftTools.restore(form, formId, connectedContext);
+    draftTools.clear(formId, unconnectedContext);
+    updateSaleUnitFields();
+    updateCreationModeCopy();
+    updateTimezoneControls();
+    return true;
+  }
+
+  function showCreateConnectionFollowup() {
+    if (!state.accountId || appConfig.page !== "create") return false;
+    const selectedMode = dealCreationTools.consumeConnectionIntent(window.sessionStorage);
+    if (!selectedMode) return false;
+    migrateUnconnectedCreateDraft();
+    setCreateError(selectedMode.connected);
+    showToast("Wallet connected. No deal transaction was submitted.", "success");
+    return true;
   }
 
   function clearDraft(surface) {
@@ -151,7 +196,11 @@
 
   function technicalDetailsMarkup(error) {
     const detail = String(error?.message || error || "Unknown transaction error").slice(0, 1600);
-    return `<details class="technical-details"><summary>Technical details</summary><code>${escapeHtml(detail)}</code></details>`;
+    const hash = String(error?.transactionHash || "");
+    const transactionLink = hash
+      ? `<p>Transaction: <a href="https://testnet.nearblocks.io/txns/${encodeURIComponent(hash)}" target="_blank" rel="noopener noreferrer"><code>${escapeHtml(hash)}</code></a></p>`
+      : "";
+    return `<details class="technical-details"><summary>Technical details</summary><code>${escapeHtml(detail)}</code>${transactionLink}</details>`;
   }
 
   function setErrorSummary(container, message, error = null) {
@@ -193,7 +242,7 @@
       button.textContent = actionProgressCopy(kind === "issue" ? "raise_issue" : "request_group_vote");
     }
     form.dataset.v3ConfirmationUncertain = "true";
-    showFormTransactionError(form, "We’re checking the result automatically. Your draft is safe, and you can return later.");
+    showFormTransactionError(form, "We haven't confirmed the result yet. Please don't submit again while we check.");
   }
 
   function clearV3ConfirmationUncertainty(form) {
@@ -275,6 +324,46 @@
     container.innerHTML = `<div class="error-state"><div class="empty-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 2.8 20h18.4L12 3Z"/><path d="M12 9v5M12 17h.01"/></svg></div><h2>${escapeHtml(title)}</h2><p>${escapeHtml(message)}</p>${action}</div>`;
   }
 
+  function reviewTransaction({ title, summary, signer, receiver, method, args, gas, deposit, warning, confirmLabel = "Continue to Meteor" }) {
+    const backdrop = $("#transaction-review");
+    if (!backdrop) return Promise.resolve(false);
+    const dialog = $(".transaction-review-dialog", backdrop);
+    if (!dialog) return Promise.resolve(false);
+    const previousFocus = document.activeElement;
+    $("#transaction-review-title").textContent = title;
+    $("#transaction-review-summary").textContent = summary;
+    const values = { signer, receiver, method, arguments: JSON.stringify(args), gas, deposit };
+    Object.entries(values).forEach(([field, value]) => {
+      const target = $(`[data-review-field="${field}"]`, backdrop);
+      if (target) target.textContent = String(value);
+    });
+    $("[data-review-warning]", backdrop).textContent = warning;
+    const confirmButton = $("[data-review-confirm]", backdrop);
+    const cancelButton = $("[data-review-cancel]", backdrop);
+    confirmButton.textContent = confirmLabel;
+    backdrop.removeAttribute("hidden");
+    dialog.focus();
+    return new Promise((resolve) => {
+      const finish = (approved) => {
+        backdrop.setAttribute("hidden", "");
+        confirmButton.removeEventListener("click", approve);
+        cancelButton.removeEventListener("click", cancel);
+        backdrop.removeEventListener("click", cancelFromBackdrop);
+        document.removeEventListener("keydown", cancelFromKeyboard);
+        if (previousFocus?.focus) previousFocus.focus();
+        resolve(approved);
+      };
+      const approve = () => finish(true);
+      const cancel = () => finish(false);
+      const cancelFromBackdrop = (event) => { if (event.target === backdrop) cancel(); };
+      const cancelFromKeyboard = (event) => { if (event.key === "Escape") cancel(); };
+      confirmButton.addEventListener("click", approve);
+      cancelButton.addEventListener("click", cancel);
+      backdrop.addEventListener("click", cancelFromBackdrop);
+      document.addEventListener("keydown", cancelFromKeyboard);
+    });
+  }
+
   function setBusy(button, busy, label = "Working…") {
     if (!button) return;
     if (busy) {
@@ -286,6 +375,31 @@
       button.disabled = false;
       button.removeAttribute("aria-busy");
       if (button.dataset.originalLabel) button.innerHTML = button.dataset.originalLabel;
+    }
+  }
+
+  function setTransactionSurfaceBusy(surface, busy) {
+    const target = draftSurface(surface) || (surface?.matches?.("form") ? surface : null);
+    if (!target) return;
+    $$('[data-action="discard-draft"]', target).forEach((button) => {
+      button.disabled = busy;
+      button.setAttribute("aria-disabled", String(busy));
+    });
+  }
+
+  async function runGuardedSubmission(surface, work, label = "Preparing wallet request…") {
+    if (!surface || !submissionGate.begin(surface)) return null;
+    const button = surface.matches?.("button") ? surface : $("button[type=submit]", surface);
+    setBusy(button, true, label);
+    setTransactionSurfaceBusy(surface, true);
+    try {
+      return await work();
+    } finally {
+      const keepLocked = button?.dataset.submissionLock === "true"
+        || surface.dataset?.v3ConfirmationUncertain === "true";
+      submissionGate.finish(surface, { keepLocked });
+      if (!keepLocked && button?.isConnected) setBusy(button, false);
+      setTransactionSurfaceBusy(surface, keepLocked);
     }
   }
 
@@ -306,16 +420,15 @@
   }
 
   function paymentLabel(purchase, amount) {
-    return isV5(purchase)
-      ? `${usdcTools.formatUnits(amount, Number(purchase?.token_decimals ?? state.config?.token_decimals ?? 6))} USDC`
-      : `${formatNear(amount)} Testnet NEAR`;
+    const version = purchase?.version || state.config?.version || appConfig.contractVersion;
+    const decimals = Number(purchase?.token_decimals ?? state.config?.token_decimals ?? 6);
+    return usdcTools.formatPayment(amount, version, decimals);
   }
 
-  function normalizePaymentCopy(root, purchase) {
-    if (!root || !isV5(purchase)) return;
-    root.innerHTML = root.innerHTML.replaceAll(
-      `${formatNear(purchase.price_per_unit)} Testnet NEAR`,
-      paymentLabel(purchase, purchase.price_per_unit),
+  function paymentAsset(purchase = state.currentPurchase) {
+    return usdcTools.paymentAsset(
+      purchase?.version || state.config?.version || appConfig.contractVersion,
+      Number(purchase?.token_decimals ?? state.config?.token_decimals ?? 6),
     );
   }
 
@@ -346,8 +459,6 @@
   }
 
   const UNIT_SEPARATOR = " || ";
-  const PACKAGE_UNITS = new Set(["box", "basket", "bag", "pack", "bundle", "crate", "carton", "sack", "tray", "bunch"]);
-
   function unitDetails(purchaseOrValue) {
     const raw = String(typeof purchaseOrValue === "object" ? purchaseOrValue?.quantity_unit : purchaseOrValue || "unit");
     const [unitValue, ...contentsParts] = raw.split(UNIT_SEPARATOR);
@@ -355,11 +466,7 @@
   }
 
   function pluralUnit(unitValue, count = 2) {
-    const unit = String(unitValue || "unit").trim();
-    if (Number(count) === 1 || ["lb", "kg", "L", "dozen"].includes(unit)) return unit;
-    if (/[^aeiou]y$/i.test(unit)) return `${unit.slice(0, -1)}ies`;
-    if (/(s|x|z|ch|sh)$/i.test(unit)) return `${unit}es`;
-    return unit.endsWith("s") ? unit : `${unit}s`;
+    return dealFormTools.pluralUnit(unitValue, count);
   }
 
   function quantityLabel(purchase, count) {
@@ -377,11 +484,15 @@
   }
 
   function actionProgressCopy(methodName) {
-    if (["create_purchase", "create_open_purchase", "create_supplier_offer", "create_purchase_request"].includes(methodName)) return "Publishing your deal…";
+    if (methodName === "create_supplier_offer") return dealCreationTools.mode("supplier_offer").progress;
+    if (methodName === "create_purchase_request") return dealCreationTools.mode("organizer_request").progress;
+    if (["create_purchase", "create_open_purchase"].includes(methodName)) return "Publishing your deal…";
     if (["commit", "commit_usdc"].includes(methodName)) return "Securing your spot…";
-    if (methodName === "raise_issue") return "Submitting your issue…";
+    if (methodName === "raise_issue") return "Confirming your issue…";
+    if (methodName === "request_group_vote") return "Confirming your vote request…";
+    if (methodName === "reconcile_token_balance") return "Recording a fresh escrow snapshot…";
     if (["vote_on_offer", "vote_on_fulfillment", "vote_on_decision"].includes(methodName)) return "Recording your vote…";
-    if (methodName === "submit_fulfillment_evidence") return "Submitting delivery details…";
+    if (methodName === "submit_fulfillment_evidence") return isV5() ? "Submitting simulated Testnet evidence…" : "Submitting fulfillment evidence…";
     return "Saving your update…";
   }
 
@@ -404,6 +515,25 @@
     return `<span class="money-primary">${escapeHtml(paymentLabel(purchase, amount))}${escapeHtml(suffix)}</span>`;
   }
 
+  function usdFromTokenUnits(amount, decimals = Number(state.config?.token_decimals || 6)) {
+    const formatted = usdcTools.formatUnits(amount, decimals);
+    if (formatted === "—") return "$—";
+    const [whole, fraction = ""] = formatted.split(".");
+    const cents = fraction.padEnd(2, "0").slice(0, 2);
+    return `$${groupInteger(whole)}.${cents}`;
+  }
+
+  function customerPaymentLabel(purchase, amount) {
+    return isV5(purchase)
+      ? usdFromTokenUnits(amount, Number(purchase?.token_decimals ?? state.config?.token_decimals ?? 6))
+      : paymentLabel(purchase, amount);
+  }
+
+  function testPaymentLabel(purchase, amount) {
+    const label = paymentLabel(purchase, amount);
+    return isV5(purchase) ? label.replace(" USDC", " test USDC") : label;
+  }
+
   function listedUsd(purchase) {
     try {
       const cents = BigInt(String(purchase?.listed_price_usd_cents || "0"));
@@ -417,7 +547,7 @@
   function formatQuoteTime(value) {
     if (!value) return "unknown time";
     try {
-      return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short" }).format(new Date(value));
+      return dealTimeTools.formatZoned(new Date(value), dealTimeTools.browserTimeZone());
     } catch (_error) {
       return "unknown time";
     }
@@ -426,7 +556,9 @@
   function updatePriceStatus() {
     const status = $("#near-price-status");
     if (!status) return;
-    status.textContent = "Listed USD price first · exact Testnet NEAR shown at checkout";
+    status.textContent = isV5()
+      ? "Listed USD prices · payment details shown at checkout"
+      : `Listed USD price first · exact ${paymentAsset().displayName} shown at checkout`;
   }
 
   async function loadNearPrice() {
@@ -442,18 +574,8 @@
     updateCreatePricePreview();
   }
 
-  function formatDate(ns, includeTime = false) {
-    if (!ns) return "Not set";
-    try {
-      const milliseconds = Number(BigInt(String(ns)) / 1000000n);
-      const date = new Date(milliseconds);
-      if (Number.isNaN(date.getTime())) return "Not set";
-      return new Intl.DateTimeFormat("en-US", includeTime
-        ? { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }
-        : { month: "short", day: "numeric", year: "numeric" }).format(date);
-    } catch (_error) {
-      return "Not set";
-    }
+  function formatDate(ns, _includeTime = false) {
+    return dealTimeTools.formatInstant(ns, businessTimeZone(), dealTimeTools.browserTimeZone());
   }
 
   function formatStatus(status) {
@@ -462,9 +584,9 @@
       AwaitingSupplier: "Awaiting supplier confirmation",
       Declined: "Supplier declined",
       Open: "Open for contributions",
-      Funded: "Funded · awaiting delivery",
-      FulfillmentPending: "Delivery review",
-      FulfillmentApproved: "Delivery approved",
+      Funded: "Funded · awaiting fulfillment",
+      FulfillmentPending: "Fulfillment review",
+      FulfillmentApproved: "Fulfillment approved",
       PaymentPending: "Payment pending",
       Completed: "Completed",
       Failed: "Failed · refunds available",
@@ -543,6 +665,7 @@
     if (result.state === "failed") {
       const error = new Error(result.message);
       error.transactionState = "failed";
+      error.transactionHash = confirmationTools.transactionHash(outcome);
       throw error;
     }
     return result.outcome;
@@ -620,6 +743,7 @@
       const previousAccountId = state.accountId;
       const accounts = await state.wallet.getAccounts();
       state.accountId = accounts?.[0]?.accountId || null;
+      if (state.accountId && !previousAccountId) migrateUnconnectedCreateDraft();
       state.memberStatus = null;
       state.fundedMembership = new Map();
       updateWalletUi();
@@ -759,6 +883,22 @@
     };
   }
 
+  function captureWalletCallbackHash() {
+    if (!state.accountId) return null;
+    const hashes = confirmationTools.walletCallbackHashes(window.location.search);
+    const pending = pendingActionStore.list(state.accountId);
+    const target = confirmationTools.pendingForWalletCallback(pending);
+    if (hashes.length !== 1 || !target) return null;
+    const saved = pendingActionStore.save({ ...target, phase: "confirming", transactionHash: hashes[0] });
+    const url = new URL(window.location.href);
+    url.searchParams.delete("transactionHashes");
+    url.searchParams.delete("transactionHash");
+    url.searchParams.delete("errorCode");
+    url.searchParams.delete("errorMessage");
+    window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+    return saved;
+  }
+
   function purchaseCommitment(purchase, signerId) {
     return (purchase?.commitments || []).find((item) => String(item.account_id) === String(signerId));
   }
@@ -821,6 +961,20 @@
       if (vote === null || vote === undefined) return { state: "uncertain" };
       return { state: Boolean(vote) === Boolean(args.approve) ? "confirmed" : "failed", record: vote };
     }
+    if (methodName === "reconcile_token_balance") {
+      const accounting = await view("get_accounting");
+      const observedAt = accounting?.last_reconciled_at_ns;
+      const previous = action.context?.previousReconciledAt ?? null;
+      const startedAtNs = action.startedAtNs ?? null;
+      const changedFromBaseline = observedAt !== null && observedAt !== undefined
+        && String(observedAt) !== String(previous ?? "");
+      const newerThanAction = observedAt !== null && observedAt !== undefined && startedAtNs !== null
+        && BigInt(String(observedAt)) >= BigInt(String(startedAtNs)) - 60_000_000_000n;
+      const valuesMatch = String(accounting?.last_observed_token_balance ?? "")
+        === String(accounting?.last_reconciled_liability ?? "");
+      const confirmed = valuesMatch && (changedFromBaseline || newerThanAction);
+      return { state: confirmed ? "confirmed" : "uncertain", record: accounting };
+    }
     if (["create_purchase", "create_open_purchase", "create_supplier_offer", "create_purchase_request"].includes(methodName)) {
       const count = Number(await view("get_purchase_count"));
       const purchases = await Promise.all(Array.from({ length: Math.min(count, 100) }, (_, id) => view("get_purchase", { purchase_id: String(id) })));
@@ -838,21 +992,49 @@
     if (methodName === "submit_fulfillment_evidence") return { state: purchase?.fulfillment_evidence_hash === args.evidence_hash ? "confirmed" : "uncertain", record: purchase };
     if (methodName === "expire_unfulfilled_purchase") return { state: purchase?.state === "Failed" ? "confirmed" : "uncertain", record: purchase };
     if (methodName === "release_payment") {
-      if (purchase?.state === "Completed") return { state: "confirmed", record: purchase };
-      return { state: "uncertain", record: purchase };
+      const operationCount = Number(await view("get_outbound_operation_count"));
+      const operations = await Promise.all(Array.from({ length: Math.min(operationCount, 500) }, (_, id) =>
+        view("get_outbound_operation", { operation_id: String(id) })));
+      const operation = operations.filter((item) => item
+        && item.kind === "SupplierPayment"
+        && String(item.purchase_id) === String(args.purchase_id))
+        .sort((left, right) => Number(right.id) - Number(left.id))[0];
+      if (operation?.state === "Failed") return { state: "failed", record: { purchase, operation } };
+      if (purchase?.state === "Completed" && operation?.state === "Succeeded") {
+        return { state: "confirmed", record: { purchase, operation } };
+      }
+      return { state: "uncertain", record: { purchase, operation } };
     }
     if (methodName === "claim_refund") {
-      if (commitment?.state === "Refunded") return { state: "confirmed", record: purchase };
-      return { state: "uncertain", record: purchase };
+      const operationCount = Number(await view("get_outbound_operation_count"));
+      const operations = await Promise.all(Array.from({ length: Math.min(operationCount, 500) }, (_, id) =>
+        view("get_outbound_operation", { operation_id: String(id) })));
+      const operation = operations.filter((item) => item
+        && item.kind === "Refund"
+        && String(item.purchase_id) === String(args.purchase_id)
+        && String(item.recipient_id) === String(signerId))
+        .sort((left, right) => Number(right.id) - Number(left.id))[0];
+      if (operation?.state === "Failed") return { state: "failed", record: { purchase, operation } };
+      if (commitment?.state === "Refunded" && operation?.state === "Succeeded") {
+        return { state: "confirmed", record: { purchase, operation } };
+      }
+      return { state: "uncertain", record: { purchase, operation } };
     }
     return { state: "uncertain" };
   }
 
   async function waitForActionConfirmation(action, options = {}) {
+    const callbackMethods = new Set([
+      "commit_usdc", "raise_issue", "request_group_vote", "reconcile_token_balance",
+      "release_payment", "claim_refund",
+    ]);
     return confirmationTools.waitForState(
       () => readActionConfirmation(action),
       (result) => result && result.state !== "uncertain" ? result : null,
-      { attempts: options.attempts || 8, delayMs: options.delayMs ?? 750 },
+      {
+        attempts: options.attempts || (callbackMethods.has(action.methodName) ? 30 : 15),
+        delayMs: options.delayMs ?? 1000,
+      },
     );
   }
 
@@ -871,8 +1053,15 @@
       notice.setAttribute("aria-live", "polite");
       document.body.appendChild(notice);
     }
-    const current = pending[0];
-    notice.innerHTML = `<div><strong>${escapeHtml(actionProgressCopy(current.methodName))}</strong><span>We’re checking the result automatically. You can safely leave this page and return later.</span></div>`;
+    const current = pending.slice().sort((left, right) => Number(right.savedAt || 0) - Number(left.savedAt || 0))[0];
+    const phase = current.phase || "confirming";
+    const title = phase === "wallet" ? "Sending this action through Meteor…" : actionProgressCopy(current.methodName);
+    const message = phase === "wallet"
+      ? "Meteor may request approval. If this account already granted a matching limited Testnet permission, it may submit without opening a new popup."
+      : phase === "unresolved"
+        ? "We haven't confirmed the result yet. Please don't submit again while we check."
+        : "Your request was submitted. Confirming the authoritative contract state and callbacks…";
+    notice.innerHTML = `<div><strong>${escapeHtml(title)}</strong><span>${escapeHtml(message)}</span></div>`;
   }
 
   async function reconcilePendingActions({ poll = false } = {}) {
@@ -880,21 +1069,30 @@
     state.reconcilingPending = true;
     const pending = pendingActionStore.list(state.accountId);
     const remaining = [];
+    const affectedPurchaseIds = new Set();
     try {
       for (const action of pending) {
+        const purchaseId = action.context?.purchaseId ?? action.args?.purchase_id;
+        if (purchaseId !== null && purchaseId !== undefined) affectedPurchaseIds.add(String(purchaseId));
         const result = poll ? await waitForActionConfirmation(action) : await readActionConfirmation(action).catch(() => ({ state: "uncertain" }));
         if (result?.state === "confirmed") {
           pendingActionStore.remove(action.id);
+          if (action.methodName === "raise_issue" && result.record?.id !== undefined) state.confirmedIssueId = String(result.record.id);
           showToast(actionSuccessCopy(action.methodName), "success");
         } else if (result?.state === "failed") {
           pendingActionStore.remove(action.id);
           showToast("That action did not complete. Your saved information is unchanged.", "error");
         } else {
-          remaining.push(action);
+          const unresolved = poll ? pendingActionStore.save({ ...action, phase: "unresolved" }) : action;
+          remaining.push(unresolved);
         }
       }
       if (pending.length) {
         await Promise.allSettled([loadBaseData()]);
+        if (["details", "agreement", "issue_form", "supplier_invitation"].includes(appConfig.page)) {
+          const purchaseId = [...affectedPurchaseIds][0] ?? state.currentPurchase?.id ?? $("[data-purchase-id]")?.dataset.purchaseId;
+          if (purchaseId !== null && purchaseId !== undefined) await loadPurchase(purchaseId).catch(() => null);
+        }
         renderCurrentPage();
       }
       renderPendingConfirmationNotice();
@@ -904,22 +1102,36 @@
     }
   }
 
+  async function recoverIfTransactionBundleChanged() {
+    if (!state.accountId || !pendingActionStore.list(state.accountId).length) return false;
+    try {
+      const response = await fetch(`/static/app.js?transaction-version=${Date.now()}`, { cache: "no-store" });
+      if (!response.ok) return false;
+      const source = await response.text();
+      const version = source.match(/TRANSACTION_BUNDLE_VERSION\s*=\s*"([^"]+)"/)?.[1];
+      if (version && version !== TRANSACTION_BUNDLE_VERSION) {
+        window.location.reload();
+        return true;
+      }
+    } catch (_error) {
+      // A version check must never replace authoritative transaction reconciliation.
+    }
+    return false;
+  }
+
   function actionSuccessCopy(methodName) {
-    if (["create_purchase", "create_open_purchase", "create_supplier_offer"].includes(methodName)) return "Your deal is live!";
-    if (methodName === "create_purchase_request") return "Your supplier invitation is ready.";
+    if (methodName === "create_supplier_offer") return dealCreationTools.mode("supplier_offer").success;
+    if (methodName === "create_purchase_request") return dealCreationTools.mode("organizer_request").success;
+    if (["create_purchase", "create_open_purchase"].includes(methodName)) return "Your deal is live!";
     if (["commit", "commit_usdc"].includes(methodName)) return "You’re in! Your spot is secured.";
     if (methodName === "raise_issue") return "Your issue has been submitted.";
+    if (methodName === "reconcile_token_balance") return "Escrow reconciliation successful";
     if (["vote_on_offer", "vote_on_fulfillment", "vote_on_decision"].includes(methodName)) return "Your vote has been recorded.";
     return "Your update is confirmed.";
   }
 
   function issueMatches(issue, { purchaseId, requesterId, subject, description, suggestedSolution }) {
-    return issue
-      && String(issue.purchase_id) === String(purchaseId)
-      && String(issue.raised_by) === String(requesterId)
-      && issue.subject === subject
-      && issue.description === description
-      && (suggestedSolution === undefined || String(issue.suggested_solution || "") === String(suggestedSolution || ""));
+    return confirmationTools.issueMatches(issue, { purchaseId, requesterId, subject, description, suggestedSolution });
   }
 
   function decisionMatches(decision, { issueId, proposal, options, voteType }) {
@@ -938,8 +1150,9 @@
       return;
     }
     try {
-      const isV4 = String(state.config?.version || "").toUpperCase() === "V4";
-      state.memberStatus = isV4 ? true : Boolean(await view("is_member", { account_id: state.accountId }));
+      const version = String(state.config?.version || "").toUpperCase();
+      const usesOpenMembership = ["V4", "V5"].includes(version);
+      state.memberStatus = usesOpenMembership ? true : Boolean(await view("is_member", { account_id: state.accountId }));
       const fundedEntries = await Promise.all(state.purchases.map(async (purchase) => {
         try {
           const funded = await view("is_funded_member", { purchase_id: String(purchase.id), account_id: state.accountId });
@@ -950,7 +1163,7 @@
       }));
       state.fundedMembership = new Map(fundedEntries);
       state.recordedVotes = new Map();
-      const voteTypes = isV4 ? [["fulfillment", "get_fulfillment_vote"]] : [["offer", "get_offer_vote"], ["fulfillment", "get_fulfillment_vote"]];
+      const voteTypes = usesOpenMembership ? [["fulfillment", "get_fulfillment_vote"]] : [["offer", "get_offer_vote"], ["fulfillment", "get_fulfillment_vote"]];
       const voteEntries = await Promise.all(state.purchases.flatMap((purchase) => voteTypes.map(async ([type, methodName]) => {
         try {
           const vote = await view(methodName, { purchase_id: String(purchase.id), account_id: state.accountId });
@@ -978,7 +1191,39 @@
     const index = state.purchases.findIndex((item) => String(item.id) === String(purchase.id));
     if (index >= 0) state.purchases[index] = purchase;
     else state.purchases.unshift(purchase);
+    if (isV5(purchase)) await loadFinancialReadiness(purchase).catch(() => { state.financialReadiness = { error: true }; });
     return purchase;
+  }
+
+  async function loadFinancialReadiness(purchase = state.currentPurchase) {
+    if (!purchase || !isV5(purchase)) {
+      state.financialReadiness = null;
+      return null;
+    }
+    const tokenId = String(purchase.token_contract_id || state.config?.token_contract_id || "");
+    if (!tokenId) throw new Error("The configured Circle token account is unavailable.");
+    const [accounting, operationCountValue, circleBalance, supplierRegistration] = await Promise.all([
+      view("get_accounting"),
+      view("get_outbound_operation_count"),
+      viewOnContract(tokenId, "ft_balance_of", { account_id: appConfig.contractId }),
+      viewOnContract(tokenId, "storage_balance_of", { account_id: purchase.supplier_id }),
+    ]);
+    const operationCount = Number(operationCountValue || 0);
+    const operations = await Promise.all(Array.from({ length: Math.min(operationCount, 500) }, (_, id) =>
+      view("get_outbound_operation", { operation_id: String(id) })));
+    const balance = String(circleBalance || "0");
+    const liability = String(accounting.outstanding_liability || "0");
+    state.financialReadiness = {
+      accounting,
+      balance,
+      liability,
+      supplierRegistration,
+      operations: operations.filter(Boolean),
+      checkedAt: new Date().toISOString(),
+      error: false,
+      figuresMatch: balance === liability,
+    };
+    return state.financialReadiness;
   }
 
   async function verifyContributionEligibility(purchaseId, quantity, agreementAccepted) {
@@ -1053,12 +1298,17 @@
       });
       state.accountId = accounts?.[0]?.accountId || state.accountId;
       await syncWalletAccount();
-      if (!state.accountId) showToast("Meteor Wallet did not return a Testnet account.", "error");
+      if (!state.accountId) {
+        showToast("Meteor Wallet did not return a Testnet account.", "error");
+        return false;
+      }
+      return true;
     } catch (error) {
       const browserHint = /popup|window|localhost|permission|extension|not supported/i.test(String(error?.message || error || ""))
         ? " Check that Meteor is enabled for this localhost site and that wallet pop-ups are allowed."
         : "";
       showToast(`Meteor Wallet did not connect. Check the selected Testnet account and try again.${browserHint}`, "error");
+      return false;
     }
   }
 
@@ -1082,7 +1332,15 @@
     if (state.accountId) {
       if (walletButton) walletButton.textContent = shortAccount(state.accountId);
       if (accountLabel) accountLabel.textContent = state.accountId;
-      if (copy) copy.textContent = isMember() ? "Connected with Meteor Wallet. This account is in the initialized community." : "Connected with Meteor Wallet. This account is not in the initialized community.";
+      const supplier = state.suppliers.some((item) => String(item.account_id) === String(state.accountId));
+      const openMembership = ["V4", "V5"].includes(String(state.config?.version || appConfig.contractVersion || "").toUpperCase());
+      if (copy) copy.textContent = supplier
+        ? "Wallet connected. This account is an eligible pilot supplier. Supplier actions do not require buyer community membership."
+        : openMembership
+          ? "Wallet connected. Buyer eligibility is checked for each Group Deal when contributing."
+          : isMember()
+            ? "Wallet connected. This account is in the initialized community."
+            : "Wallet connected. This account is not in the initialized community.";
       if (signout) signout.hidden = false;
     } else {
       if (walletButton) walletButton.textContent = "Connect wallet";
@@ -1132,21 +1390,11 @@
   }
 
   function transactionErrorKind(error) {
-    const message = String(error?.message || error || "").toLowerCase();
-    if (/reject|denied|cancelled|canceled|user rejected|declined/.test(message)) return "wallet-rejected";
-    if (/capacity|full|oversubscribed|last spot|already has a commitment|duplicate/.test(message)) return "full";
-    if (/not enough.*near|insufficient.*near|insufficient balance|lack balance|gas.*balance/.test(message)) return "network-fees";
-    return "failed";
+    return confirmationTools.errorKind(error);
   }
 
   function transactionFriendlyMessage(error, kind, fallback) {
-    if (error?.transactionState === "pending") {
-      return "We’re still checking the result. Your draft is safe and this action will update automatically.";
-    }
-    if (kind === "wallet-rejected") return "Your wallet declined this action. Your draft is safe.";
-    if (kind === "full") return "This action is no longer available because the latest contract state changed. Your draft is safe.";
-    if (kind === "network-fees") return "This wallet does not have enough Testnet NEAR for network fees. No contribution is confirmed.";
-    return fallback || "We couldn't complete this action. Your draft is safe. Please try again.";
+    return confirmationTools.friendlyError(error, fallback);
   }
 
   async function performTransaction(button, label, action, successMessage, options = {}) {
@@ -1156,13 +1404,28 @@
     }
     if (button && state.pendingTransactions.has(button)) return null;
     if (button) state.pendingTransactions.add(button);
-    setBusy(button, true, label);
-    options.onPhase?.("wallet", "Wallet confirmation required", "Review the exact action and approve it in your wallet.");
-    showToast(label);
+    setBusy(button, true, "Waiting for wallet…");
+    options.onPhase?.(
+      "wallet",
+      "Sending this action through Meteor…",
+      "Meteor may request approval. A matching limited Testnet permission can submit this action without opening a new popup.",
+    );
+    showToast("Sending this action through Meteor. It may use an existing limited permission without opening another popup.");
     try {
-      const pendingAction = Promise.resolve().then(action);
-      options.onPhase?.("awaiting", label, "Your wallet request was sent. HarvestPool is checking the result.");
-      const outcome = confirmedTransaction(await pendingAction);
+      const walletWait = await confirmationTools.waitForWalletResult(
+        Promise.resolve().then(action),
+        { timeoutMs: WALLET_RESULT_TIMEOUT_MS },
+      );
+      if (walletWait.state === "pending") {
+        const error = new Error("Meteor has not returned a final response yet.");
+        error.transactionState = "pending";
+        throw error;
+      }
+      if (walletWait.state === "rejected") throw walletWait.error;
+      const walletResult = walletWait.value;
+      options.onPhase?.("submitted", "Your request was submitted.", "Confirming your request against authoritative contract state.");
+      showToast("Your request was submitted.");
+      const outcome = confirmedTransaction(walletResult);
       if (options.confirmOnReturn !== false) {
         options.onPhase?.("confirmed", options.confirmedTitle || "Action confirmed", successMessage);
         showToast(successMessage, "success");
@@ -1170,10 +1433,14 @@
       return outcome;
     } catch (error) {
       const kind = transactionErrorKind(error);
+      if (kind === "network-error" && !error.transactionState) {
+        error.transactionState = "pending";
+        error.networkFailure = true;
+      }
       const message = transactionFriendlyMessage(error, kind, options.failureMessage);
       const phaseCopy = kind === "wallet-rejected"
         ? ["wallet-rejected", "Wallet rejected the action", "No state changed on-chain. Your draft is safe."]
-        : kind === "full"
+        : kind === "state-changed"
           ? ["full", "Contract state changed", "No action was accepted. Your draft is safe."]
           : error?.transactionState === "pending"
             ? ["awaiting", label, "We’re checking the result automatically. Your draft is safe."]
@@ -1212,6 +1479,7 @@
   }
 
   function decorateMoneyText() {
+    if (isV5()) return;
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
     const nodes = [];
     let node;
@@ -1254,7 +1522,7 @@
     });
     const summary = document.createElement("div");
     summary.className = "dashboard-summary";
-    summary.innerHTML = `<span>Total recorded contributions</span><strong>${moneyMarkup(total)}</strong>`;
+    summary.innerHTML = `<span>Total recorded contributions</span><strong>${isV5() ? escapeHtml(usdFromTokenUnits(total)) : moneyMarkup(total)}</strong>`;
     toolbar.append(summary);
   }
 
@@ -1266,7 +1534,7 @@
       if (!purchase) return;
       const summary = document.createElement("p");
       summary.className = "farmer-payment-total";
-      summary.innerHTML = `<strong>Supplier payment</strong> ${moneyMarkup(purchase.total_funded_amount)} after approved fulfillment`;
+      summary.innerHTML = `<strong>Supplier payment</strong> ${escapeHtml(customerPaymentLabel(purchase, purchase.total_funded_amount))} after approved fulfillment`;
       const anchor = card.querySelector("form, .evidence-hash, .field-help, .text-link");
       if (anchor) card.insertBefore(summary, anchor);
       else card.append(summary);
@@ -1298,7 +1566,7 @@
     const price = listedUsd(purchase);
     const { unit } = unitDetails(purchase);
     const waiting = purchase.state === "AwaitingSupplier" ? `<a href="/supplier-invitations/${encodeURIComponent(purchase.id)}">Review supplier invitation</a>` : `<a href="${primaryUrl}">${primaryLabel}</a>`;
-    return `<article class="purchase-card purchase-card-live" data-status="${escapeHtml(purchase.state)}"><div class="purchase-card-top">${statusPill(purchase.state)}<span class="live-card-label">${["V4", "V5"].includes(String(purchase.version).toUpperCase()) ? "Supplier-approved Deal Terms" : "Earlier deal format"}</span></div><h2>${escapeHtml(livePurchaseTitle(purchase))}</h2><p class="purchase-description">${escapeHtml(livePurchaseDescription(purchase))}</p>${packageContentsMarkup(purchase)}<p class="purchase-supplier">${escapeHtml(supplier)}</p><div class="purchase-card-price"><strong>${price ? escapeHtml(price) : escapeHtml(paymentLabel(purchase, purchase.price_per_unit))}</strong><span>per ${escapeHtml(unit)}</span>${price ? `<small>Wallet contribution: ${escapeHtml(paymentLabel(purchase, purchase.price_per_unit))} per ${escapeHtml(unit)}</small>` : ""}</div><div class="progress-label"><span>${quantityLabel(purchase, total)} of ${quantityLabel(purchase, max)} reserved</span><span>${quantityLabel(purchase, availableCapacity(purchase))} available</span></div><div class="progress-track"><span style="width: ${progress}%"></span></div><div class="purchase-card-footer"><span>Last day to join: ${escapeHtml(formatDate(purchase.deadline_ns))}</span>${waiting}</div><button class="card-share-link" type="button" data-action="share-purchase" data-purchase-id="${escapeHtml(purchase.id)}">Share Group Deal</button></article>`;
+    return `<article class="purchase-card purchase-card-live" data-status="${escapeHtml(purchase.state)}"><div class="purchase-card-top">${statusPill(purchase.state)}<span class="live-card-label">${["V4", "V5"].includes(String(purchase.version).toUpperCase()) ? "Supplier-approved Deal Terms" : "Earlier deal format"}</span></div><h2>${escapeHtml(livePurchaseTitle(purchase))}</h2><p class="purchase-description">${escapeHtml(livePurchaseDescription(purchase))}</p>${packageContentsMarkup(purchase)}<p class="purchase-supplier">${escapeHtml(supplier)}</p><div class="purchase-card-price"><strong>${price ? escapeHtml(price) : escapeHtml(paymentLabel(purchase, purchase.price_per_unit))}</strong><span>per ${escapeHtml(unit)}</span>${price && !isV5(purchase) ? `<small>Wallet contribution: ${escapeHtml(paymentLabel(purchase, purchase.price_per_unit))} per ${escapeHtml(unit)}</small>` : ""}</div><div class="progress-label"><span>${quantityLabel(purchase, total)} of ${quantityLabel(purchase, max)} reserved</span><span>${quantityLabel(purchase, availableCapacity(purchase))} available</span></div><div class="progress-track"><span style="width: ${progress}%"></span></div><div class="purchase-card-footer"><span>Last day to join: ${escapeHtml(formatDate(purchase.deadline_ns))}</span>${waiting}</div><button class="card-share-link" type="button" data-action="share-purchase" data-purchase-id="${escapeHtml(purchase.id)}">Share Group Deal</button></article>`;
   }
 
   function renderExplore() {
@@ -1377,7 +1645,7 @@
   }
 
   function decisionForIssue(issue) {
-    if (!issue?.active_decision_id) return null;
+    if (issue?.active_decision_id === null || issue?.active_decision_id === undefined) return null;
     return state.decisions.find((decision) => String(decision.id) === String(issue.active_decision_id)) || null;
   }
 
@@ -1485,21 +1753,74 @@
     const listed = listedUsd(purchase) || "Listed USD price unavailable";
     const { unit } = unitDetails(purchase);
     root.innerHTML = `<div class="details-top"><div><p class="eyebrow">Group Deal #${escapeHtml(purchase.id)}</p><h1>${escapeHtml(livePurchaseTitle(purchase))}</h1><p class="supplier-line">From <strong>${escapeHtml(supplierName(purchase))}</strong> · ${escapeHtml(purchase.supplier_location || "Location not listed")}</p><p class="details-description">${escapeHtml(livePurchaseDescription(purchase))}</p>${packageContentsMarkup(purchase)}</div><div class="details-actions"><button class="share-button" type="button" data-action="share-purchase" data-purchase-id="${escapeHtml(purchase.id)}">${icon("link")}Share Group Deal</button>${action}</div></div>
-      <div class="details-layout"><div><section class="detail-panel funding-panel">${statusPill(purchase.state)}<h2>${escapeHtml(listed)} per ${escapeHtml(unit)}</h2><p class="funding-description">At checkout, your wallet will show exactly ${escapeHtml(formatNear(purchase.price_per_unit))} Testnet NEAR per ${escapeHtml(unit)}. This is separate from the listed USD price.</p><div class="funding-big"><strong>${total} / ${max}</strong><span>${escapeHtml(pluralUnit(unit, max))} reserved</span></div><div class="progress-label"><span>${fundedMemberCount(purchase)} buyers joined</span><span>${quantityLabel(purchase, availableCapacity(purchase))} available</span></div><div class="progress-track"><span style="width: ${progress}%"></span></div><div class="funding-meta"><div><strong>${quantityLabel(purchase, purchase.min_quantity)}</strong><span>minimum needed</span></div><div><strong>Maximum ${quantityLabel(purchase, purchase.max_quantity_per_household)}</strong><span>per buyer</span></div><div><strong>${escapeHtml(formatDate(purchase.deadline_ns))}</strong><span>last day to join or cancel</span></div><div><strong>${escapeHtml(formatDate(purchase.fulfillment_evidence_deadline_ns))}</strong><span>fulfillment due</span></div></div></section><section class="detail-panel" style="margin-top:18px"><span class="section-kicker">Pickup or delivery</span><h2>How members receive the order</h2><p>${escapeHtml(purchase.pickup_or_delivery)}</p><p><strong>Contact the supplier:</strong> ${escapeHtml(purchase.supplier_public_contact)}</p></section></div>
-      <aside><section class="detail-panel detail-panel-dark"><span class="section-kicker">Deal Terms</span><h2>What everyone agreed to</h2><dl class="term-list"><div class="term-row"><dt>You receive</dt><dd>${escapeHtml(purchase.description)}${unitDetails(purchase).contents ? ` · ${escapeHtml(unitDetails(purchase).contents)}` : ""}</dd></div><div class="term-row"><dt>Listed price</dt><dd>${escapeHtml(listed)} per ${escapeHtml(unit)}</dd></div><div class="term-row"><dt>Wallet contribution</dt><dd>${escapeHtml(formatNear(purchase.price_per_unit))} Testnet NEAR per ${escapeHtml(unit)}</dd></div><div class="term-row"><dt>Group target</dt><dd>At least ${quantityLabel(purchase, purchase.min_quantity)} by ${escapeHtml(formatDate(purchase.deadline_ns, true))}</dd></div><div class="term-row"><dt>Buyer limit</dt><dd>Maximum ${quantityLabel(purchase, purchase.max_quantity_per_household)} per buyer</dd></div><div class="term-row"><dt>Voluntary cancellation</dt><dd>Available until the same group closing time</dd></div><div class="term-row"><dt>If the order fails</dt><dd>${escapeHtml(purchase.cancellation_and_refund_terms)}</dd></div><div class="term-row"><dt>Delivery and payment</dt><dd>The supplier submits a delivery reference. Funded buyers confirm fulfillment before payment can be released.</dd></div></dl>${detailsEligibility(purchase)}<details class="technical-details"><summary>Agreement record</summary><p>Supplier wallet: ${escapeHtml(purchase.supplier_id)}</p><p>Terms fingerprint: <code>${escapeHtml(purchase.terms_hash)}</code></p>${agreement ? `<p>Accepted on ${escapeHtml(formatDate(agreement.accepted_at_ns, true))}.</p>` : "<p>The named supplier has not accepted these terms.</p>"}</details></section></aside></div>`;
-    normalizePaymentCopy(root, purchase);
+      <div class="details-layout"><div><section class="detail-panel funding-panel">${statusPill(purchase.state)}<h2>${escapeHtml(listed)} per ${escapeHtml(unit)}</h2><p class="funding-description">${isV5(purchase) ? `Customers pay the listed ${escapeHtml(listed)} per ${escapeHtml(unit)}. Exact Testnet payment details appear before wallet approval.` : `At checkout, your wallet will show exactly ${escapeHtml(paymentLabel(purchase, purchase.price_per_unit))} per ${escapeHtml(unit)}. This is separate from the listed USD price.`}</p><div class="funding-big"><strong>${total} / ${max}</strong><span>${escapeHtml(pluralUnit(unit, max))} reserved</span></div><div class="progress-label"><span>${fundedMemberCount(purchase)} buyers joined</span><span>${quantityLabel(purchase, availableCapacity(purchase))} available</span></div><div class="progress-track"><span style="width: ${progress}%"></span></div><div class="funding-meta"><div><strong>${quantityLabel(purchase, purchase.min_quantity)}</strong><span>minimum needed</span></div><div><strong>Maximum ${quantityLabel(purchase, purchase.max_quantity_per_household)}</strong><span>per buyer</span></div><div><strong>${escapeHtml(formatDate(purchase.deadline_ns))}</strong><span>last day to join or cancel</span></div><div><strong>${escapeHtml(formatDate(purchase.fulfillment_evidence_deadline_ns))}</strong><span>fulfillment due</span></div></div></section><section class="detail-panel" style="margin-top:18px"><span class="section-kicker">Pickup or delivery</span><h2>How members receive the order</h2><p>${escapeHtml(purchase.pickup_or_delivery)}</p><p><strong>Contact the supplier:</strong> ${escapeHtml(purchase.supplier_public_contact)}</p></section></div>
+      <aside><section class="detail-panel detail-panel-dark"><span class="section-kicker">Deal Terms</span><h2>What everyone agreed to</h2><dl class="term-list"><div class="term-row"><dt>You receive</dt><dd>${escapeHtml(purchase.description)}${unitDetails(purchase).contents ? ` · ${escapeHtml(unitDetails(purchase).contents)}` : ""}</dd></div><div class="term-row"><dt>Listed price</dt><dd>${escapeHtml(listed)} per ${escapeHtml(unit)}</dd></div><div class="term-row"><dt>Payment details</dt><dd>${isV5(purchase) ? `${escapeHtml(listed)} per ${escapeHtml(unit)}, settled as exactly ${escapeHtml(paymentLabel(purchase, purchase.price_per_unit))} on Testnet. Test tokens are not a real USD card charge and are not promised to be redeemable for dollars.` : `${escapeHtml(paymentLabel(purchase, purchase.price_per_unit))} per ${escapeHtml(unit)}`}</dd></div><div class="term-row"><dt>Group target</dt><dd>At least ${quantityLabel(purchase, purchase.min_quantity)} by ${escapeHtml(formatDate(purchase.deadline_ns, true))}</dd></div><div class="term-row"><dt>Buyer limit</dt><dd>Maximum ${quantityLabel(purchase, purchase.max_quantity_per_household)} per buyer</dd></div><div class="term-row"><dt>Voluntary cancellation</dt><dd>Available until the same group closing time</dd></div><div class="term-row"><dt>If the order fails</dt><dd>${escapeHtml(purchase.cancellation_and_refund_terms)}</dd></div><div class="term-row"><dt>${isV5(purchase) ? "Testnet fulfillment test" : "Delivery and payment"}</dt><dd>${isV5(purchase) ? "For this smoke test, the supplier submits a simulation reference and funded buyers approve only that Testnet evidence. This does not claim physical delivery. The contract still uses its fulfillment and payment methods." : "The supplier submits a delivery reference. Funded buyers confirm fulfillment before payment can be released."}</dd></div></dl>${detailsEligibility(purchase)}<details class="technical-details"><summary>Agreement record</summary><p>Supplier wallet: ${escapeHtml(purchase.supplier_id)}</p><p>Terms fingerprint: <code>${escapeHtml(purchase.terms_hash)}</code></p>${agreement ? `<p>Accepted on ${escapeHtml(formatDate(agreement.accepted_at_ns, true))}.</p>` : "<p>The named supplier has not accepted these terms.</p>"}</details></section></aside></div>`;
   }
 
   function renderV4Agreement(root, purchase) {
     const capacity = availableCapacity(purchase);
     const fundedSpots = fundedMemberCapacity(purchase);
     const commitment = commitmentFor(purchase);
-    const canContribute = Boolean(state.accountId && !commitment && purchase.state === "Open" && capacity > 0 && fundedSpots > 0);
     const listed = listedUsd(purchase) || "USD price unavailable";
     const { unit, contents } = unitDetails(purchase);
-    root.innerHTML = `<div class="agreement-header"><p class="eyebrow">Deal Terms · #${escapeHtml(purchase.id)}</p><h1>Review the deal before you join.</h1><p>Your spot is secured only after the contribution is confirmed. Every funded buyer gets one vote, regardless of quantity.</p></div><div class="agreement-grid"><section class="agreement-copy"><span class="section-kicker">Deal Terms</span><h2>${escapeHtml(livePurchaseTitle(purchase))}</h2><dl class="term-list agreement-terms"><div class="term-row"><dt>What you receive</dt><dd>${escapeHtml(purchase.description)}</dd></div>${contents ? `<div class="term-row"><dt>Package contents</dt><dd>Each ${escapeHtml(unit)} contains ${escapeHtml(contents)}</dd></div>` : ""}<div class="term-row"><dt>Supplier</dt><dd>${escapeHtml(supplierName(purchase))} · ${escapeHtml(purchase.supplier_location)}</dd></div><div class="term-row"><dt>Listed price</dt><dd>${escapeHtml(listed)} per ${escapeHtml(unit)}</dd></div><div class="term-row"><dt>Wallet contribution</dt><dd>${escapeHtml(formatNear(purchase.price_per_unit))} Testnet NEAR per ${escapeHtml(unit)}</dd></div><div class="term-row"><dt>Group target</dt><dd>${quantityLabel(purchase, purchase.min_quantity)} by ${escapeHtml(formatDate(purchase.deadline_ns, true))}</dd></div><div class="term-row"><dt>Buyer limit</dt><dd>Maximum ${quantityLabel(purchase, purchase.max_quantity_per_household)} per buyer</dd></div><div class="term-row"><dt>Voluntary cancellation ends</dt><dd>${escapeHtml(formatDate(purchase.cancellation_deadline_ns, true))}</dd></div><div class="term-row"><dt>If the deal does not go ahead</dt><dd>${escapeHtml(purchase.cancellation_and_refund_terms)}</dd></div><div class="term-row"><dt>How delivery is confirmed</dt><dd>Each funded buyer gets one public fulfillment vote, regardless of quantity.</dd></div><div class="term-row"><dt>When the supplier is paid</dt><dd>Only after the supplier submits delivery details and enough funded buyers approve fulfillment.</dd></div></dl>${detailsEligibility(purchase)}</section><aside class="contribution-panel"><span class="section-kicker">Join This Deal</span><h2>${escapeHtml(listed)} per ${escapeHtml(unit)}</h2><p>Before wallet approval, you’ll see the exact contribution of ${escapeHtml(formatNear(purchase.price_per_unit))} Testnet NEAR per ${escapeHtml(unit)}. It is separate from the listed USD price.</p><div class="contribution-summary"><div><span>Buyer spots</span><strong>${escapeHtml(spotLabel(fundedSpots))}</strong></div><div><span>Available</span><strong>${quantityLabel(purchase, capacity)}</strong></div><div><span>Buyer limit</span><strong>${quantityLabel(purchase, purchase.max_quantity_per_household)}</strong></div><div><span>Last day to join</span><strong>${escapeHtml(formatDate(purchase.deadline_ns))}</strong></div></div>${!state.accountId ? `<button class="button contribution-connect" type="button" data-connect-wallet>Connect wallet</button>` : ""}<div class="quantity-field"><label for="contribution-quantity">How many ${escapeHtml(pluralUnit(unit))}?</label><div class="quantity-input-wrap"><button type="button" aria-label="Decrease quantity" data-action="quantity-minus" ${canContribute ? "" : "disabled"}>−</button><input id="contribution-quantity" type="number" min="1" max="${Math.max(1, Math.min(capacity, Number(purchase.max_quantity_per_household || capacity)))}" value="1" ${canContribute ? "" : "disabled"}><button type="button" aria-label="Increase quantity" data-action="quantity-plus" ${canContribute ? "" : "disabled"}>+</button></div></div><div class="quantity-total"><span>Wallet contribution</span><strong id="contribution-total">${moneyMarkup(purchase.price_per_unit)}</strong></div><div class="agreement-acceptance"><input id="agreement-acceptance" type="checkbox" required><label for="agreement-acceptance">I have read and accept the Deal Terms, contribution amount, cancellation rules, and refund conditions.</label></div><button class="button" type="button" data-action="contribute" data-purchase-id="${escapeHtml(purchase.id)}" data-eligible="${canContribute ? "true" : "false"}" disabled>Join This Deal</button><p class="contribution-footnote">Your spot appears in My Group Buys only after the contribution is confirmed.</p></aside></div>`;
+    const pendingContribution = state.accountId && pendingActionStore.list(state.accountId).find((action) =>
+      ["commit", "commit_usdc"].includes(action.methodName)
+      && String(action.args?.purchase_id) === String(purchase.id));
+    const phase = state.contributionStatus && String(state.contributionStatus.purchaseId) === String(purchase.id)
+      ? state.contributionStatus
+      : null;
+    const checkoutState = checkoutStateTools.resolve({ purchase, accountId: state.accountId, pending: Boolean(pendingContribution), phase });
+
+    if (checkoutState.kind === "confirmed") {
+      const confirmedCommitment = checkoutState.commitment;
+      clearDraft(root);
+      const total = Number(purchase.total_quantity || 0);
+      const minimum = Number(purchase.min_quantity || 0);
+      const maximum = Number(purchase.max_quantity || 0);
+      const progress = maximum ? Math.min(100, Math.round((total / maximum) * 100)) : 0;
+      const minimumReached = total >= minimum;
+      const paid = isV5(purchase)
+        ? usdFromTokenUnits(confirmedCommitment.amount, Number(purchase.token_decimals || state.config?.token_decimals || 6))
+        : paymentLabel(purchase, confirmedCommitment.amount);
+      const paymentDetails = isV5(purchase)
+        ? `${paymentLabel(purchase, confirmedCommitment.amount)} accepted through Circle’s native Testnet USDC contract ${purchase.token_contract_id || state.config?.token_contract_id}. No USD card charge.`
+        : `${paymentLabel(purchase, confirmedCommitment.amount)} accepted through the connected NEAR Testnet wallet.`;
+      root.innerHTML = `<div class="agreement-header checkout-confirmed-header"><p class="eyebrow">Confirmed · Group Deal #${escapeHtml(purchase.id)}</p><h1>You've joined the Group Deal!</h1><p>Your contribution was confirmed on-chain. Your ${escapeHtml(unit)} is now reserved.</p></div><section class="checkout-confirmed" role="status" aria-live="polite"><div class="checkout-confirmed-mark" aria-hidden="true">${icon("shield")}</div><div class="checkout-confirmed-main"><span class="section-kicker">Place confirmed</span><h2>${escapeHtml(livePurchaseTitle(purchase))}</h2><div class="checkout-confirmed-facts"><div><span>Deal</span><strong>#${escapeHtml(purchase.id)}</strong></div><div><span>Quantity reserved</span><strong>${quantityLabel(purchase, confirmedCommitment.quantity)}</strong></div><div><span>Amount paid</span><strong>${escapeHtml(paid)}</strong></div><div><span>Group progress</span><strong>${quantityLabel(purchase, total)} of ${quantityLabel(purchase, maximum)}</strong></div><div><span>Buyer capacity</span><strong>${escapeHtml(spotLabel(fundedSpots))}</strong></div></div><div class="progress-label"><span>${quantityLabel(purchase, total)} reserved</span><span>${quantityLabel(purchase, capacity)} available</span></div><div class="progress-track"><span style="width: ${progress}%"></span></div><div class="checkout-minimum ${minimumReached ? "is-reached" : ""}"><strong>${minimumReached ? "Group minimum reached" : `${quantityLabel(purchase, Math.max(0, minimum - total))} still needed`}</strong><span>${minimumReached ? "The group has enough reserved quantity to proceed after the joining deadline." : `The deal needs ${quantityLabel(purchase, minimum)} total before the deadline.`}</span></div><div class="checkout-next"><h3>What happens next</h3><p>Track the group in My Group Buys. After the joining deadline, the deal must be finalized before the supplier can submit fulfillment evidence. In this Testnet smoke test, funded buyers approve simulated evidence only; that approval does not claim physical delivery.</p></div><details class="technical-details"><summary>Testnet transaction details</summary><p>${escapeHtml(paymentDetails)}</p><p>Confirmed buyer: <code>${escapeHtml(state.accountId)}</code></p></details><div class="checkout-confirmed-actions"><a class="button button-primary" href="/dashboard">View My Group Buys</a><a class="button button-outline" href="/purchases/${encodeURIComponent(purchase.id)}">Back to Group Deal</a></div></div></section>`;
+      return;
+    }
+
+    const confirming = checkoutState.kind === "confirming";
+    if (confirming) {
+      const quantity = Math.max(1, Number(pendingContribution?.args?.quantity || 1));
+      const rawAmount = (BigInt(String(purchase.price_per_unit || "0")) * BigInt(quantity)).toString();
+      const total = isV5(purchase) ? customerPaymentLabel(purchase, rawAmount) : paymentLabel(purchase, rawAmount);
+      const walletAuthorization = phase?.kind === "wallet";
+      const submitted = phase?.kind === "awaiting";
+      const title = walletAuthorization ? "Approve the payment in your wallet" : submitted ? "Your payment was submitted" : "Unable to verify payment yet";
+      const message = walletAuthorization
+        ? `${testPaymentLabel(purchase, rawAmount)} will pay the listed ${total}. No USD card charge.`
+        : submitted
+          ? "We’re confirming that Circle completed the transfer and that the contract reserved your place."
+          : "We haven't confirmed the result yet. Please don't pay again while we check.";
+      const hash = pendingContribution?.transactionHash
+        ? `<p class="checkout-status-hash">Transaction: <code>${escapeHtml(pendingContribution.transactionHash)}</code></p>`
+        : "";
+      root.innerHTML = `<div class="agreement-header checkout-confirmed-header"><p class="eyebrow">Payment status · Group Deal #${escapeHtml(purchase.id)}</p><h1>${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p></div><section class="checkout-payment-status" role="status" aria-live="polite"><div class="checkout-status-spinner" aria-hidden="true"></div><div><span class="section-kicker">${walletAuthorization ? "Wallet authorization" : "Blockchain confirmation"}</span><h2>${escapeHtml(livePurchaseTitle(purchase))}</h2><dl class="checkout-status-facts"><div><dt>Quantity</dt><dd>${quantityLabel(purchase, quantity)}</dd></div><div><dt>Total</dt><dd>${escapeHtml(total)}</dd></div></dl><p>${walletAuthorization ? "Complete or reject the request in Meteor. Connecting or closing the wallet does not submit another payment." : "HarvestPool will replace this screen as soon as your funded membership appears in authoritative contract state."}</p>${hash}<div class="checkout-confirmed-actions"><button class="button button-primary" type="button" data-action="check-pending-actions">Check payment status</button><a class="button button-outline" href="/purchases/${encodeURIComponent(purchase.id)}">Back to Group Deal</a></div></div></section>`;
+      return;
+    }
+
+    const canContribute = Boolean(state.accountId && !commitment && !confirming && purchase.state === "Open" && capacity > 0 && fundedSpots > 0);
+    const contributionState = confirming
+      ? `<div class="contribution-state state-awaiting" id="contribution-state" role="status" aria-live="polite"><span class="state-dot"></span><div><strong>Confirming your payment</strong><span>HarvestPool is checking the Circle transfer and your funded membership. Do not submit another payment.</span></div></div>`
+      : phase
+        ? `<div class="contribution-state state-${escapeHtml(phase.kind)}" id="contribution-state" role="status" aria-live="polite"><span class="state-dot"></span><div><strong>${escapeHtml(phase.title)}</strong><span>${escapeHtml(phase.message)}</span></div></div>`
+        : "";
+    const paymentCopy = isV5(purchase)
+      ? `Total: ${escapeHtml(listed)} per ${escapeHtml(unit)}. Payment uses ${escapeHtml(testPaymentLabel(purchase, purchase.price_per_unit))} per ${escapeHtml(unit)} through your wallet. No USD card charge.`
+      : `Total: ${escapeHtml(paymentLabel(purchase, purchase.price_per_unit))} per ${escapeHtml(unit)} through your NEAR Testnet wallet.`;
+    const totalLabel = isV5(purchase) ? "Total" : "Wallet contribution";
+    root.innerHTML = `<div class="agreement-header"><p class="eyebrow">Deal Terms · #${escapeHtml(purchase.id)}</p><h1>Review the deal before you join.</h1><p>Your spot is secured only after the contribution is confirmed. Every funded buyer gets one vote, regardless of quantity.</p></div><div class="agreement-grid"><section class="agreement-copy"><span class="section-kicker">Deal Terms</span><h2>${escapeHtml(livePurchaseTitle(purchase))}</h2><dl class="term-list agreement-terms"><div class="term-row"><dt>What you receive</dt><dd>${escapeHtml(purchase.description)}</dd></div>${contents ? `<div class="term-row"><dt>Package contents</dt><dd>Each ${escapeHtml(unit)} contains ${escapeHtml(contents)}</dd></div>` : ""}<div class="term-row"><dt>Supplier</dt><dd>${escapeHtml(supplierName(purchase))} · ${escapeHtml(purchase.supplier_location)}</dd></div><div class="term-row"><dt>Listed price</dt><dd>${escapeHtml(listed)} per ${escapeHtml(unit)}</dd></div><div class="term-row"><dt>Payment details</dt><dd>${isV5(purchase) ? `${escapeHtml(paymentLabel(purchase, purchase.price_per_unit))} per ${escapeHtml(unit)} using native Circle Testnet USDC. No USD card charge.` : `${escapeHtml(paymentLabel(purchase, purchase.price_per_unit))} per ${escapeHtml(unit)} using native Testnet NEAR.`}</dd></div><div class="term-row"><dt>Group target</dt><dd>${quantityLabel(purchase, purchase.min_quantity)} by ${escapeHtml(formatDate(purchase.deadline_ns, true))}</dd></div><div class="term-row"><dt>Buyer limit</dt><dd>Maximum ${quantityLabel(purchase, purchase.max_quantity_per_household)} per buyer</dd></div><div class="term-row"><dt>Voluntary cancellation ends</dt><dd>${escapeHtml(formatDate(purchase.cancellation_deadline_ns, true))}</dd></div><div class="term-row"><dt>If the deal does not go ahead</dt><dd>${escapeHtml(purchase.cancellation_and_refund_terms)}</dd></div><div class="term-row"><dt>How delivery is confirmed</dt><dd>Each funded buyer gets one public fulfillment vote, regardless of quantity.</dd></div><div class="term-row"><dt>When the supplier is paid</dt><dd>Only after the supplier submits delivery details and enough funded buyers approve fulfillment.</dd></div></dl>${detailsEligibility(purchase)}</section><aside class="contribution-panel"><span class="section-kicker">Join This Deal</span><h2>${escapeHtml(listed)} per ${escapeHtml(unit)}</h2><p>${paymentCopy}</p><div class="contribution-summary"><div><span>Buyer spots</span><strong>${escapeHtml(spotLabel(fundedSpots))}</strong></div><div><span>Available</span><strong>${quantityLabel(purchase, capacity)}</strong></div><div><span>Buyer limit</span><strong>${quantityLabel(purchase, purchase.max_quantity_per_household)}</strong></div><div><span>Last day to join</span><strong>${escapeHtml(formatDate(purchase.deadline_ns))}</strong></div></div>${contributionState}${!state.accountId ? `<button class="button contribution-connect" type="button" data-connect-wallet>Connect wallet</button>` : ""}<div class="quantity-field"><label for="contribution-quantity">How many ${escapeHtml(pluralUnit(unit))}?</label><div class="quantity-input-wrap"><button type="button" aria-label="Decrease quantity" data-action="quantity-minus" ${canContribute ? "" : "disabled"}>−</button><input id="contribution-quantity" type="number" min="1" max="${Math.max(1, Math.min(capacity, Number(purchase.max_quantity_per_household || capacity)))}" value="1" ${canContribute ? "" : "disabled"}><button type="button" aria-label="Increase quantity" data-action="quantity-plus" ${canContribute ? "" : "disabled"}>+</button></div></div><div class="quantity-total"><span>${totalLabel}</span><strong id="contribution-total">${isV5(purchase) ? escapeHtml(listed) : moneyMarkup(purchase.price_per_unit)}</strong></div><div class="agreement-acceptance"><input id="agreement-acceptance" type="checkbox" required ${confirming ? "disabled" : ""}><label for="agreement-acceptance">I have read and accept the Deal Terms, contribution amount, cancellation rules, and refund conditions.</label></div><button class="button" type="button" data-action="contribute" data-purchase-id="${escapeHtml(purchase.id)}" data-eligible="${canContribute ? "true" : "false"}" disabled>${confirming ? "Confirming Payment…" : "Join This Deal"}</button><p class="contribution-footnote">Your spot appears in My Group Buys only after the contribution is confirmed.</p></aside></div>`;
     root.dataset.price = purchase.price_per_unit;
-    normalizePaymentCopy(root, purchase);
     updateContributionTotal();
     updateAgreementAcceptance();
   }
@@ -1517,8 +1838,7 @@
       : purchase.state === "AwaitingSupplier" ? `<div class="eligibility-callout warning">${icon("shield")}<span>This invitation names a different supplier wallet. The link alone cannot accept the terms.</span></div>`
       : `<div class="eligibility-callout">${icon("shield")}<span>${escapeHtml(formatStatus(purchase.state))}</span></div>`;
     const { unit, contents } = unitDetails(purchase);
-    root.innerHTML = `<div class="agreement-header"><p class="eyebrow">Supplier invitation · Group Deal #${escapeHtml(purchase.id)}</p><h1>${escapeHtml(supplierName(purchase))}, review the complete offer.</h1><p>Only the named supplier wallet can approve these exact Deal Terms.</p></div><div class="agreement-grid"><section class="agreement-copy"><h2>${escapeHtml(livePurchaseTitle(purchase))}</h2><dl class="term-list agreement-terms"><div class="term-row"><dt>Product</dt><dd>${escapeHtml(purchase.description)}</dd></div>${contents ? `<div class="term-row"><dt>Package contents</dt><dd>Each ${escapeHtml(unit)} contains ${escapeHtml(contents)}</dd></div>` : ""}<div class="term-row"><dt>Listed price</dt><dd>${escapeHtml(listedUsd(purchase) || "Unavailable")} per ${escapeHtml(unit)}</dd></div><div class="term-row"><dt>Wallet contribution</dt><dd>${escapeHtml(formatNear(purchase.price_per_unit))} Testnet NEAR per ${escapeHtml(unit)}</dd></div><div class="term-row"><dt>Deal range</dt><dd>${quantityLabel(purchase, purchase.min_quantity)}–${quantityLabel(purchase, purchase.max_quantity)}</dd></div><div class="term-row"><dt>Buyer limit</dt><dd>Up to ${quantityLabel(purchase, purchase.max_quantity_per_household)} per buyer</dd></div><div class="term-row"><dt>Buyer capacity</dt><dd>Up to ${purchase.max_funded_members} funded buyers</dd></div><div class="term-row"><dt>Group closes</dt><dd>${escapeHtml(formatDate(purchase.deadline_ns, true))}</dd></div><div class="term-row"><dt>Fulfillment due</dt><dd>${escapeHtml(formatDate(purchase.fulfillment_evidence_deadline_ns, true))}</dd></div><div class="term-row"><dt>Pickup or delivery</dt><dd>${escapeHtml(purchase.pickup_or_delivery)}</dd></div><div class="term-row"><dt>Refund promise</dt><dd>${escapeHtml(purchase.cancellation_and_refund_terms)}</dd></div></dl><details class="technical-details"><summary>Agreement record</summary><code>${escapeHtml(purchase.terms_hash)}</code></details></section><aside class="contribution-panel"><span class="section-kicker">Supplier response</span><h2>${escapeHtml(formatStatus(purchase.state))}</h2><p>Approving locks your supplier account and these complete terms. Contributions then open.</p>${controls}</aside></div>`;
-    normalizePaymentCopy(root, purchase);
+    root.innerHTML = `<div class="agreement-header"><p class="eyebrow">Supplier invitation · Group Deal #${escapeHtml(purchase.id)}</p><h1>${escapeHtml(supplierName(purchase))}, review the complete offer.</h1><p>Only the named supplier wallet can approve these exact Deal Terms.</p></div><div class="agreement-grid"><section class="agreement-copy"><h2>${escapeHtml(livePurchaseTitle(purchase))}</h2><dl class="term-list agreement-terms"><div class="term-row"><dt>Product</dt><dd>${escapeHtml(purchase.description)}</dd></div>${contents ? `<div class="term-row"><dt>Package contents</dt><dd>Each ${escapeHtml(unit)} contains ${escapeHtml(contents)}</dd></div>` : ""}<div class="term-row"><dt>Listed price</dt><dd>${escapeHtml(listedUsd(purchase) || "Unavailable")} per ${escapeHtml(unit)}</dd></div><div class="term-row"><dt>Payment details</dt><dd>${isV5(purchase) ? `${escapeHtml(listedUsd(purchase) || "Unavailable")} per ${escapeHtml(unit)}, settled as exactly ${escapeHtml(paymentLabel(purchase, purchase.price_per_unit))} on Testnet. Test tokens are not a real USD card charge and are not promised to be redeemable for dollars.` : `${escapeHtml(paymentLabel(purchase, purchase.price_per_unit))} per ${escapeHtml(unit)}`}</dd></div><div class="term-row"><dt>Deal range</dt><dd>${quantityLabel(purchase, purchase.min_quantity)}–${quantityLabel(purchase, purchase.max_quantity)}</dd></div><div class="term-row"><dt>Buyer limit</dt><dd>Up to ${quantityLabel(purchase, purchase.max_quantity_per_household)} per buyer</dd></div><div class="term-row"><dt>Buyer capacity</dt><dd>Up to ${purchase.max_funded_members} funded buyers</dd></div><div class="term-row"><dt>Group closes</dt><dd>${escapeHtml(formatDate(purchase.deadline_ns, true))}</dd></div><div class="term-row"><dt>Fulfillment due</dt><dd>${escapeHtml(formatDate(purchase.fulfillment_evidence_deadline_ns, true))}</dd></div><div class="term-row"><dt>Pickup or delivery</dt><dd>${escapeHtml(purchase.pickup_or_delivery)}</dd></div><div class="term-row"><dt>Refund promise</dt><dd>${escapeHtml(purchase.cancellation_and_refund_terms)}</dd></div></dl><details class="technical-details"><summary>Agreement record</summary><code>${escapeHtml(purchase.terms_hash)}</code></details></section><aside class="contribution-panel"><span class="section-kicker">Supplier response</span><h2>${escapeHtml(formatStatus(purchase.state))}</h2><p>Approving locks your supplier account and these complete terms. Contributions then open.</p>${controls}</aside></div>`;
   }
 
   function renderDetailsPage() {
@@ -1559,14 +1879,61 @@
     root.insertAdjacentHTML("beforeend", renderPurchaseIssues(purchase));
   }
 
+  function financialReadinessMarkup(purchase) {
+    if (!isV5(purchase)) return "";
+    const readiness = state.financialReadiness;
+    if (!readiness || readiness.error) {
+      return `<section class="detail-panel payout-readiness"><span class="section-kicker">Escrow safety check</span><h2>Payout checks are unavailable.</h2><p>No payment action is enabled until the Circle balance, liability, supplier registration, reconciliation snapshot, and outbound operations can all be read.</p><button class="button button-outline button-small" type="button" data-action="refresh-payout-checks">Retry payout checks</button></section>`;
+    }
+    const accounting = readiness.accounting || {};
+    const decimals = Number(purchase.token_decimals || state.config?.token_decimals || 6);
+    const balance = `${usdcTools.formatUnits(readiness.balance, decimals)} USDC`;
+    const liability = `${usdcTools.formatUnits(readiness.liability, decimals)} USDC`;
+    const reconciliation = usdcTools.reconciliationSnapshot(
+      accounting,
+      readiness.balance,
+      readiness.liability,
+      Date.parse(readiness.checkedAt),
+      RECONCILIATION_MAX_AGE_MS,
+    );
+    const pendingFinancialAction = state.accountId && pendingActionStore.list(state.accountId).some((action) =>
+      ["reconcile_token_balance", "release_payment"].includes(action.methodName));
+    const noOperations = readiness.operations.length === 0;
+    const payoutReady = purchase.state === "FulfillmentApproved"
+      && readiness.figuresMatch
+      && Boolean(readiness.supplierRegistration)
+      && noOperations
+      && reconciliation.ready
+      && !pendingFinancialAction;
+    const operationSummary = noOperations
+      ? "None"
+      : readiness.operations.map((operation) => `#${operation.id} ${operation.kind} · ${operation.state} · ${customerPaymentLabel(purchase, operation.amount)} to ${operation.recipient_id}`).join("; ");
+    const reconciliationLabel = reconciliation.ready
+      ? "balanced · fresh and matches the final reads"
+      : reconciliation.matches
+        ? "balanced · snapshot is stale; reconcile again"
+        : `${accounting.reconciliation_status || "not-reconciled"} · fresh matching snapshot required`;
+    const reconciliationNext = purchase.state === "Completed"
+      ? "Post-payment escrow is recorded at zero balance and zero liability."
+      : reconciliation.fresh
+        ? "Next action: review supplier payment. No payment has been submitted."
+        : "This confirmed snapshot is stale for payment authorization; reconcile again before payment.";
+    const successMarkup = reconciliation.matches
+      ? `<div class="reconciliation-success" role="status"><strong>Escrow reconciliation successful</strong><span>Observed balance: ${escapeHtml(balance)} · Outstanding liability: ${escapeHtml(liability)} · Status: balanced.</span><span>${escapeHtml(reconciliationNext)}</span></div>`
+      : "";
+    const pendingCopy = pendingFinancialAction ? " An unresolved financial transaction is still being checked." : "";
+    return `<section class="detail-panel payout-readiness" aria-labelledby="payout-readiness-heading"><span class="section-kicker">Escrow safety check</span><h2 id="payout-readiness-heading">Fresh reads required before supplier payment</h2><p>These are finality reads, not permission to move funds. Refresh immediately before reconciliation and again before payment.</p><dl class="term-list"><div class="term-row"><dt>Circle balance held by V5</dt><dd>${escapeHtml(balance)}</dd></div><div class="term-row"><dt>Outstanding liability</dt><dd>${escapeHtml(liability)}</dd></div><div class="term-row"><dt>Purchase financial state</dt><dd>${escapeHtml(purchase.state)} · ${escapeHtml(customerPaymentLabel(purchase, purchase.total_funded_amount))} recorded for Deal #${escapeHtml(purchase.id)}</dd></div><div class="term-row"><dt>Supplier token registration</dt><dd>${readiness.supplierRegistration ? "Registered" : "Not registered — payout blocked"}</dd></div><div class="term-row"><dt>Previous outbound operations</dt><dd>${escapeHtml(operationSummary)}</dd></div><div class="term-row"><dt>Stored reconciliation</dt><dd>${escapeHtml(reconciliationLabel)}</dd></div></dl>${successMarkup}<p class="field-help">Checked in this browser at ${escapeHtml(formatQuoteTime(readiness.checkedAt))}. ${readiness.figuresMatch ? "Circle balance and liability match." : "STOP: Circle balance and liability disagree."}${escapeHtml(pendingCopy)}</p><div class="payout-readiness-actions"><button class="button button-outline button-small" type="button" data-action="refresh-payout-checks">Refresh payout checks</button>${["FulfillmentApproved", "Completed"].includes(purchase.state) ? `<button class="button button-outline button-small" type="button" data-action="reconcile-escrow">${purchase.state === "Completed" ? "Authorize post-payout reconciliation" : "Authorize fresh reconciliation"}</button>` : ""}${purchase.state === "FulfillmentApproved" ? `<button class="button button-primary" type="button" data-action="release-payment" data-purchase-id="${escapeHtml(purchase.id)}" ${payoutReady ? "" : "disabled aria-disabled=\"true\""}>Review &amp; release ${escapeHtml(customerPaymentLabel(purchase, purchase.total_funded_amount))}</button>` : ""}</div>${purchase.state === "FulfillmentApproved" && !payoutReady ? `<p class="field-help"><strong>Payment remains blocked.</strong> Complete a fresh matching reconciliation and resolve every failed check first.</p>` : ""}${purchase.state === "Completed" ? `<p class="field-help">Run the separately authorized post-payout reconciliation, then verify both the Circle balance and outstanding liability are zero.</p>` : ""}</section>`;
+  }
+
   function decorateDetailsActions() {
     const purchase = state.currentPurchase;
     const actions = $(".details-actions");
     if (!purchase || !actions) return;
     const actionMarkup = [];
+    if ((purchase.state === "AwaitingSupplier" || purchase.state === "Open") && deadlineHasPassed(purchase.deadline_ns)) actionMarkup.push(`<button class="button button-outline" type="button" data-action="finalize" data-purchase-id="${escapeHtml(purchase.id)}">Review finalization</button>`);
     if ((purchase.state === "Funded" || purchase.state === "FulfillmentPending") && deadlineHasPassed(purchase.fulfillment_evidence_deadline_ns)) actionMarkup.push(`<button class="button button-outline" type="button" data-action="expire-unfulfilled" data-purchase-id="${escapeHtml(purchase.id)}">Mark unfulfilled</button>`);
-    if (purchase.state === "FulfillmentApproved") actionMarkup.push(`<button class="button button-primary" type="button" data-action="release-payment" data-purchase-id="${escapeHtml(purchase.id)}">Release supplier payment</button>`);
     if (actionMarkup.length) actions.insertAdjacentHTML("beforeend", actionMarkup.join(""));
+    if (isV5(purchase)) $("#details-content")?.insertAdjacentHTML("beforeend", financialReadinessMarkup(purchase));
   }
 
   function renderAgreementPage() {
@@ -1627,11 +1994,11 @@
       const commitment = commitmentFor(purchase);
       const funded = commitment.state === "Active" && isFundedMember(purchase);
       const listed = listedUsd(purchase);
-      const refundAction = commitment.state === "Refundable" ? `<button class="button button-primary button-small" type="button" data-action="claim-refund" data-purchase-id="${escapeHtml(purchase.id)}">Claim Refund</button>` : "";
+      const refundAction = commitment.state === "Refundable" ? `<button class="button button-primary button-small" type="button" data-action="claim-refund" data-purchase-id="${escapeHtml(purchase.id)}">Claim ${escapeHtml(customerPaymentLabel(purchase, commitment.amount))} refund</button>` : "";
       const cancelAction = funded && purchase.state === "Open" && !deadlineHasPassed(purchase.cancellation_deadline_ns) ? `<button class="button button-outline button-small" type="button" data-action="cancel-commitment" data-purchase-id="${escapeHtml(purchase.id)}">Cancel Before Deadline</button>` : "";
       const issueAction = funded && appConfig.v3ContractId ? `<a class="button button-outline button-small" href="/purchases/${encodeURIComponent(purchase.id)}/issue">Raise an Issue</a>` : "";
       const listedTotal = listed ? `${listed} × ${commitment.quantity}` : "Listed price unavailable";
-      return `<article class="member-purchase-card"><div class="purchase-card-top">${statusPill(purchase.state)}<span class="section-kicker">Deal #${escapeHtml(purchase.id)}</span></div><h3>${escapeHtml(livePurchaseTitle(purchase))}</h3><p class="purchase-supplier">Supplier: ${escapeHtml(supplierName(purchase))}</p>${packageContentsMarkup(purchase)}<p><span class="member-funded-status ${funded ? "is-funded" : ""}">${funded ? "Spot secured" : `Order status: ${escapeHtml(commitment.state)}`}</span></p><div class="member-card-meta"><span><strong>${quantityLabel(purchase, commitment.quantity)}</strong> reserved</span><span><strong>${escapeHtml(listedTotal)}</strong> listed value</span><span><strong>${escapeHtml(formatNear(commitment.amount))} Testnet NEAR</strong> contributed</span><span><strong>${quantityLabel(purchase, purchase.total_quantity)} of ${quantityLabel(purchase, purchase.min_quantity)}</strong> toward minimum</span><span><strong>${escapeHtml(formatDate(purchase.deadline_ns))}</strong> deal closes</span><span><strong>${escapeHtml(formatDate(purchase.fulfillment_evidence_deadline_ns))}</strong> fulfillment due</span></div><div class="card-actions"><a class="button button-dark button-small" href="/purchases/${encodeURIComponent(purchase.id)}">View Group Buy</a>${issueAction}${cancelAction}${refundAction}</div></article>`;
+      return `<article class="member-purchase-card"><div class="purchase-card-top">${statusPill(purchase.state)}<span class="section-kicker">Deal #${escapeHtml(purchase.id)}</span></div><h3>${escapeHtml(livePurchaseTitle(purchase))}</h3><p class="purchase-supplier">Supplier: ${escapeHtml(supplierName(purchase))}</p>${packageContentsMarkup(purchase)}<p><span class="member-funded-status ${funded ? "is-funded" : ""}">${funded ? "Spot secured" : `Order status: ${escapeHtml(commitment.state)}`}</span></p><div class="member-card-meta"><span><strong>${quantityLabel(purchase, commitment.quantity)}</strong> reserved</span><span><strong>${escapeHtml(listedTotal)}</strong> listed value</span><span><strong>${escapeHtml(customerPaymentLabel(purchase, commitment.amount))}</strong> contributed</span><span><strong>${quantityLabel(purchase, purchase.total_quantity)} of ${quantityLabel(purchase, purchase.min_quantity)}</strong> toward minimum</span><span><strong>${escapeHtml(formatDate(purchase.deadline_ns))}</strong> deal closes</span><span><strong>${escapeHtml(formatDate(purchase.fulfillment_evidence_deadline_ns))}</strong> fulfillment due</span></div><div class="card-actions"><a class="button button-dark button-small" href="/purchases/${encodeURIComponent(purchase.id)}">View Group Buy</a>${issueAction}${cancelAction}${refundAction}</div></article>`;
     };
     const createdCard = (purchase) => {
       const invitation = purchase.state === "AwaitingSupplier" ? `<a class="button button-primary button-small" href="/supplier-invitations/${encodeURIComponent(purchase.id)}">View Supplier Invitation</a>` : "";
@@ -1648,13 +2015,14 @@
     const yes = isOffer ? Number(purchase.offer_yes_votes || 0) : Number(purchase.fulfillment_yes_votes || 0);
     const no = isOffer ? Number(purchase.offer_no_votes || 0) : Number(purchase.fulfillment_no_votes || 0);
     const eligible = isOffer ? isMember() : isFundedMember(purchase);
-    const title = isOffer ? "Cast Your Vote" : "Approve Fulfillment";
-    const copy = isOffer ? "The current V2 contract uses this community vote to open contributions. It does not authorize a purchase payment." : "Only an Active funded commitment makes this wallet eligible to review the farmer’s fulfillment evidence.";
+    const simulated = !isOffer && isV5(purchase);
+    const title = isOffer ? "Cast Your Vote" : simulated ? "Approve Testnet Evidence" : "Approve Fulfillment";
+    const copy = isOffer ? "The current V2 contract uses this community vote to open contributions. It does not authorize a purchase payment." : simulated ? "This smoke test records approval of simulated fulfillment evidence only. No physical delivery is represented. Only an Active funded commitment is eligible." : "Only an Active funded commitment makes this wallet eligible to review the farmer’s fulfillment evidence.";
     const recorded = recordedVote(purchase.id, type);
     const decision = recorded
       ? `<div class="decision-recorded" role="status"><strong>Your recorded decision: ${recorded.approve ? "Yes" : "No"}</strong><span>Current group status: ${escapeHtml(formatStatus(purchase.state))}. This vote attaches 0 NEAR; network gas may apply.</span></div>`
       : eligible
-        ? `<div class="vote-actions"><button class="button button-approve" type="button" data-action="vote" data-vote-type="${isOffer ? "offer" : "fulfillment"}" data-purchase-id="${escapeHtml(purchase.id)}" data-approve="true">${isOffer ? "Cast Your Vote · Yes" : "Approve Fulfillment"}</button><button class="button button-reject" type="button" data-action="vote" data-vote-type="${isOffer ? "offer" : "fulfillment"}" data-purchase-id="${escapeHtml(purchase.id)}" data-approve="false">${isOffer ? "Cast Your Vote · No" : "Reject Fulfillment"}</button></div>`
+        ? `<div class="vote-actions"><button class="button button-approve" type="button" data-action="vote" data-vote-type="${isOffer ? "offer" : "fulfillment"}" data-purchase-id="${escapeHtml(purchase.id)}" data-approve="true">${isOffer ? "Cast Your Vote · Yes" : simulated ? "Approve Simulated Evidence" : "Approve Fulfillment"}</button><button class="button button-reject" type="button" data-action="vote" data-vote-type="${isOffer ? "offer" : "fulfillment"}" data-purchase-id="${escapeHtml(purchase.id)}" data-approve="false">${isOffer ? "Cast Your Vote · No" : simulated ? "Reject Simulated Evidence" : "Reject Fulfillment"}</button></div>`
         : `<div class="eligibility-label">${state.accountId ? (isOffer ? "This wallet is not in the initialized community." : "Only funded members can vote on fulfillment.") : "Connect a wallet to check eligibility."}</div>`;
     return `<article class="decision-card"><div class="purchase-card-top">${statusPill(purchase.state)}<span class="section-kicker">#${escapeHtml(purchase.id)}</span></div><h3>${title}</h3><p>${copy}</p><div class="decision-count"><strong>${yes} / ${required}</strong><span>yes votes · ${no} no</span></div><p class="decision-cost">Voting attaches 0 NEAR. The wallet may charge network gas.</p>${decision}<a class="text-link" style="margin-top: 17px" href="/purchases/${encodeURIComponent(purchase.id)}" target="_blank" rel="noopener noreferrer">Review purchase <span aria-hidden="true">↗</span></a></article>`;
   }
@@ -1665,7 +2033,7 @@
       const offerDecision = recordedVote(purchase.id, "offer");
       const fulfillmentDecision = recordedVote(purchase.id, "fulfillment");
       if (isMember() && offerDecision && purchase.state !== "Proposed") rows.push(`<div class="decision-history-row"><div><strong>Offer decision · purchase #${escapeHtml(purchase.id)}</strong><span>Your recorded decision: ${offerDecision.approve ? "Yes" : "No"} · ${purchase.state === "Failed" ? "Order did not complete" : "Offer moved past proposal"}</span></div><a href="/purchases/${encodeURIComponent(purchase.id)}" target="_blank" rel="noopener noreferrer">Review <span aria-hidden="true">↗</span></a></div>`);
-      if (isFundedMember(purchase) && fulfillmentDecision && ["FulfillmentApproved", "PaymentPending", "Completed", "Failed"].includes(purchase.state)) rows.push(`<div class="decision-history-row"><div><strong>Fulfillment decision · purchase #${escapeHtml(purchase.id)}</strong><span>Your recorded decision: ${fulfillmentDecision.approve ? "Approve" : "Reject"} · ${purchase.state === "Failed" ? "Order failed; refunds follow contract" : purchase.state === "Completed" ? "Delivery approved; payment completed" : "Delivery approved"}</span></div><a href="/purchases/${encodeURIComponent(purchase.id)}" target="_blank" rel="noopener noreferrer">Review <span aria-hidden="true">↗</span></a></div>`);
+      if (isFundedMember(purchase) && fulfillmentDecision && ["FulfillmentApproved", "PaymentPending", "Completed", "Failed"].includes(purchase.state)) rows.push(`<div class="decision-history-row"><div><strong>${isV5(purchase) ? "Testnet evidence decision" : "Fulfillment decision"} · purchase #${escapeHtml(purchase.id)}</strong><span>Your recorded decision: ${fulfillmentDecision.approve ? "Approve" : "Reject"} · ${purchase.state === "Failed" ? "Order failed; refunds follow contract" : isV5(purchase) ? (purchase.state === "Completed" ? "Simulated evidence approved; Testnet payment completed. No physical delivery is represented." : "Simulated evidence approved. No physical delivery is represented.") : purchase.state === "Completed" ? "Delivery approved; payment completed" : "Delivery approved"}</span></div><a href="/purchases/${encodeURIComponent(purchase.id)}" target="_blank" rel="noopener noreferrer">Review <span aria-hidden="true">↗</span></a></div>`);
     });
     return rows.length ? `<section class="decision-history"><div class="section-heading-inline"><div><span class="section-kicker">Past decisions</span><h2>Outcomes from the contract</h2></div><span class="meta-label">Public voting record</span></div><div class="decision-history-list">${rows.join("")}</div></section>` : "";
   }
@@ -1718,6 +2086,27 @@
       root.innerHTML = `<div class="connect-card"><div class="connect-card-mark">${icon("shield")}</div><div><h2>Connect a wallet to raise an issue.</h2><p>Only a confirmed funded member can start an issue for a purchase.</p></div><button class="button button-dark" type="button" data-connect-wallet>Connect wallet</button></div>`;
       return;
     }
+    const purchase = state.purchases.find((item) => String(item.id) === String(id));
+    const pendingIssue = pendingActionStore.list(state.accountId).find((action) =>
+      action.methodName === "raise_issue" && String(action.args?.purchase_id) === String(id));
+    const requestedNewIssue = new URLSearchParams(window.location.search).get("new") === "1";
+    const confirmedIssue = state.issues.find((issue) =>
+      String(issue.purchase_id) === String(id)
+      && String(issue.raised_by) === String(state.accountId)
+      && (state.confirmedIssueId === null || String(issue.id) === String(state.confirmedIssueId)));
+    if (!requestedNewIssue && confirmedIssue) {
+      const decision = decisionForIssue(confirmedIssue);
+      const issueHref = `/purchases/${encodeURIComponent(id)}`;
+      const canRequest = confirmedIssue.state === "Open"
+        && (confirmedIssue.active_decision_id === null || confirmedIssue.active_decision_id === undefined)
+        && Boolean(purchase && isFundedMember(purchase));
+      root.innerHTML = `<section class="checkout-confirmed issue-confirmed" role="status" aria-live="polite"><div class="checkout-confirmed-mark" aria-hidden="true">${icon("shield")}</div><div class="checkout-confirmed-main"><span class="section-kicker">Issue confirmed on-chain</span><h1>Your issue has been submitted!</h1><dl class="checkout-status-facts"><div><dt>Issue subject</dt><dd>${escapeHtml(confirmedIssue.subject)}</dd></div><div><dt>Issue ID</dt><dd>#${escapeHtml(confirmedIssue.id)}</dd></div><div><dt>Group Deal</dt><dd>#${escapeHtml(confirmedIssue.purchase_id)}</dd></div><div><dt>Current issue status</dt><dd>${escapeHtml(issueStateLabel(confirmedIssue.state))}</dd></div><div><dt>Submitted by</dt><dd>${escapeHtml(confirmedIssue.raised_by)}</dd></div></dl><div class="checkout-confirmed-actions"><a class="button button-outline" href="${issueHref}">${decision ? "View Group Vote" : "View issue"}</a>${canRequest ? `<a class="button button-primary" href="${issueHref}">Request Group Vote</a>` : ""}</div><p class="field-help">This V3 record does not change Deal #${escapeHtml(confirmedIssue.purchase_id)}'s immutable terms or move funds.</p><a class="text-link" href="/purchases/${encodeURIComponent(id)}/issue?new=1">Raise a different issue</a></div></section>`;
+      return;
+    }
+    if (pendingIssue) {
+      root.innerHTML = `<section class="checkout-payment-status" role="status" aria-live="polite"><div class="checkout-status-spinner" aria-hidden="true"></div><div><span class="section-kicker">Blockchain confirmation</span><h1>Confirming your issue…</h1><p>We haven't confirmed the result yet. Please don't submit again while we check.</p>${pendingIssue.transactionHash ? `<p>Transaction: <code>${escapeHtml(pendingIssue.transactionHash)}</code></p>` : ""}<div class="checkout-confirmed-actions"><button class="button button-primary" type="button" data-action="check-pending-actions">Check issue status</button><a class="button button-outline" href="/purchases/${encodeURIComponent(id)}">Back to Group Deal</a></div></div></section>`;
+      return;
+    }
     root.innerHTML = `<div class="issue-form-header"><p class="eyebrow">Purchase conversation</p><h1>Raise a concern without the awkward conversation.</h1><p>Share what changed. The group can clarify it or decide together when a vote is needed.</p></div>${renderRaiseIssueForm(id)}<p class="contract-note">Your issue is recorded with the purchase. It does not change price, quantity, supplier, refunds, or pooled funds.</p>`;
   }
 
@@ -1729,7 +2118,7 @@
       root.innerHTML = `<div class="dashboard-toolbar"><div><span class="section-kicker">Connected wallet</span><h2>${escapeHtml(shortAccount(state.accountId))}</h2></div><span class="wallet-caption">Named supplier</span></div><div class="dashboard-empty"><div class="empty-icon">${icon("leaf")}</div><h2>No assigned purchases yet.</h2><p>Purchases appear here when this wallet is the named supplier.</p></div>`;
       return;
     }
-    root.innerHTML = `<div class="dashboard-toolbar"><div><span class="section-kicker">Connected supplier wallet</span><h2>Orders needing your handoff</h2></div><span class="wallet-caption">${escapeHtml(shortAccount(state.accountId))}</span></div><div class="farmer-grid">${ownPurchases.map((purchase) => `<article class="farmer-card"><div class="purchase-card-top">${statusPill(purchase.state)}<span class="section-kicker">#${escapeHtml(purchase.id)}</span></div><h3>${escapeHtml(livePurchaseTitle(purchase))}</h3><p>${quantityLabel(purchase, purchase.total_quantity)} of ${quantityLabel(purchase, purchase.max_quantity)} reserved · fulfill by ${escapeHtml(formatDate(purchase.fulfillment_evidence_deadline_ns))}</p>${packageContentsMarkup(purchase)}${purchase.fulfillment_evidence_hash ? `<div class="evidence-hash">Delivery details submitted: ${escapeHtml(purchase.fulfillment_evidence_hash)}</div>` : purchase.state === "Funded" ? `<form class="evidence-form" data-evidence-form data-draft-form="fulfillment-evidence" data-draft-purchase-id="${escapeHtml(purchase.id)}" data-purchase-id="${escapeHtml(purchase.id)}"><label for="evidence-${escapeHtml(purchase.id)}">Delivery reference</label><input id="evidence-${escapeHtml(purchase.id)}" name="evidence" type="text" maxlength="256" placeholder="Order or delivery reference" required><div class="draft-actions"><button class="button button-outline button-small" type="button" data-action="discard-draft">Discard draft</button><button class="button button-primary" type="submit">Submit Delivery Details <span aria-hidden="true">↗</span></button></div></form>` : `<p class="field-help">Delivery details are not needed at this stage.</p>`}<a class="text-link" style="margin-top: 18px" href="/purchases/${encodeURIComponent(purchase.id)}">Review Group Deal <span aria-hidden="true">↗</span></a></article>`).join("")}</div>`;
+    root.innerHTML = `<div class="dashboard-toolbar"><div><span class="section-kicker">Connected supplier wallet</span><h2>Orders needing your handoff</h2></div><span class="wallet-caption">${escapeHtml(shortAccount(state.accountId))}</span></div><div class="farmer-grid">${ownPurchases.map((purchase) => { const simulated = isV5(purchase); return `<article class="farmer-card"><div class="purchase-card-top">${statusPill(purchase.state)}<span class="section-kicker">#${escapeHtml(purchase.id)}</span></div><h3>${escapeHtml(livePurchaseTitle(purchase))}</h3><p>${quantityLabel(purchase, purchase.total_quantity)} of ${quantityLabel(purchase, purchase.max_quantity)} reserved · fulfillment evidence due ${escapeHtml(formatDate(purchase.fulfillment_evidence_deadline_ns))}</p>${packageContentsMarkup(purchase)}${simulated ? `<div class="eligibility-callout warning"><span><strong>Testnet simulation</strong><br>Submit a simulation reference only. This demo does not claim tomatoes were physically delivered.</span></div>` : ""}${purchase.fulfillment_evidence_hash ? `<div class="evidence-hash">${simulated ? "Simulated fulfillment evidence recorded" : "Delivery details submitted"}: ${escapeHtml(purchase.fulfillment_evidence_hash)}</div>` : purchase.state === "Funded" ? `<form class="evidence-form" data-evidence-form data-draft-form="fulfillment-evidence" data-draft-purchase-id="${escapeHtml(purchase.id)}" data-purchase-id="${escapeHtml(purchase.id)}"><label for="evidence-${escapeHtml(purchase.id)}">${simulated ? "Testnet simulation reference" : "Delivery reference"}</label><input id="evidence-${escapeHtml(purchase.id)}" name="evidence" type="text" maxlength="256" placeholder="${simulated ? "TESTNET_SIMULATION_NO_PHYSICAL_DELIVERY" : "Order or delivery reference"}" required><span class="field-help">${simulated ? "The contract stores this in its fulfillment-evidence field. Use wording that explicitly says no physical delivery occurred." : "Provide the agreed fulfillment reference."}</span><div class="draft-actions"><button class="button button-outline button-small" type="button" data-action="discard-draft">Discard draft</button><button class="button button-primary" type="submit">${simulated ? "Review & Submit Simulated Evidence" : "Submit Delivery Details"} <span aria-hidden="true">↗</span></button></div></form>` : `<p class="field-help">Fulfillment evidence is not needed at this stage.</p>`}<a class="text-link" style="margin-top: 18px" href="/purchases/${encodeURIComponent(purchase.id)}">Review Group Deal <span aria-hidden="true">↗</span></a></article>`; }).join("")}</div>`;
   }
 
   function updateCreatePricePreview() {
@@ -1737,10 +2126,12 @@
     const input = $("#price-per-unit");
     if (!preview || !input) return;
     if (isV5()) {
-      const units = usdcTools.parseUnits(input.value, Number(state.config?.token_decimals || 6));
-      preview.innerHTML = units === null
-        ? "<strong>Enter an exact USDC amount (up to 6 decimals)</strong><span>Amounts are never rounded.</span>"
-        : `<strong>Exact Testnet contribution: ${escapeHtml(usdcTools.formatUnits(units, 6))} USDC</strong><span>Native Testnet USDC · network gas is paid separately in Testnet NEAR</span>`;
+      const listedInput = $("#listed-usd-price");
+      const derived = usdcTools.usdPrice(listedInput?.value, Number(state.config?.token_decimals || 6));
+      input.value = derived?.tokenUnits || "";
+      preview.innerHTML = !derived
+        ? "<strong>Enter a USD price with no more than two decimals</strong><span>The test payment amount will match it exactly.</span>"
+        : `<strong>${escapeHtml(usdcTools.formatUnits(derived.tokenUnits, 6))} Testnet USDC per ${escapeHtml(dealFormTools.selectedUnit($("#sale-unit")?.value, $("#custom-unit")?.value))}</strong><span>This matches the listed USD amount at a nominal 1:1 rate. It is not a real USD card charge.</span>`;
       return;
     }
     const yocto = parseNearAmount(input.value);
@@ -1758,9 +2149,11 @@
     if (!root || !input || !total) return;
     try {
       const amount = BigInt(root.dataset.price || "0") * BigInt(Math.max(1, Number(input.value || 1)));
-      total.innerHTML = moneyMarkup(amount, "", state.currentPurchase);
+      total.innerHTML = isV5(state.currentPurchase)
+        ? `<span class="money-primary">${escapeHtml(customerPaymentLabel(state.currentPurchase, amount))}</span>`
+        : moneyMarkup(amount, "", state.currentPurchase);
     } catch (_error) {
-      total.textContent = "USD unavailable · exact NEAR unavailable";
+      total.textContent = `Exact ${paymentAsset(state.currentPurchase).symbol} amount unavailable`;
     }
   }
 
@@ -1772,6 +2165,14 @@
     const eligible = button.dataset.eligible === "true";
     button.disabled = !(eligible && checkbox.checked);
     button.setAttribute("aria-disabled", String(button.disabled));
+  }
+
+  function refreshAgreementCheckout() {
+    renderAgreementPage();
+    decorateMoneyText();
+    restoreDraftsInDom();
+    updateContributionTotal();
+    updateAgreementAcceptance();
   }
 
   function copyText(text) {
@@ -1792,10 +2193,124 @@
     const purchaseId = button.dataset.purchaseId;
     const method = button.dataset.voteType === "offer" ? "vote_on_offer" : "vote_on_fulfillment";
     const approve = button.dataset.approve === "true";
-    return performVerifiedAction(button, method, { purchase_id: String(purchaseId), approve }, "Your vote has been recorded.", {
+    const purchase = state.purchases.find((item) => String(item.id) === String(purchaseId));
+    if (method === "vote_on_fulfillment" && isV5(purchase)) {
+      const choice = approve ? "approve" : "reject";
+      if (!window.confirm(`Record your choice to ${choice} the simulated Testnet fulfillment evidence for Deal #${purchaseId}?\n\nNo physical delivery is represented. If the approval threshold is reached, a separate, explicitly authorized payment transaction can become available.`)) return null;
+    }
+    return performVerifiedAction(button, method, { purchase_id: String(purchaseId), approve }, method === "vote_on_fulfillment" && isV5(purchase) ? "Your simulated-evidence vote has been recorded; no physical delivery is represented." : "Your vote has been recorded.", {
       failureMessage: "We couldn't record your vote. Your draft is safe. Please try again.",
       alreadyMessage: `Your recorded choice is already ${approve ? "Yes" : "No"}.`,
     });
+  }
+
+  async function handleFinalize(button, purchase) {
+    if (!purchase) return;
+    const fresh = await loadPurchase(purchase.id).catch(() => null);
+    if (!fresh || !["Open", "AwaitingSupplier"].includes(fresh.state) || !deadlineHasPassed(fresh.deadline_ns)) {
+      showToast("Finalization is unavailable: the finalized purchase state or deadline check did not pass.", "error");
+      return;
+    }
+    if (!window.confirm(`Finalize Deal #${fresh.id}?\n\nReceiver: ${appConfig.contractId}\nMethod: finalize_purchase\nArguments: {\"purchase_id\":\"${fresh.id}\"}\nDeposit: 0 NEAR\n\nThis does not transfer USDC. The contract will set Funded only if its minimum is met.`)) return;
+    return handleSimpleAction(button, "finalize_purchase", { purchase_id: String(fresh.id) }, "Purchase finalized on-chain.");
+  }
+
+  async function handleReconcile(button) {
+    const purchase = state.currentPurchase;
+    if (!purchase || !isV5(purchase)) return;
+    if (state.accountId && pendingActionStore.list(state.accountId).some((action) =>
+      ["reconcile_token_balance", "release_payment"].includes(action.methodName))) {
+      showToast("A financial transaction is still unresolved. Payment remains blocked while HarvestPool checks it.", "error");
+      return;
+    }
+    const freshPurchase = await loadPurchase(purchase.id).catch(() => null);
+    const readiness = freshPurchase ? await loadFinancialReadiness(freshPurchase).catch(() => null) : null;
+    if (!readiness || readiness.error || !readiness.figuresMatch) {
+      showToast("STOP: the fresh Circle balance and outstanding liability could not be verified as equal.", "error");
+      renderCurrentPage();
+      return;
+    }
+    const decimals = Number(freshPurchase.token_decimals || 6);
+    const reviewed = await reviewTransaction({
+      title: `Reconcile Deal #${freshPurchase.id} escrow`,
+      summary: `Circle balance ${usdcTools.formatUnits(readiness.balance, decimals)} USDC and outstanding liability ${usdcTools.formatUnits(readiness.liability, decimals)} USDC currently match. This action records a new snapshot and transfers no USDC.`,
+      signer: state.accountId,
+      receiver: appConfig.contractId,
+      method: "reconcile_token_balance",
+      args: {},
+      gas: "50 Tgas (50000000000000 gas)",
+      deposit: "0 NEAR",
+      warning: "HarvestPool will keep supplier payment blocked until the Circle read and V5 callback are authoritatively confirmed.",
+      confirmLabel: "Authorize reconciliation",
+    });
+    if (!reviewed) return;
+    const result = await performVerifiedAction(button, "reconcile_token_balance", {}, "Escrow reconciliation successful", {
+      context: { previousReconciledAt: readiness.accounting?.last_reconciled_at_ns ?? null, purchaseId: String(freshPurchase.id) },
+      failureMessage: "Reconciliation was not confirmed. No payout was submitted.",
+    });
+    if (result?.state === "confirmed") {
+      await loadPurchase(freshPurchase.id).catch(() => null);
+      renderCurrentPage();
+    }
+  }
+
+  function payoutSafetyState(purchase, readiness) {
+    const accounting = readiness?.accounting || {};
+    const reconciliation = readiness && !readiness.error
+      ? usdcTools.reconciliationSnapshot(
+        accounting,
+        readiness.balance,
+        readiness.liability,
+        Date.parse(readiness.checkedAt),
+        RECONCILIATION_MAX_AGE_MS,
+      )
+      : { ready: false };
+    const pendingFinancialAction = state.accountId && pendingActionStore.list(state.accountId).some((action) =>
+      ["reconcile_token_balance", "release_payment"].includes(action.methodName));
+    return {
+      safe: purchase?.state === "FulfillmentApproved"
+        && readiness && !readiness.error && readiness.figuresMatch
+        && Boolean(readiness.supplierRegistration)
+        && readiness.operations.length === 0
+        && reconciliation.ready
+        && !pendingFinancialAction,
+      reconciliation,
+      pendingFinancialAction,
+    };
+  }
+
+  async function handleReleasePayment(button, purchase) {
+    if (!purchase || !isV5(purchase)) return;
+    const freshPurchase = await loadPurchase(purchase.id).catch(() => null);
+    const readiness = freshPurchase ? await loadFinancialReadiness(freshPurchase).catch(() => null) : null;
+    const initialSafety = payoutSafetyState(freshPurchase, readiness);
+    if (!initialSafety.safe) {
+      showToast("STOP: payout checks are incomplete, stale, or inconsistent. Refresh and reconcile before trying again.", "error");
+      renderCurrentPage();
+      return;
+    }
+    const amount = customerPaymentLabel(freshPurchase, freshPurchase.total_funded_amount);
+    const reviewed = await reviewTransaction({
+      title: `Review supplier payment for Deal #${freshPurchase.id}`,
+      summary: `Release ${amount} from V5 escrow to ${freshPurchase.supplier_id}. HarvestPool will repeat every safety read after this review and before opening Meteor.`,
+      signer: state.accountId,
+      receiver: appConfig.contractId,
+      method: "release_payment",
+      args: { purchase_id: String(freshPurchase.id) },
+      gas: "100 Tgas (100000000000000 gas)",
+      deposit: "0 NEAR",
+      warning: "This is a real Circle Testnet USDC transfer. Do not approve if any full account ID, argument, amount, or contract differs from what you expect.",
+      confirmLabel: "Continue to payment authorization",
+    });
+    if (!reviewed) return;
+    const finalPurchase = await loadPurchase(freshPurchase.id).catch(() => null);
+    const finalReadiness = finalPurchase ? await loadFinancialReadiness(finalPurchase).catch(() => null) : null;
+    if (!payoutSafetyState(finalPurchase, finalReadiness).safe) {
+      showToast("STOP: a fresh pre-payment check changed or expired. Reconcile again; no payout was submitted.", "error");
+      renderCurrentPage();
+      return;
+    }
+    return handleSimpleAction(button, "release_payment", { purchase_id: String(freshPurchase.id) }, `${amount} release submitted. Wait for the Circle transfer callback and contract confirmation before any further action.`);
   }
 
   async function handleContribution(button) {
@@ -1827,11 +2342,9 @@
       showToast(displayMessage, "error");
       try {
         await loadPurchase(purchaseId);
-        renderAgreementPage();
-        decorateMoneyText();
+        refreshAgreementCheckout();
       } catch (_refreshError) {
-        renderAgreementPage();
-        decorateMoneyText();
+        refreshAgreementCheckout();
       }
       return;
     }
@@ -1840,6 +2353,8 @@
     const contributionOptions = {
       depositValue: verified.depositYocto,
       valueIsYocto: true,
+      confirmationAttempts: 30,
+      confirmationDelayMs: 1000,
       failureMessage: "We couldn't submit your contribution. Your draft is safe. Please try again.",
     };
     let confirmationMethod = "commit";
@@ -1855,6 +2370,18 @@
       });
       contributionOptions.depositValue = "1";
     }
+    contributionOptions.onPhase = (kind, title, message) => {
+      const exactPayment = isV5(verified.purchase)
+        ? `Payment uses ${testPaymentLabel(verified.purchase, verified.depositYocto)} through your wallet. No USD card charge.`
+        : `Payment uses ${paymentLabel(verified.purchase, verified.depositYocto)} through your wallet.`;
+      state.contributionStatus = {
+        purchaseId,
+        kind,
+        title: kind === "wallet" ? "Authorize your payment" : title,
+        message: kind === "wallet" ? exactPayment : message,
+      };
+      refreshAgreementCheckout();
+    };
     const confirmation = await performVerifiedAction(button, confirmationMethod, contributionArgs, "You’re in! Your spot is secured.", contributionOptions);
     if (!confirmation || confirmation.state !== "confirmed") return;
     try {
@@ -1885,8 +2412,7 @@
         };
         showToast("The contribution is not confirmed yet; no funded membership is shown.", "error");
       }
-      renderAgreementPage();
-      decorateMoneyText();
+      refreshAgreementCheckout();
     } catch (_error) {
       if (!state.contributionStatus || String(state.contributionStatus.purchaseId) !== String(purchaseId)) {
         state.contributionStatus = {
@@ -1896,8 +2422,7 @@
           message: "The contract state could not be reread yet. Refresh before treating this contribution as complete.",
         };
       }
-      renderAgreementPage();
-      decorateMoneyText();
+      refreshAgreementCheckout();
       showToast("The contribution was submitted, but membership still needs contract confirmation.", "error");
     }
   }
@@ -1906,16 +2431,24 @@
     const button = $("button[type=submit]", form);
     const evidence = String(new FormData(form).get("evidence") || "").trim();
     if (!evidence) return;
+    const current = state.purchases.find((item) => String(item.id) === String(form.dataset.purchaseId));
+    const identifiesSimulation = /simulation|simulated/i.test(evidence);
+    const deniesPhysicalDelivery = /no[_ -]?physical[_ -]?delivery/i.test(evidence);
+    if (isV5(current) && (!identifiesSimulation || !deniesPhysicalDelivery)) {
+      showFormTransactionError(form, "Use a truthful Testnet reference that explicitly identifies this as a simulation with no physical delivery.");
+      return;
+    }
+    if (isV5(current) && !window.confirm(`Submit this simulated fulfillment reference to Deal #${form.dataset.purchaseId}?\n\n${evidence}\n\nThis calls submit_fulfillment_evidence. It does not prove or claim physical delivery.`)) return;
     saveDraft(form);
-    const confirmation = await performVerifiedAction(button, "submit_fulfillment_evidence", { purchase_id: String(form.dataset.purchaseId), evidence_hash: evidence }, "Fulfillment evidence submitted on-chain.", {
-      failureMessage: "We couldn't submit the delivery evidence. Your draft is safe. Please try again.",
+    const confirmation = await performVerifiedAction(button, "submit_fulfillment_evidence", { purchase_id: String(form.dataset.purchaseId), evidence_hash: evidence }, isV5(current) ? "Simulated Testnet evidence recorded on-chain; no physical delivery is represented." : "Fulfillment evidence submitted on-chain.", {
+      failureMessage: "We couldn't submit the fulfillment evidence. Your draft is safe. Please try again.",
     });
     if (!confirmation || confirmation.state !== "confirmed") return;
     try {
       await loadBaseData();
       const purchase = state.purchases.find((item) => String(item.id) === String(form.dataset.purchaseId));
       if (purchase?.fulfillment_evidence_hash !== evidence) {
-        showFormTransactionError(form, "The wallet returned, but delivery evidence is not confirmed yet. Your draft is safe. Refresh before trying again.");
+        showFormTransactionError(form, "The wallet returned, but fulfillment evidence is not confirmed yet. Your draft is safe. Refresh before trying again.");
         return;
       }
       clearDraft(form);
@@ -1923,7 +2456,7 @@
       renderFarmerPaymentTotals();
       decorateMoneyText();
     } catch (error) {
-      showFormTransactionError(form, "The wallet returned, but delivery evidence could not be verified yet. Your draft is safe. Refresh before trying again.", error);
+      showFormTransactionError(form, "The wallet returned, but fulfillment evidence could not be verified yet. Your draft is safe. Refresh before trying again.", error);
     }
   }
 
@@ -1947,9 +2480,9 @@
       issueId: "global",
     });
     clearV3ConfirmationUncertainty(form);
+    state.confirmedIssueId = String(issue.id);
     showToast("Your issue has been submitted.", "success");
-    if (appConfig.page === "issue_form") window.location.href = `/purchases/${encodeURIComponent(String(issue.purchase_id))}`;
-    else renderCurrentPage();
+    renderCurrentPage();
   }
 
   function completeDecisionConfirmation(form, decision, requesterId) {
@@ -2142,7 +2675,7 @@
     if (button?.dataset.submissionLock === "true") return null;
     if (button) {
       button.dataset.submissionLock = "true";
-      setBusy(button, true, actionProgressCopy(methodName));
+      setBusy(button, true, "Preparing wallet request…");
     }
     const receiverId = options.receiverId || appConfig.contractId;
     const action = pendingAction(methodName, args, receiverId, options.context || {});
@@ -2162,7 +2695,11 @@
       return existing;
     }
 
-    const saved = pendingActionStore.save(action);
+    const saved = pendingActionStore.save({
+      ...action,
+      phase: "wallet",
+      startedAtNs: (BigInt(Date.now()) * 1_000_000n).toString(),
+    });
     renderPendingConfirmationNotice();
     let transactionError = null;
     const outcome = await performTransaction(
@@ -2179,20 +2716,18 @@
       {
         confirmOnReturn: false,
         failureMessage: options.failureMessage || "We couldn't complete this action. Your selection is safe. Please check its status before trying again.",
+        onPhase: options.onPhase,
         onError: (message, error) => {
           transactionError = error;
           options.onError?.(message, error);
         },
       },
     );
-    if (!outcome) {
-      if (transactionError?.transactionState !== "pending") pendingActionStore.remove(saved.id);
+    if (!outcome && transactionError?.transactionState !== "pending") {
+      pendingActionStore.remove(saved.id);
       if (button) {
-        if (transactionError?.transactionState === "pending") setBusy(button, true, actionProgressCopy(methodName));
-        else {
-          delete button.dataset.submissionLock;
-          setBusy(button, false);
-        }
+        delete button.dataset.submissionLock;
+        setBusy(button, false);
       }
       renderPendingConfirmationNotice();
       return null;
@@ -2200,25 +2735,39 @@
 
     state.pendingTransactions.add(button);
     setBusy(button, true, actionProgressCopy(methodName));
-    const result = await waitForActionConfirmation(saved);
+    const transactionHash = confirmationTools.transactionHash(outcome);
+    const submittedAction = pendingActionStore.save({
+      ...saved,
+      phase: "confirming",
+      transactionHash: transactionHash || saved.transactionHash || null,
+    });
+    const result = await waitForActionConfirmation(submittedAction, {
+      attempts: options.confirmationAttempts,
+      delayMs: options.confirmationDelayMs,
+    });
     setBusy(button, false);
     state.pendingTransactions.delete(button);
     if (result?.state === "confirmed") {
-      pendingActionStore.remove(saved.id);
+      pendingActionStore.remove(submittedAction.id);
       await Promise.allSettled([loadBaseData()]);
-      if (["details", "agreement", "supplier_invitation"].includes(appConfig.page)) await loadPurchase(args.purchase_id).catch(() => null);
+      const refreshPurchaseId = args.purchase_id ?? options.context?.purchaseId ?? state.currentPurchase?.id;
+      if (["details", "agreement", "supplier_invitation"].includes(appConfig.page)
+          && refreshPurchaseId !== null && refreshPurchaseId !== undefined) {
+        await loadPurchase(refreshPurchaseId).catch(() => null);
+      }
       renderCurrentPage();
       renderPendingConfirmationNotice();
       showToast(successMessage, "success");
       return result;
     }
     if (result?.state === "failed") {
-      pendingActionStore.remove(saved.id);
+      pendingActionStore.remove(submittedAction.id);
       if (button) delete button.dataset.submissionLock;
       renderPendingConfirmationNotice();
       showToast("The contract rejected this action. No retry was submitted.", "error");
       return result;
     }
+    pendingActionStore.save({ ...submittedAction, phase: "unresolved" });
     renderPendingConfirmationNotice();
     if (button) setBusy(button, true, actionProgressCopy(methodName));
     showToast(`${actionProgressCopy(methodName)} We’ll update this page automatically.`);
@@ -2243,6 +2792,62 @@
     return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
   }
 
+  const BUSINESS_TIMEZONE_KEY = "harvestpool:business-timezone:v1";
+
+  function businessTimeZone() {
+    const selected = $("#business-timezone")?.value;
+    const saved = window.localStorage.getItem(BUSINESS_TIMEZONE_KEY);
+    const candidate = selected || saved || dealTimeTools.DEFAULT_BUSINESS_TIME_ZONE;
+    try {
+      return dealTimeTools.assertTimeZone(candidate);
+    } catch (_error) {
+      return dealTimeTools.DEFAULT_BUSINESS_TIME_ZONE;
+    }
+  }
+
+  function setBusinessTimeZone(timeZone) {
+    const valid = dealTimeTools.assertTimeZone(timeZone);
+    window.localStorage.setItem(BUSINESS_TIMEZONE_KEY, valid);
+    return valid;
+  }
+
+  function updateTimezoneOptionLabels() {
+    $$("#business-timezone option").forEach((option) => {
+      option.textContent = dealTimeTools.zoneOptionLabel(option.dataset.zoneLabel || option.textContent, option.value);
+    });
+  }
+
+  function updateDeadlinePreview(inputId, previewId) {
+    const input = $(inputId);
+    const preview = $(previewId);
+    if (!input || !preview) return;
+    if (!input.value) {
+      preview.textContent = "Choose a date and time.";
+      preview.classList.remove("is-error");
+      return;
+    }
+    try {
+      const instant = dealTimeTools.instantFromWallTime(input.value, businessTimeZone());
+      preview.textContent = dealTimeTools.formatInstant(instant, businessTimeZone(), dealTimeTools.browserTimeZone());
+      preview.classList.remove("is-error");
+    } catch (error) {
+      preview.textContent = error.message || "Choose a valid date and time.";
+      preview.classList.add("is-error");
+    }
+  }
+
+  function updateTimezoneControls() {
+    const select = $("#business-timezone");
+    if (!select) return;
+    updateTimezoneOptionLabels();
+    const saved = window.localStorage.getItem(BUSINESS_TIMEZONE_KEY);
+    if (saved && [...select.options].some((option) => option.value === saved) && !select.closest("form")?.dataset.draftRestored) {
+      select.value = saved;
+    }
+    updateDeadlinePreview("#purchase-deadline", "#purchase-deadline-preview");
+    updateDeadlinePreview("#fulfillment-deadline", "#fulfillment-deadline-preview");
+  }
+
   function updateSaleUnitFields() {
     const select = $("#sale-unit");
     const customField = $("#custom-unit-field");
@@ -2253,9 +2858,28 @@
     const custom = select.value === "custom";
     if (customField) customField.hidden = !custom;
     if (customInput) customInput.required = custom;
-    const packageUnit = PACKAGE_UNITS.has(select.value) || custom;
+    const labels = dealFormTools.labels(select.value, customInput?.value);
+    $$('[data-unit-label]').forEach((label) => {
+      const key = label.dataset.unitLabel;
+      if (labels[key]) label.textContent = labels[key];
+    });
+    const packageUnit = dealFormTools.supportsPackageContents(select.value);
     if (contentsField) contentsField.hidden = !packageUnit;
     if (contentsInput) contentsInput.disabled = !packageUnit;
+    if (contentsInput && packageUnit) contentsInput.placeholder = `Describe what comes in each ${labels.singular}`;
+    updateCreatePricePreview();
+  }
+
+  function updateCreationModeCopy() {
+    const selected = $('input[name="creation_mode"]:checked');
+    const help = $("#creation-mode-help");
+    const button = $("#create-purchase-button");
+    if (!selected || !button) return;
+    const selectedMode = dealCreationTools.mode(selected.value);
+    if (help) help.textContent = selectedMode.help;
+    const review = $("#creation-review-copy");
+    if (review) review.lastChild.textContent = selectedMode.review;
+    button.innerHTML = `${selectedMode.cta} <span aria-hidden="true">↗</span>`;
   }
 
   function setCreateDefaults() {
@@ -2266,15 +2890,15 @@
     const now = new Date();
     const orderDeadline = new Date(now.getTime() + 7 * 86400000);
     const reviewDeadline = new Date(now.getTime() + 14 * 86400000);
-    deadline.value = localDateValue(orderDeadline);
-    if (cancel) cancel.value = localDateValue(orderDeadline);
-    fulfillment.value = localDateValue(reviewDeadline);
+    const zone = businessTimeZone();
+    deadline.value = dealTimeTools.wallTimeValue(orderDeadline, zone);
+    if (cancel) cancel.value = dealTimeTools.wallTimeValue(orderDeadline, zone);
+    fulfillment.value = dealTimeTools.wallTimeValue(reviewDeadline, zone);
+    updateTimezoneControls();
   }
 
-  function toNanoseconds(value) {
-    const milliseconds = new Date(value).getTime();
-    if (!Number.isFinite(milliseconds)) throw new Error("Enter a valid date and time.");
-    return (BigInt(Math.round(milliseconds)) * 1000000n).toString();
+  function toNanoseconds(value, timeZone = dealTimeTools.browserTimeZone()) {
+    return dealTimeTools.toNanoseconds(value, timeZone);
   }
 
   function setCreateError(message, error = null) {
@@ -2290,39 +2914,51 @@
       setCreateError("New purchases are paused while this app remains connected to the preserved V2 contract. The corrected supplier-authorized flow requires a separately deployed V4 contract; no transaction was attempted.");
       return;
     }
-    if (!ensureSignedIn()) return;
+    if (!state.wallet || !state.accountId) {
+      saveDraft(form);
+      const selectedMode = $('input[name="creation_mode"]:checked', form)?.value || "organizer_request";
+      dealCreationTools.markConnectionIntent(window.sessionStorage, selectedMode);
+      setCreateError("Connect Meteor Wallet first. Connecting does not publish or send this deal; your draft will be restored so you can review it and choose the action again.");
+      const connected = await connectWallet();
+      if (connected) showCreateConnectionFollowup();
+      return;
+    }
     const values = new FormData(form);
     const minQuantity = Number(values.get("min_quantity"));
     const maxQuantity = Number(values.get("max_quantity"));
     const maxFundedMembers = Number(values.get("max_funded_members"));
     const perBuyer = Number(values.get("max_quantity_per_household"));
     const price = String(values.get("price_per_unit") || "");
+    const listedPrice = String(values.get("listed_price_usd") || "");
     const deadline = String(values.get("deadline") || "");
     const cancellationDeadline = String(values.get("cancellation_deadline") || deadline);
     const fulfillmentDeadline = String(values.get("fulfillment_deadline") || "");
+    const businessZone = String(values.get("business_timezone") || businessTimeZone());
     if (!Number.isInteger(minQuantity) || !Number.isInteger(maxQuantity) || minQuantity < 1 || maxQuantity < minQuantity) { setCreateError("Check the quantities: the maximum must be at least the positive minimum."); return; }
     const maxAllowedFundedMembers = Number(state.config?.max_funded_members || 20);
     if (!Number.isInteger(maxFundedMembers) || maxFundedMembers < 1 || maxFundedMembers > maxAllowedFundedMembers) { setCreateError(`Funded household capacity must be a whole number from 1 to ${maxAllowedFundedMembers}.`); return; }
     if (!Number.isInteger(perBuyer) || perBuyer < 1 || perBuyer > maxQuantity) { setCreateError("The buyer limit must be between 1 and the maximum deal quantity."); return; }
     if (maxFundedMembers * perBuyer < minQuantity) { setCreateError(`This deal cannot reach its minimum. ${maxFundedMembers} buyers at ${perBuyer} each can reserve at most ${maxFundedMembers * perBuyer}.`); return; }
-    let deadlineNs, cancellationNs, fulfillmentNs, priceYocto;
+    let deadlineNs, cancellationNs, fulfillmentNs, priceYocto, v5Price;
     try {
-      deadlineNs = toNanoseconds(deadline);
-      cancellationNs = toNanoseconds(cancellationDeadline);
-      fulfillmentNs = toNanoseconds(fulfillmentDeadline);
-      priceYocto = version === "V5" ? usdcTools.parseUnits(price, Number(state.config?.token_decimals || 6)) : parseNearAmount(price);
+      setBusinessTimeZone(businessZone);
+      deadlineNs = toNanoseconds(deadline, businessZone);
+      cancellationNs = toNanoseconds(cancellationDeadline, businessZone);
+      fulfillmentNs = toNanoseconds(fulfillmentDeadline, businessZone);
+      if (version === "V5") {
+        v5Price = usdcTools.usdPrice(listedPrice, Number(state.config?.token_decimals || 6));
+        priceYocto = v5Price?.tokenUnits || null;
+      } else {
+        priceYocto = parseNearAmount(price);
+      }
       if (!priceYocto || BigInt(priceYocto) <= 0n) throw new Error("Price must be greater than zero.");
       if (BigInt(cancellationNs) > BigInt(deadlineNs)) throw new Error("Cancellation cannot end after contributions.");
-      if (BigInt(fulfillmentNs) <= BigInt(deadlineNs)) throw new Error("Fulfillment review must end after contributions.");
+      dealCreationTools.validateDeadlines(deadlineNs, fulfillmentNs);
     } catch (error) { setCreateError(error.message || "Check the dates and price."); return; }
     const button = $("#create-purchase-button");
     saveDraft(form);
     const supplierId = String(values.get("farmer_id") || "").trim();
     const creationMode = String(values.get("creation_mode") || "organizer_request");
-    if (isV4 && creationMode === "supplier_offer" && supplierId !== state.accountId) {
-      setCreateError("A supplier offer must name the connected supplier wallet. Choose your own wallet, or send an organizer request for another supplier to review.");
-      return;
-    }
     let methodName = "create_open_purchase";
     let createArgs = { min_quantity: minQuantity, max_quantity: maxQuantity, max_funded_members: maxFundedMembers, price_per_unit: priceYocto, deadline_ns: deadlineNs, cancellation_deadline_ns: cancellationNs, fulfillment_evidence_deadline_ns: fulfillmentNs, farmer_id: supplierId };
     if (isV4) {
@@ -2336,20 +2972,30 @@
       const pickup = String(values.get("pickup_or_delivery") || "").trim();
       const refundTerms = String(values.get("cancellation_and_refund_terms") || "").trim();
       const perHousehold = perBuyer;
-      const usdScaled = parseScaledDecimal(String(values.get("listed_price_usd") || ""), 100n);
+      const usdScaled = version === "V5" ? BigInt(v5Price.cents) : parseScaledDecimal(listedPrice, 100n);
       if (!productName || !description || !quantityUnit || !pickup || !refundTerms || !supplierId) { setCreateError("Complete the product, sale unit, supplier, pickup, and refund details."); return; }
       if (new TextEncoder().encode(quantityUnit).length > 160) { setCreateError("Shorten the custom unit or package contents so the complete sale-unit description is 160 characters or fewer."); return; }
       if (!Number.isInteger(perHousehold) || perHousehold < 1 || perHousehold > maxQuantity) { setCreateError("The household item limit must be between 1 and the maximum quantity."); return; }
       if (usdScaled === null || usdScaled <= 0n) { setCreateError("Enter a positive listed USD price."); return; }
       const terms = { product_name: productName, description, quantity_unit: quantityUnit, price_per_unit: priceYocto, listed_price_usd_cents: usdScaled.toString(), min_quantity: minQuantity, max_quantity: maxQuantity, max_quantity_per_household: perHousehold, max_funded_members: maxFundedMembers, pickup_or_delivery: pickup, join_deadline_ns: deadlineNs, fulfillment_deadline_ns: fulfillmentNs, cancellation_and_refund_terms: refundTerms };
-      methodName = creationMode === "supplier_offer" ? "create_supplier_offer" : "create_purchase_request";
-      createArgs = methodName === "create_supplier_offer" ? { terms } : { supplier_id: supplierId, terms };
+      try {
+        const creation = dealCreationTools.transaction(creationMode, terms, supplierId, state.accountId);
+        methodName = creation.methodName;
+        createArgs = creation.args;
+      } catch (error) {
+        setCreateError(`${error.message} Choose your connected supplier wallet, or use organizer mode to send a request.`);
+        return;
+      }
     }
     const baselinePurchaseCount = Number(await view("get_purchase_count"));
-    const successCopy = methodName === "create_purchase_request" ? "Your supplier invitation is ready." : "Your deal is live!";
+    const successCopy = actionSuccessCopy(methodName);
+    const creationCopy = dealCreationTools.mode(creationMode);
     const confirmation = await performVerifiedAction(button, methodName, createArgs, successCopy, {
       context: { minimumPurchaseId: baselinePurchaseCount },
-      failureMessage: "We couldn't create the purchase. Your draft is safe. Please try again.",
+      failureMessage: creationMode === "supplier_offer"
+        ? "We couldn't publish your Group Deal. Your draft is safe."
+        : "We couldn't send the request to the supplier. Your draft is safe.",
+      onError: (message, error) => setCreateError(message || creationCopy.connected, error),
     });
     if (!confirmation || confirmation.state !== "confirmed") return;
     try {
@@ -2368,6 +3014,33 @@
     }
   }
 
+  const GUARDED_TRANSACTION_ACTIONS = new Set([
+    "contribute", "accept-supplier-request", "decline-supplier-request", "vote", "finalize",
+    "cancel-commitment", "claim-refund", "expire-unfulfilled", "reconcile-escrow", "release-payment",
+    "decision-vote", "resolve-issue", "agree-decision", "decline-decision", "expire-decision",
+  ]);
+
+  async function dispatchGuardedTransaction(action, button) {
+    const purchase = state.purchases.find((item) => String(item.id) === String(button.dataset.purchaseId));
+    const commitment = purchase ? commitmentFor(purchase) : null;
+    if (action === "contribute") return handleContribution(button);
+    if (action === "accept-supplier-request") return handleSimpleAction(button, "accept_supplier_request", { purchase_id: String(button.dataset.purchaseId) }, "Supplier agreement recorded. Contributions are now open.");
+    if (action === "decline-supplier-request") return handleSimpleAction(button, "decline_supplier_request", { purchase_id: String(button.dataset.purchaseId) }, "The supplier declined this request.");
+    if (action === "vote") return handleVote(button);
+    if (action === "finalize") return handleFinalize(button, purchase);
+    if (action === "cancel-commitment") return handleSimpleAction(button, "cancel_commitment", { purchase_id: String(button.dataset.purchaseId) }, "Commitment cancelled on-chain. The refund is now claimable.");
+    if (action === "claim-refund") return handleSimpleAction(button, "claim_refund", { purchase_id: String(button.dataset.purchaseId) }, `${commitment ? customerPaymentLabel(purchase, commitment.amount) : "Refund"} claim submitted. Wait for confirmation before trying again.`);
+    if (action === "expire-unfulfilled") return handleSimpleAction(button, "expire_unfulfilled_purchase", { purchase_id: String(button.dataset.purchaseId) }, "Purchase marked failed on-chain. Refunds are now claimable.");
+    if (action === "reconcile-escrow") return handleReconcile(button);
+    if (action === "release-payment") return handleReleasePayment(button, purchase);
+    if (action === "decision-vote") return handleV3Action(button, "vote_on_decision", { decision_id: String(button.dataset.decisionId), option: Number(button.dataset.option) }, "Your vote has been recorded.");
+    if (action === "resolve-issue") return handleV3Action(button, "resolve_issue", { issue_id: String(button.dataset.issueId) }, "Issue marked resolved.");
+    if (action === "agree-decision") return handleV3Action(button, "agree_to_decision", { decision_id: String(button.dataset.decisionId) }, "Supplier agreement recorded on-chain.");
+    if (action === "decline-decision") return handleV3Action(button, "decline_decision", { decision_id: String(button.dataset.decisionId) }, "The proposal was declined and the issue is open again.");
+    if (action === "expire-decision") return handleV3Action(button, "expire_decision", { decision_id: String(button.dataset.decisionId) }, "Expired decision closed. The issue is open for another proposal.");
+    return null;
+  }
+
   function bindGlobalEvents() {
     normalizeExploreFilters();
     $("#wallet-button")?.addEventListener("click", () => state.accountId ? openWalletPanel() : connectWallet());
@@ -2379,15 +3052,32 @@
       $("#menu-toggle").setAttribute("aria-expanded", String(open));
       $("#menu-toggle").setAttribute("aria-label", open ? "Close navigation" : "Open navigation");
     });
-    $$('[data-connect-wallet]').forEach((button) => button.addEventListener("click", connectWallet));
     $$(".filter-tab").forEach((button) => button.addEventListener("click", () => {
       $$(".filter-tab").forEach((tab) => tab.classList.toggle("active", tab === button));
       renderExplore();
     }));
-    $("#create-purchase-form")?.addEventListener("submit", (event) => { event.preventDefault(); handleCreate(event.currentTarget); });
+    $("#create-purchase-form")?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      runGuardedSubmission(event.currentTarget, () => handleCreate(event.currentTarget));
+    });
     $("#price-per-unit")?.addEventListener("input", updateCreatePricePreview);
+    $("#listed-usd-price")?.addEventListener("input", updateCreatePricePreview);
+    $("#custom-unit")?.addEventListener("input", updateSaleUnitFields);
     $("#sale-unit")?.addEventListener("change", updateSaleUnitFields);
     document.addEventListener("click", async (event) => {
+      const connectButton = event.target.closest("[data-connect-wallet]");
+      if (connectButton) {
+        event.preventDefault();
+        if (connectButton.dataset.connecting === "true") return;
+        connectButton.dataset.connecting = "true";
+        setBusy(connectButton, true, "Opening Meteor…");
+        try { await connectWallet(); }
+        finally {
+          delete connectButton.dataset.connecting;
+          if (connectButton.isConnected) setBusy(connectButton, false);
+        }
+        return;
+      }
       const actionButton = event.target.closest("[data-action]");
       if (!actionButton) return;
       const action = actionButton.dataset.action;
@@ -2438,51 +3128,68 @@
         input.value = next;
         updateContributionTotal();
       }
-      if (action === "contribute") await handleContribution(actionButton);
-      if (action === "accept-supplier-request") await handleSimpleAction(actionButton, "accept_supplier_request", { purchase_id: String(actionButton.dataset.purchaseId) }, "Supplier agreement recorded. Contributions are now open.");
-      if (action === "decline-supplier-request") await handleSimpleAction(actionButton, "decline_supplier_request", { purchase_id: String(actionButton.dataset.purchaseId) }, "The supplier declined this request.");
-      if (action === "vote") await handleVote(actionButton);
-      if (action === "finalize") await handleSimpleAction(actionButton, "finalize_purchase", { purchase_id: String(actionButton.dataset.purchaseId) }, "Purchase finalized on-chain.");
-      if (action === "cancel-commitment") await handleSimpleAction(actionButton, "cancel_commitment", { purchase_id: String(actionButton.dataset.purchaseId) }, "Commitment cancelled on-chain. The refund is now claimable.");
-      if (action === "claim-refund") await handleSimpleAction(actionButton, "claim_refund", { purchase_id: String(actionButton.dataset.purchaseId) }, "Refund claim submitted on-chain. Wait for the contract callback to mark it refunded.");
-      if (action === "expire-unfulfilled") await handleSimpleAction(actionButton, "expire_unfulfilled_purchase", { purchase_id: String(actionButton.dataset.purchaseId) }, "Purchase marked failed on-chain. Refunds are now claimable.");
-      if (action === "release-payment") await handleSimpleAction(actionButton, "release_payment", { purchase_id: String(actionButton.dataset.purchaseId) }, "Payment release confirmed on-chain. The contract callback will finalize the state.");
-      if (action === "decision-vote") await handleV3Action(actionButton, "vote_on_decision", { decision_id: String(actionButton.dataset.decisionId), option: Number(actionButton.dataset.option) }, "Your vote has been recorded.");
-      if (action === "resolve-issue") await handleV3Action(actionButton, "resolve_issue", { issue_id: String(actionButton.dataset.issueId) }, "Issue marked resolved.");
-      if (action === "agree-decision") await handleV3Action(actionButton, "agree_to_decision", { decision_id: String(actionButton.dataset.decisionId) }, "Supplier agreement recorded on-chain.");
-      if (action === "decline-decision") await handleV3Action(actionButton, "decline_decision", { decision_id: String(actionButton.dataset.decisionId) }, "The proposal was declined and the issue is open again.");
-      if (action === "expire-decision") await handleV3Action(actionButton, "expire_decision", { decision_id: String(actionButton.dataset.decisionId) }, "Expired decision closed. The issue is open for another proposal.");
+      if (action === "refresh-payout-checks") {
+        await loadFinancialReadiness(state.currentPurchase).catch(() => { state.financialReadiness = { error: true }; });
+        renderCurrentPage();
+      }
+      if (GUARDED_TRANSACTION_ACTIONS.has(action)) {
+        await runGuardedSubmission(actionButton, () => dispatchGuardedTransaction(action, actionButton));
+      }
     });
     document.addEventListener("input", (event) => {
       if (event.target.id === "contribution-quantity") updateContributionTotal();
       if (event.target.id === "price-per-unit") updateCreatePricePreview();
+      if (event.target.id === "listed-usd-price") updateCreatePricePreview();
+      if (event.target.id === "custom-unit") updateSaleUnitFields();
+      if (["purchase-deadline", "fulfillment-deadline"].includes(event.target.id)) updateTimezoneControls();
       saveDraft(event.target);
     });
     document.addEventListener("change", (event) => {
       handleDraftContextChange(event.target);
       if (event.target.id === "agreement-acceptance") updateAgreementAcceptance();
       if (event.target.id === "sale-unit") updateSaleUnitFields();
+      if (event.target.name === "creation_mode") updateCreationModeCopy();
+      if (event.target.id === "business-timezone") {
+        setBusinessTimeZone(event.target.value);
+        updateTimezoneControls();
+      }
       if (event.target.name === "vote_type") updateDecisionFormType(event.target.form);
       saveDraft(event.target);
     });
-    document.addEventListener("submit", (event) => { if (event.target.matches("[data-evidence-form]")) { event.preventDefault(); handleEvidence(event.target); } });
-    document.addEventListener("submit", (event) => { if (event.target.matches("[data-issue-form]")) { event.preventDefault(); handleRaiseIssue(event.target); } });
-    document.addEventListener("submit", (event) => { if (event.target.matches("[data-decision-form]")) { event.preventDefault(); handleRequestDecision(event.target); } });
+    document.addEventListener("submit", (event) => {
+      if (!event.target.matches("[data-evidence-form]")) return;
+      event.preventDefault();
+      runGuardedSubmission(event.target, () => handleEvidence(event.target));
+    });
+    document.addEventListener("submit", (event) => {
+      if (!event.target.matches("[data-issue-form]")) return;
+      event.preventDefault();
+      runGuardedSubmission(event.target, () => handleRaiseIssue(event.target));
+    });
+    document.addEventListener("submit", (event) => {
+      if (!event.target.matches("[data-decision-form]")) return;
+      event.preventDefault();
+      runGuardedSubmission(event.target, () => handleRequestDecision(event.target));
+    });
   }
 
   async function init() {
     bindGlobalEvents();
+    updateTimezoneControls();
     setCreateDefaults();
     updateSaleUnitFields();
+    updateCreationModeCopy();
     updateCreatePricePreview();
     try {
       await setupNear();
+      captureWalletCallbackHash();
       await Promise.allSettled([loadBaseData(), loadNearPrice()]);
       if (["details", "agreement", "issue_form", "supplier_invitation"].includes(appConfig.page)) {
         const id = $("[data-purchase-id]")?.dataset.purchaseId;
         if (id) await loadPurchase(id);
       }
       updateWalletUi();
+      showCreateConnectionFollowup();
       await reconcilePendingActions();
     } catch (_error) {
       if (appConfig.page !== "home" && appConfig.page !== "explore") showToast("Live Testnet data is unavailable right now. Refresh to try again.", "error");
@@ -2490,7 +3197,11 @@
     renderCurrentPage();
     window.setInterval(loadNearPrice, 60_000);
     window.setInterval(() => {
-      if (state.accountId && pendingActionStore.list(state.accountId).length) reconcilePendingActions({ poll: true });
+      if (state.accountId && pendingActionStore.list(state.accountId).length) {
+        recoverIfTransactionBundleChanged().then((reloading) => {
+          if (!reloading) reconcilePendingActions({ poll: true });
+        });
+      }
     }, 12_000);
     if (["details", "agreement", "issue_form", "supplier_invitation"].includes(appConfig.page)) {
       if (state.currentPurchase) {

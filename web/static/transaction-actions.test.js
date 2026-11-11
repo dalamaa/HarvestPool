@@ -22,6 +22,7 @@ const METHODS = [
   "vote_on_fulfillment",
   "expire_unfulfilled_purchase",
   "release_payment",
+  "reconcile_token_balance",
   "claim_refund",
   "ft_transfer_call",
 ];
@@ -100,4 +101,5 @@ test("only V3 async read-and-callback methods receive the larger gas budget", ()
   assert.equal(gasForMethod("usdc.testnet", v3, "ft_transfer_call"), "100000000000000");
   assert.equal(gasForMethod("v5.testnet", v3, "claim_refund"), "100000000000000");
   assert.equal(gasForMethod("v5.testnet", v3, "release_payment"), "100000000000000");
+  assert.equal(gasForMethod("v5.testnet", v3, "reconcile_token_balance"), "50000000000000");
 });
