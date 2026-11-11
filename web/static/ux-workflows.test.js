@@ -78,6 +78,11 @@ test("Explore polls authoritative state so delayed finalization moves cards with
 
 test("create forms start empty and offer explicit draft restoration", () => {
   assert.match(templateSource, /id="create-purchase-form" data-draft-form="create-purchase"/);
+  ["product-name", "product-description", "custom-unit", "package-contents", "listed-usd-price", "fulfillment-location", "pickup-terms"].forEach((id) => {
+    assert.match(templateSource, new RegExp(`id="${id}"[^>]*placeholder=""`), id);
+  });
+  assert.doesNotMatch(templateSource, /placeholder="(?:Fresh tomatoes|Ripe local tomatoes|half-share|About 10 lb|50\.00|Community center|Bring your order confirmation)/);
+  assert.match(appSource, /if \(contentsInput\) contentsInput\.placeholder = ""/);
   assert.doesNotMatch(templateSource, /name="min_quantity"[^>]*value="10"/);
   assert.doesNotMatch(templateSource, /name="max_quantity"[^>]*value="20"/);
   assert.doesNotMatch(templateSource, /name="cancellation_and_refund_terms"[^>]*>Members receive/);
@@ -89,32 +94,47 @@ test("create forms start empty and offer explicit draft restoration", () => {
 
 test("create validation gives linked inline errors and visible invalid borders", () => {
   assert.match(appSource, /function showCreateValidationErrors\(form, errors\)/);
+  assert.match(appSource, /id: field\?\.id \|\| error\.id \|\| error\.name/);
+  assert.match(appSource, /function focusCreateErrorLink\(link\)/);
+  assert.match(appSource, /fieldContainer\.scrollIntoView/);
+  assert.match(appSource, /target\.focus\(\{ preventScroll: true \}\)/);
   assert.match(appSource, /aria-invalid/);
   assert.match(appSource, /field-error/);
   assert.match(stylesSource, /\.field-invalid input, \.field-invalid select, \.field-invalid textarea/);
   assert.match(stylesSource, /\.field-error/);
 });
 
-test("Action Center separates Pending, History, and Issues without reusing active issue cards", () => {
-  assert.match(appSource, /section-kicker">Pending/);
-  assert.match(appSource, /History.*Completed actions/);
-  assert.match(appSource, /section-kicker">Issues/);
-  assert.match(appSource, /activeIssueIds/);
-  assert.match(appSource, /!activeIssueIds\.has\(String\(issue\.id\)\)/);
+test("Action Center uses accessible hash-aware tabs and deduplicates issues", () => {
+  assert.match(appSource, /role="tablist" aria-label="Action Center views"/);
+  assert.match(appSource, /role="tab" aria-selected=/);
+  assert.match(appSource, /role="tabpanel" aria-labelledby=/);
+  assert.match(appSource, /\["ArrowLeft", "ArrowRight", "Home", "End"\]/);
+  assert.match(appSource, /hash === "#issues" \|\| hash === "#raise-an-issue"/);
+  assert.match(appSource, /window\.addEventListener\("hashchange"/);
+  assert.match(appSource, /seenIssueIds\.has\(id\)/);
+  assert.doesNotMatch(appSource, /Confirmed records/);
+  assert.doesNotMatch(appSource, /Pending, history, and issues/);
+  assert.match(appSource, /No active funded purchases are currently eligible for a new issue/);
+  assert.match(appSource, /href="\/dashboard">My Group Buys/);
 });
 
 test("normal views keep wallet and transaction internals out of the main reading path", () => {
   assert.match(stylesSource, /#agreement-content \.technical-details/);
   assert.match(stylesSource, /#supplier-invitation-content \.technical-details/);
   assert.match(appSource, /Approve only after checking the account, amount, and action/);
-  assert.match(templateSource, /Testnet only: this uses Circle Testnet USDC, not a USD card charge or redeemable dollars/);
+  assert.match(templateSource, /Testnet USDC is not a real USD card charge or redeemable dollars/);
 });
 
 test("supplier response colors are explicit and tooltips stay compact and dark", () => {
   assert.match(stylesSource, /\.button-accept \{[^}]*background: var\(--success\)/);
   assert.match(stylesSource, /\.supplier-invitation-actions \.button-reject \{[^}]*background: var\(--danger\)/);
-  assert.match(stylesSource, /\.info-tooltip-content \{[^}]*width: min\(210px/);
+  assert.match(stylesSource, /\.info-tooltip-content \{[^}]*width: min\(240px/);
   assert.match(stylesSource, /\.info-tooltip-content \{[^}]*background: #17251f/);
+  assert.match(stylesSource, /\.info-tooltip-content \{[^}]*font-size: 12px/);
+  assert.match(stylesSource, /\.info-tooltip-button \{[^}]*width: 44px;[^}]*height: 44px;[^}]*background: transparent;[^}]*font-size: 17px/);
+  assert.match(stylesSource, /\.info-tooltip-button::before \{[^}]*width: 24px;[^}]*border-radius: 6px;[^}]*background: transparent/);
+  assert.doesNotMatch(stylesSource, /\.info-tooltip-button::before \{[^}]*border:/);
+  assert.match(templateSource, /aria-label="About the maximum quantity"[^>]*>\?<\/button>/);
 });
 
 test("summary values are left aligned in stable two-column grids", () => {
@@ -132,10 +152,12 @@ test("marketplace cards use a stable content and action structure", () => {
   assert.match(stylesSource, /\.purchase-card-actions \.button[^{]*\{[^}]*white-space: nowrap/);
 });
 
-test("homepage preview badges stay in the card flow without collision-prone orbit labels", () => {
+test("homepage preview keeps one title, useful progress, and centered steps", () => {
   assert.doesNotMatch(templateSource, /orbit-note/);
-  assert.match(templateSource, /<h2>One shared order<\/h2><span class="preview-badge">Clear from day one<\/span>/);
+  assert.match(templateSource, /<h2>One shared order<\/h2>/);
+  assert.doesNotMatch(templateSource, /<div class="ticket-price">|<span class="live-card-label">Terms first<\/span>|<span class="mini-label">Community order<\/span>|<span class="preview-badge">Clear from day one<\/span>/);
   assert.match(templateSource, /<div class="preview-badge-row"><span class="preview-badge">Funded buyers <strong>/);
+  assert.match(stylesSource, /\.ticket-stats div \{[^}]*justify-items: center;[^}]*text-align: center/);
   assert.match(stylesSource, /\.preview-badge-row \{ display: flex; flex-wrap: wrap; gap: 8px;/);
   assert.match(stylesSource, /\.preview-badge \{ display: inline-flex;[^{]*padding: 6px 10px;[^{]*border-radius: 999px;[^{]*background: var\(--mist\);/);
   assert.doesNotMatch(stylesSource, /\.preview-badge \{[^}]*position:\s*absolute/);

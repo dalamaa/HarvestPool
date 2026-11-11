@@ -2345,41 +2345,94 @@
     const historyContent = rows.length
       ? "<div class=\"decision-history-list\">" + rows.join("") + "</div>"
       : "<div class=\"issues-empty\"><p>No completed actions yet.</p><span>Confirmed votes and resolved actions will appear here.</span></div>";
-    return "<section class=\"action-center-section action-history\" aria-labelledby=\"action-history-heading\"><div class=\"section-heading-inline\"><div><span class=\"section-kicker\">History</span><h2 id=\"action-history-heading\">Completed actions</h2></div><span class=\"meta-label\">Confirmed records</span></div>" + historyContent + "</section>";
+    return `<section class="action-center-section action-history">${historyContent}</section>`;
   }
 
   function renderRaiseIssueForm(selectedPurchaseId = "") {
+    if (!state.accountId) return `<div class="issues-empty"><p>Connect your wallet to check which funded purchases can open an issue.</p><button class="button button-dark button-small" type="button" data-connect-wallet>Connect wallet</button></div>`;
     if (!appConfig.v3ContractId) return `<div class="issues-unavailable"><p>Member issues are not turned on for this community yet.</p></div>`;
     if (!state.v3Available) return `<div class="issues-unavailable"><p>Issues are temporarily unavailable. Refresh to try again.</p></div>`;
     const eligiblePurchases = state.purchases.filter((purchase) => isFundedMember(purchase) && !["Completed", "Failed"].includes(purchase.state));
-    if (!eligiblePurchases.length) return `<div class="issues-empty"><p>Join a deal before raising an issue.</p><a class="button button-outline button-small" href="/deals">Explore Deals</a></div>`;
+    if (!eligiblePurchases.length) return `<div class="issues-empty"><p>No active funded purchases are currently eligible for a new issue.</p><span>Review your confirmed participation and purchase status in My Group Buys.</span><a class="button button-outline button-small" href="/dashboard">My Group Buys</a></div>`;
     const selected = eligiblePurchases.some((purchase) => String(purchase.id) === String(selectedPurchaseId)) ? String(selectedPurchaseId) : String(eligiblePurchases[0].id);
     return `<form class="issue-form" id="raise-issue-form" data-issue-form data-draft-form="raise-issue" data-draft-purchase-id="${escapeHtml(selected)}"><div class="form-intro"><span class="form-step">Raise an issue</span><p>Keep it practical. You can ask for a clarification or suggest a safe pickup change.</p></div><div class="field"><label for="issue-purchase">Which purchase is this about?</label><select id="issue-purchase" name="purchase_id" required>${eligiblePurchases.map((purchase) => `<option value="${escapeHtml(purchase.id)}" ${String(purchase.id) === selected ? "selected" : ""}>${escapeHtml(livePurchaseTitle(purchase))} · purchase #${escapeHtml(purchase.id)}</option>`).join("")}</select></div><div class="field"><label for="issue-subject">What is the issue about?</label><input id="issue-subject" name="subject" type="text" maxlength="120" placeholder="Pickup time no longer works" required></div><div class="field"><label for="issue-description">Describe the problem or concern.</label><textarea id="issue-description" name="description" maxlength="2000" rows="5" placeholder="Tell the group what changed and what would help." required></textarea></div><div class="field"><label for="issue-solution">What solution do you suggest? <span class="field-optional">Optional</span></label><textarea id="issue-solution" name="suggested_solution" maxlength="1000" rows="3" placeholder="A practical suggestion, if you have one."></textarea></div><div class="form-error-summary" id="issue-form-error" tabindex="-1" role="alert" hidden></div><div class="form-actions"><span class="form-safety">Only confirmed funded members can raise issues.</span><div class="draft-actions"><button class="button button-outline button-small" type="button" data-action="discard-draft">Discard draft</button><button class="button button-primary" type="submit">Submit issue</button></div></div></form>`;
   }
 
-  function renderV3Dashboard(activeIssueIds = new Set()) {
+  function renderV3Dashboard() {
     if (!appConfig.v3ContractId) {
-      return `<section class="issues-section"><div class="section-heading-inline"><div><span class="section-kicker">Issues raised</span><h2>Make room for the practical stuff.</h2></div></div><div class="issues-unavailable"><p>Member issues will appear here when this community turns them on.</p></div></section>`;
+      return `<section class="action-center-section action-issues"><div class="issues-unavailable"><p>Member issues are not turned on for this community yet.</p></div></section>`;
     }
     if (!state.v3Available) {
-      return `<section class="issues-section"><div class="section-heading-inline"><div><span class="section-kicker">Issues raised</span><h2>Issues are temporarily unavailable.</h2></div></div><div class="issues-unavailable"><p>Refresh to check the latest issues and group decisions.</p></div></section>`;
+      return `<section class="action-center-section action-issues"><div class="action-issues-toolbar"><a class="button button-primary button-small" href="#raise-an-issue" data-action="show-raise-issue">Raise an Issue</a></div><div class="issues-unavailable"><p>Issues are temporarily unavailable. Refresh to check the latest issue status.</p></div></section>`;
     }
-    const visibleIssues = state.issues.filter((issue) => canSeeIssue(issue) && !activeIssueIds.has(String(issue.id)));
+    const seenIssueIds = new Set();
+    const visibleIssues = state.issues.filter((issue) => {
+      const id = String(issue.id);
+      if (!canSeeIssue(issue) || seenIssueIds.has(id)) return false;
+      seenIssueIds.add(id);
+      return true;
+    });
     const issuesMarkup = visibleIssues.length
       ? `<div class="issue-list">${visibleIssues.map((issue) => renderIssueCard(issue)).join("")}</div>`
       : `<div class="issues-empty"><p>No issues have been raised in your funded purchases.</p><span>Start with a practical concern if something has changed.</span></div>`;
-    return `<section class="action-center-section action-issues" aria-labelledby="action-issues-heading"><div class="section-heading-inline"><div><span class="section-kicker">Issues</span><h2 id="action-issues-heading">Open concerns</h2></div><a class="button button-primary button-small" href="#raise-an-issue">Raise an issue</a></div>${issuesMarkup}<div class="raise-issue-block" id="raise-an-issue"><div class="section-heading-inline"><div><span class="section-kicker">Start a conversation</span><h3>Raise an issue</h3></div></div>${renderRaiseIssueForm()}</div></section>`;
+    const openRaiseForm = window.location.hash === "#raise-an-issue";
+    return `<section class="action-center-section action-issues"><div class="action-issues-toolbar"><a class="button button-primary button-small" href="#raise-an-issue" data-action="show-raise-issue">Raise an Issue</a></div>${issuesMarkup}<div class="raise-issue-block" id="raise-an-issue" tabindex="-1" ${openRaiseForm ? "" : "hidden"}><div class="section-heading-inline"><div><h3>Raise an Issue</h3></div></div>${renderRaiseIssueForm()}</div></section>`;
+  }
+
+  const ACTION_CENTER_TABS = ["pending", "history", "issues"];
+
+  function actionCenterTabFromHash(hash = window.location.hash) {
+    if (hash === "#history") return "history";
+    if (hash === "#issues" || hash === "#raise-an-issue") return "issues";
+    return "pending";
+  }
+
+  function actionCenterTabsMarkup(activeTab, pendingCount) {
+    const labels = { pending: "Pending", history: "History", issues: "Issues" };
+    return `<div class="action-center-tabs" role="tablist" aria-label="Action Center views">${ACTION_CENTER_TABS.map((tab) => {
+      const selected = tab === activeTab;
+      const count = tab === "pending" ? `<span class="action-center-tab-count" aria-label="${pendingCount} pending">${pendingCount}</span>` : "";
+      return `<button class="action-center-tab" id="action-tab-${tab}" type="button" role="tab" aria-selected="${selected}" aria-controls="action-panel-${tab}" tabindex="${selected ? "0" : "-1"}" data-action-center-tab="${tab}">${labels[tab]}${count}</button>`;
+    }).join("")}</div>`;
+  }
+
+  function actionCenterPanelMarkup(tab, activeTab, content) {
+    return `<div class="action-center-tabpanel" id="action-panel-${tab}" role="tabpanel" aria-labelledby="action-tab-${tab}" ${tab === activeTab ? "" : "hidden"}>${content}</div>`;
+  }
+
+  function activateActionCenterTab(tab, { updateHash = true, focus = false } = {}) {
+    const selectedTab = ACTION_CENTER_TABS.includes(tab) ? tab : "pending";
+    $$('[role="tab"][data-action-center-tab]', $("#decisions-root")).forEach((button) => {
+      const selected = button.dataset.actionCenterTab === selectedTab;
+      button.setAttribute("aria-selected", String(selected));
+      button.tabIndex = selected ? 0 : -1;
+      if (selected && focus) button.focus();
+    });
+    $$(".action-center-tabpanel", $("#decisions-root")).forEach((panel) => {
+      panel.hidden = panel.id !== `action-panel-${selectedTab}`;
+    });
+    if (updateHash) {
+      $("#raise-an-issue")?.setAttribute("hidden", "");
+      if (window.location.hash !== `#${selectedTab}`) window.history.pushState(null, "", `#${selectedTab}`);
+    } else if (selectedTab !== "issues") {
+      $("#raise-an-issue")?.setAttribute("hidden", "");
+    }
+  }
+
+  function showRaiseIssueForm({ focus = true } = {}) {
+    activateActionCenterTab("issues", { updateHash: false });
+    const block = $("#raise-an-issue");
+    if (!block) return;
+    block.hidden = false;
+    if (window.location.hash !== "#raise-an-issue") window.history.pushState(null, "", "#raise-an-issue");
+    block.scrollIntoView({ block: "start", behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+    if (focus) ($("#issue-purchase", block) || block).focus({ preventScroll: true });
   }
 
   function renderDecisions() {
     const root = $("#decisions-root");
     if (!root) return;
-    if (!state.accountId) {
-      root.innerHTML = disconnectedAccountMarkup("Eligible votes, supplier responses, and refunds will appear here.");
-      return;
-    }
     const tasks = actionCenterTasks();
-    const activeIssueIds = new Set(tasks.filter((task) => ["community-vote", "supplier-consent"].includes(task.kind)).map((task) => String(task.issueId)));
     const cards = tasks.map((task) => {
       if (["offer-vote", "fulfillment-vote"].includes(task.kind)) {
         const purchase = state.purchases.find((item) => String(item.id) === String(task.purchaseId));
@@ -2405,8 +2458,11 @@
     }).filter(Boolean);
     const active = cards.length
       ? `<section class="action-center-active" aria-labelledby="active-actions-heading"><div class="section-heading-inline"><div><span class="section-kicker">Eligible now</span><h2 id="active-actions-heading">${cards.length} ${cards.length === 1 ? "action" : "actions"} need your attention</h2></div></div><div class="decision-grid">${cards.join("")}</div></section>`
-      : `<section class="action-center-section action-center-empty" aria-labelledby="pending-actions-heading"><div class="section-heading-inline"><div><span class="section-kicker">Pending</span><h2 id="pending-actions-heading">Nothing needs attention</h2></div></div><div class="empty-icon">${icon("shield")}</div><p>No supplier proposal, vote, refund, or unresolved transaction is currently eligible for this account.</p></section>`;
-    root.innerHTML = `<div class="dashboard-toolbar"><div><span class="section-kicker">Action Center</span><h2>Pending, history, and issues</h2></div><span class="wallet-caption">${cards.length} pending</span></div>${active.replace("Eligible now", "Pending")}${renderDecisionHistory(state.purchases)}${renderV3Dashboard(activeIssueIds)}`;
+      : state.accountId
+        ? `<section class="action-center-section action-center-empty"><div class="empty-icon">${icon("shield")}</div><h2>Nothing needs attention</h2><p>No supplier proposal, vote, refund, or unresolved transaction is currently available to this account.</p></section>`
+        : `<section class="action-center-section">${disconnectedAccountMarkup("Eligible votes, supplier responses, and refunds will appear here.")}</section>`;
+    const activeTab = actionCenterTabFromHash();
+    root.innerHTML = `${actionCenterTabsMarkup(activeTab, cards.length)}${actionCenterPanelMarkup("pending", activeTab, active.replace("Eligible now", "Pending"))}${actionCenterPanelMarkup("history", activeTab, renderDecisionHistory(state.purchases))}${actionCenterPanelMarkup("issues", activeTab, renderV3Dashboard())}`;
   }
 
   function renderIssueFormPage() {
@@ -3306,7 +3362,7 @@
     const packageUnit = dealFormTools.supportsPackageContents(select.value);
     if (contentsField) contentsField.hidden = !packageUnit;
     if (contentsInput) contentsInput.disabled = !packageUnit;
-    if (contentsInput && packageUnit) contentsInput.placeholder = `Describe what comes in each ${labels.singular}`;
+    if (contentsInput) contentsInput.placeholder = "";
     updateCreatePricePreview();
   }
 
@@ -3425,13 +3481,27 @@
 
   function showCreateValidationErrors(form, errors) {
     clearCreateValidationState(form);
-    errors.forEach((error) => setFieldError(createField(form, error.name), error.message));
+    const linkedErrors = errors.map((error) => {
+      const field = createField(form, error.name);
+      setFieldError(field, error.message);
+      return { ...error, id: field?.id || error.id || error.name };
+    });
     const summary = $(".form-error-summary", form);
     if (!summary) return;
-    summary.innerHTML = "<strong>Check " + (errors.length === 1 ? "this field" : "these fields") + " before continuing.</strong><ul>" + errors.map((error) => "<li><a href=\"#" + escapeHtml(error.id || error.name) + "\">" + escapeHtml(error.message) + "</a></li>").join("") + "</ul>";
+    summary.innerHTML = "<strong>Check " + (linkedErrors.length === 1 ? "this field" : "these fields") + " before continuing.</strong><ul>" + linkedErrors.map((error) => "<li><a href=\"#" + escapeHtml(error.id) + "\">" + escapeHtml(error.message) + "</a></li>").join("") + "</ul>";
     summary.hidden = false;
     form.dataset.validationActive = "true";
     summary.focus();
+  }
+
+  function focusCreateErrorLink(link) {
+    if (!link?.matches("#create-form-error a[href^='#']")) return false;
+    const target = document.getElementById(decodeURIComponent(link.hash.slice(1)));
+    if (!target) return false;
+    const fieldContainer = target.closest(".field, .choice-fieldset") || target;
+    fieldContainer.scrollIntoView({ block: "start", behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+    target.focus({ preventScroll: true });
+    return true;
   }
 
   function validateCreateForm(form, version) {
@@ -3687,6 +3757,18 @@
         }
         return;
       }
+      const actionCenterTab = event.target.closest("[data-action-center-tab]");
+      if (actionCenterTab) {
+        event.preventDefault();
+        activateActionCenterTab(actionCenterTab.dataset.actionCenterTab, { focus: true });
+        return;
+      }
+      const raiseIssueButton = event.target.closest('[data-action="show-raise-issue"]');
+      if (raiseIssueButton) {
+        event.preventDefault();
+        showRaiseIssueForm();
+        return;
+      }
       const actionButton = event.target.closest("[data-action]");
       if (!actionButton) return;
       const action = actionButton.dataset.action;
@@ -3765,6 +3847,23 @@
       if (GUARDED_TRANSACTION_ACTIONS.has(action)) {
         await runGuardedSubmission(actionButton, () => dispatchGuardedTransaction(action, actionButton));
       }
+    });
+    document.addEventListener("click", (event) => {
+      const link = event.target.closest?.("#create-form-error a[href^='#']");
+      if (!link) return;
+      event.preventDefault();
+      focusCreateErrorLink(link);
+    });
+    document.addEventListener("keydown", (event) => {
+      const current = event.target.closest?.('[role="tab"][data-action-center-tab]');
+      if (!current || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+      event.preventDefault();
+      const tabs = $$('[role="tab"][data-action-center-tab]', current.closest('[role="tablist"]'));
+      const index = tabs.indexOf(current);
+      const nextIndex = event.key === "Home" ? 0
+        : event.key === "End" ? tabs.length - 1
+          : (index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+      activateActionCenterTab(tabs[nextIndex].dataset.actionCenterTab, { focus: true });
     });
     document.addEventListener("input", (event) => {
       const createForm = event.target.closest?.("#create-purchase-form");
@@ -3856,6 +3955,13 @@
       } else stopExploreRefresh();
     });
     window.addEventListener("pagehide", stopExploreRefresh);
+    window.addEventListener("hashchange", () => {
+      if (appConfig.page !== "decisions") return;
+      const tab = actionCenterTabFromHash();
+      activateActionCenterTab(tab, { updateHash: false });
+      if (window.location.hash === "#raise-an-issue") showRaiseIssueForm({ focus: false });
+      else $("#raise-an-issue")?.setAttribute("hidden", "");
+    });
     scheduleExploreRefresh();
     if (["details", "agreement", "issue_form", "supplier_invitation"].includes(appConfig.page)) {
       if (state.currentPurchase) {
