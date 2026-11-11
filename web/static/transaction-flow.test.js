@@ -81,6 +81,39 @@ test("submit and discard controls stay disabled while a transaction is unresolve
   assert.match(appSource, /setTransactionSurfaceBusy\(surface, keepLocked\)/);
 });
 
+test("authoritative recovery clears only the draft attached to the confirmed action", () => {
+  assert.match(appSource, /const reference = draftReference\(button\)/);
+  assert.match(appSource, /\.\.\.\(reference \? \{ draft: reference \} : \{\}\)/);
+  assert.match(appSource, /result\?\.state === "confirmed"[\s\S]*clearDraftReference\(action\.context\?\.draft\)/);
+  assert.doesNotMatch(appSource, /localStorage\.clear\(/);
+});
+
+test("financial operations are absent from public deal rendering and owner-gated in management", () => {
+  assert.match(appSource, /Contract-wide escrow controls intentionally stay off public purchase pages/);
+  assert.match(appSource, /state\.config\?\.owner_id/);
+  assert.match(appSource, /data-action="open-financial-operations"/);
+});
+
+test("native confirmation popups are replaced by the application review dialog", () => {
+  assert.doesNotMatch(appSource, /window\.confirm\(/);
+  assert.match(appSource, /title: `Finalize Deal/);
+  assert.match(appSource, /title: `Submit Testnet evidence/);
+});
+
+test("expired open deals are presented as awaiting finalization and cannot render a join action", () => {
+  assert.match(appSource, /function presentationState\(purchase\)/);
+  assert.match(appSource, /DeadlinePassed:\s*"Deadline passed · awaiting finalization"/);
+  assert.match(appSource, /const canJoin = !alreadyJoined && purchase\.state === "Open" && !deadlineHasPassed/);
+  assert.match(appSource, /verifyContributionEligibility[\s\S]*if \(deadlineHasPassed\(purchase\.deadline_ns\)\) throw/);
+});
+
+test("failed deals preserve participant counts and expose eligible refund actions", () => {
+  assert.match(appSource, /function participantCount\(purchase\)/);
+  assert.match(appSource, /function failureReason\(purchase\)/);
+  assert.match(appSource, /commitment\.state === "Refundable"/);
+  assert.match(appSource, /Claim refund/);
+});
+
 test("transaction phases distinguish Meteor handoff, submission, and confirmation", () => {
   assert.match(appSource, /Sending this action through Meteor/);
   assert.match(appSource, /matching limited Testnet permission/);
