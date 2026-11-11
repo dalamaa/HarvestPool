@@ -35,6 +35,12 @@ Refund transaction: [`G63ozfWnVsZRRUpZ4zrucMVYR7VErFTEF4NtfurCJy4N`](https://tes
 Its finalized receipt graph includes the Circle NEP-141 transfer of `2,000,000` units to the
 original buyer and a successful V5 outbound-operation callback.
 
+Supplier payout transaction: [`Gp32zhkmfXFqnL1c6zPPsoy55Fh1LVjjvk3EYiNqLHCm`](https://testnet.nearblocks.io/txns/Gp32zhkmfXFqnL1c6zPPsoy55Fh1LVjjvk3EYiNqLHCm).
+Its receipt graph includes the Circle NEP-141 transfer of `4,000,000` units from V5 to
+`harvestpool-farmer-1.testnet` and the successful V5 callback. The stored evidence for this deal
+explicitly states `TESTNET SIMULATION - NO PHYSICAL DELIVERY OCCURRED - DEAL #0`; no physical
+delivery is claimed.
+
 ## Verification baseline
 
 - `node --test web/static/*.test.js`: 86 passed.

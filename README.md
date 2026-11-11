@@ -248,10 +248,22 @@ cargo test --workspace --all-targets
 node --test web/static/*.test.js
 node --check web/static/app.js
 python -m py_compile web/app.py
+python -m unittest -v automation.test_finalizer
 ```
 
 The exact test count changes as regressions are added. A successful fresh run must report no failed
 Rust or JavaScript tests; ignored opt-in Sandbox journeys are expected in the default Cargo command.
+
+### Independent V5 finalization worker
+
+The optional worker discovers V5 deals whose join deadline has passed and submits only
+`finalize_purchase`. It persists the signed transaction before broadcast, reconciles unknown
+outcomes before retrying, and requires a function-call key restricted to that one method and V5
+receiver. It never releases supplier payment or submits buyer refunds. The worker is disabled by
+default; `python -m automation.finalizer --once` is therefore a safe configuration smoke check.
+
+Provisioning, health checks, exact contract semantics, test scope, and remaining manual settlement
+operations are in [Automatic finalization](docs/automatic-finalization.md).
 
 ### Local NEAR Sandbox journeys
 
@@ -381,6 +393,9 @@ volatility; it does not guarantee issuer availability, redemption, fulfillment, 
 | `contract-v3-v5/` | Corrected, isolated decision contract for V5 membership |
 | `mock-usdc/` | Local six-decimal NEP-141/NEP-145 test fixture; not Circle's contract |
 | `web/` | Flask/Jinja application, browser wallet/RPC adapter, frontend tests |
+| `automation/` | Disabled-by-default, permission-limited V5 finalization worker and tests |
+| `docs/automatic-finalization.md` | Worker security boundary, runbook, retries, and settlement limits |
+| `docs/release-fitness-report.md` | Clean-checkout, workflow, live-state, and release-gate evidence |
 | `docs/engineering-decisions.md` | Evidence-grounded challenge and NEAR innovation story |
 | `docs/HACKATHON_DEMO_SCRIPT.md` | Exact demo narrative, actions, results, and evidence |
 | `docs/infrastructure-reliability-audit.md` | Contract findings, test outcomes, USDC plan, screening checklist |

@@ -1,10 +1,10 @@
 # Engineering decisions: making a group buy enforceable
 
-> **Submission-safe summary:** HarvestPool V4 is a working NEAR Testnet prototype for
-> supplier-authorized group purchases settled in native Testnet NEAR. Its separate V3 contract
-> supports funded-member decisions but has a disclosed storage-availability defect. An isolated V5
-> native-USDC candidate and corrected V3-for-V5 are implemented and Sandbox-tested locally; neither
-> is deployed or demonstrated with Circle's official token on Testnet.
+> **Submission-safe summary:** HarvestPool keeps the V4 native-Testnet-NEAR path intact and has an
+> isolated V5 contract deployed on NEAR Testnet with Circle Testnet USDC. V5 completed one
+> low-value simulated-fulfillment payout and one failed-purchase refund; this proves those Testnet
+> receipt paths, not production readiness or physical delivery. The corrected V3-for-V5 is also
+> deployed and remains separate from purchase escrow.
 
 HarvestPool started with a practical question: how can several households place one order without
 turning an organizer into an informal bank? That led to a contract-enforced lifecycle rather than a
@@ -236,7 +236,7 @@ V5 contract accepts only its configured Circle native-USDC account on NEAR Testn
 NEP-141. USDC uses six decimals, so one USDC is raw integer `1_000_000`; no floating-point math or
 24-decimal NEAR conversion belongs in token accounting.
 
-The proposed inbound path is:
+The V5 inbound path is:
 
 1. Member calls the configured token's `ft_transfer_call` with a versioned, bounded commit message.
 2. `ft_on_transfer` verifies that `env::predecessor_account_id()` is exactly the immutable official
@@ -260,17 +260,17 @@ storage registration. Cross-contract promises permit explicit callbacks. V3 comp
 preserved through the same `get_purchase`, `get_funded_members`, and `is_funded_member` views while
 giving V3 no token authority.
 
-**Evidence:** V5, V3-for-V5, and a standards-based mock token are implemented locally. Four Sandbox
-journeys passed using real cross-contract receipts and injected outbound transfer failures. A
-read-only final RPC call reported Circle's token as `USDC`, six decimals, `ft-1.0.0`. The current V4
-account remains native NEAR. See [V5 readiness](v5-usdc.md) for identity and artifact evidence.
+**Evidence:** V5, V3-for-V5, and a standards-based mock token have four local Sandbox journeys with
+real cross-contract receipts and injected outbound failures. The isolated deployed V5 then accepted
+6,000,000 Circle Testnet USDC base units, paid 4,000,000 to the immutable supplier, refunded
+2,000,000 to the contributing buyer, and reconciled to zero balance/zero liability. Receipt links,
+accounts, and artifact hashes are in the [V5 financial baseline](v5-financial-baseline.md).
 
-**Limitations:** Deployment, V5 token storage registration, and genuine official-token transactions
-do not exist yet. Circle's public faucet now lists Near Testnet and advertises 20 USDC per request,
-but no claim was made during this review. USDC availability, pause/blocklist policy, issuer risk,
-redemption, recipient registration, and the contract's separate NEAR gas/storage reserve remain
-external risks. A stable token reduces price volatility; it does not guarantee fulfillment,
-liquidity, redemption, or recovery.
+**Limitations:** These are low-value Testnet transactions. The fulfillment reference was explicitly
+simulated and no physical delivery is claimed. USDC availability, pause/blocklist policy, issuer
+risk, redemption, recipient registration, and the contract's separate NEAR gas/storage reserve
+remain external risks. A stable token reduces price volatility; it does not guarantee fulfillment,
+liquidity, redemption, recovery, or production security.
 
 ## G. Keeping blockchain complexity away from customers
 
@@ -317,7 +317,9 @@ flowchart LR
     D -->|cross-contract purchase read| P
     P -->|supplier agreement, commitments,<br/>refund and payment rules| N[NEAR Testnet state + receipts]
     D -->|funded-member snapshot,<br/>threshold and outcome| N
-    F -. planned, not connected .-> T[Separate future USDC contract<br/>NEP-141 + NEP-145]
+    F -->|isolated V5 configuration| T[V5 purchase + escrow<br/>Circle Testnet USDC]
+    W -->|signed V5 calls| T
+    K[Restricted finalization worker] -->|finalize_purchase only| T
 ```
 
 ### Authority boundaries
@@ -328,6 +330,8 @@ flowchart LR
 | NEAR wallet | Shows the signer and authorizes each change call | Change contract rules |
 | V4 purchase contract | Supplier agreement, exact commitments, funded membership, lifecycle, refunds, supplier payout | Verify real-world identity/delivery; stabilize NEAR's market price |
 | V3-for-V4 | Issues, voter snapshots, threshold outcomes, supplier consent for permitted decisions | Change V4 financial terms or move funds |
+| V5 purchase contract | Exact native-USDC commitments, callbacks, liabilities, refunds, and supplier payout | Prove delivery or make ambiguous transfers safe to retry |
+| Finalization worker | Advance expired V5 deals to contract-determined Funded/Failed state | Release payments, claim refunds, reconcile escrow, or override V5 rules |
 | Testnet RPC / Explorer | Public state and receipt evidence | Guarantee the customer has interpreted the agreement correctly |
 
 ### Actual NEAR stack
@@ -340,7 +344,7 @@ flowchart LR
   [the deployment record](v4-deployment.md).
 - Browser read-only JSON-RPC plus NEAR Wallet Selector 10.1.4 and the Meteor Wallet connector for
   user-signed Testnet calls.
-- NEP-141 and NEP-145 appear only in the future USDC design. They are not integrated into V4.
+- V5 uses NEP-141 and NEP-145 with Circle Testnet USDC; V4 remains unchanged and native-NEAR.
 
 ## Evolution in one view
 
@@ -349,7 +353,7 @@ flowchart LR
 | V2 purchase lifecycle | Fixed-community offer vote before funding; later exact native-NEAR commitments | Pre-funding voters were not necessarily the buyers at risk. |
 | V3 decision companion | Snapshot active funded members for bounded Yes/No or multiple-choice decisions | Financial isolation works, but callback rejection cleanup needs a new version. |
 | V4 purchase lifecycle | Supplier signature replaces the pre-contribution offer vote; funded members approve fulfillment | Supplier authorization and buyer eligibility solve different trust problems and should not be conflated. |
-| Future USDC version | Separate NEP-141 receiver/transfer architecture, preserving V4 | Escrow authorization does not solve native-asset price volatility. |
+| V5 USDC version | Separate deployed NEP-141 receiver/transfer architecture, preserving V4 | Stable-unit accounting reduces volatility but callbacks and issuer risk still require explicit handling. |
 
 HarvestPool's innovation is this progression: each trust problem is assigned to the smallest
 on-chain authority that can enforce it, while the customer-facing application remains a readable
