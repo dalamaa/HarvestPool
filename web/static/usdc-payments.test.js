@@ -2,6 +2,14 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const usdc = require("./usdc-payments.js");
 
+test("dollar display keeps cents familiar without hiding smaller nonzero USDC", () => {
+  assert.equal(usdc.formatDollars("1000000", 6), "$1.00");
+  assert.equal(usdc.formatDollars("800000", 6), "$0.80");
+  assert.equal(usdc.formatDollars("200000", 6), "$0.20");
+  assert.equal(usdc.formatDollars("250000000", 6), "$250.00");
+  assert.equal(usdc.formatDollars("1", 6), "$0.000001");
+});
+
 test("USDC base units are exact at six decimals", () => {
   assert.equal(usdc.parseUnits("50", 6), "50000000");
   assert.equal(usdc.parseUnits("0.000001", 6), "1");

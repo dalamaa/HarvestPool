@@ -1,6 +1,9 @@
+import base64
+import io
+import json
 import unittest
 import time
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from unittest.mock import patch
 
 from web import app as web_app
@@ -130,6 +133,32 @@ class CommunityFundActivityTests(unittest.TestCase):
             response = web_app.app.test_client().get("/api/community-fund/activity")
         self.assertEqual(response.status_code, 404)
         self.assertIn("not configured", response.get_json()["error"])
+
+    def test_nearblocks_rate_limit_retries_are_bounded(self):
+        rate_limit = HTTPError(
+            "https://api-testnet.nearblocks.io/example", 429, "rate limited",
+            {"Retry-After": "0"}, None,
+        )
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit):
+                return io.BytesIO(b'{"data": []}').read()
+
+        with (
+            patch.object(web_app, "urlopen", side_effect=[rate_limit, rate_limit, Response()]) as read,
+            patch.object(web_app.time, "sleep") as sleep,
+        ):
+            result = web_app._nearblocks_json("/example")
+
+        self.assertEqual(result, {"data": []})
+        self.assertEqual(read.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
 
     def test_activity_cache_reuses_fresh_data_and_preserves_last_confirmed_on_failure(self):
         payload = {"complete": True, "contributions": [], "verifiedAt": "2026-11-12T00:00:00+00:00", "stale": False}
@@ -307,6 +336,118 @@ class CommunityFundActivityTests(unittest.TestCase):
             "receiptId": "payment-receipt",
             "tokenId": token_id,
         }])
+
+    def test_known_usdc_evidence_uses_finalized_rpc_when_indexer_is_unavailable(self):
+        token_id = web_app.CANONICAL_USDC_TOKEN_ID
+        dao_id = "community.sputnikv2.testnet"
+        recipient = "recipient.testnet"
+        evidence = {
+            "contributionHash": "A" * 44,
+            "contributor": "alice.testnet",
+            "contributionAmount": "1000000",
+            "paymentHash": "B" * 44,
+            "paymentSigner": "bob.testnet",
+            "paymentProposalId": "2",
+            "paymentReceiptId": "C" * 44,
+            "paymentAmount": "800000",
+        }
+
+        def encoded(value):
+            return base64.b64encode(json.dumps(value).encode()).decode()
+
+        def transaction(tx_hash, signer, receiver, method, args, block_hash, transfer):
+            receipt_id, old_owner, new_owner, amount = transfer
+            return {
+                "final_execution_status": "FINAL",
+                "status": {"SuccessValue": ""},
+                "transaction": {
+                    "hash": tx_hash,
+                    "signer_id": signer,
+                    "receiver_id": receiver,
+                    "actions": [{"FunctionCall": {
+                        "method_name": method,
+                        "args": encoded(args),
+                        "deposit": "1" if method == "ft_transfer" else "0",
+                    }}],
+                },
+                "transaction_outcome": {"block_hash": block_hash},
+                "receipts_outcome": [{
+                    "id": receipt_id,
+                    "outcome": {
+                        "executor_id": token_id,
+                        "status": {"SuccessValue": ""},
+                        "logs": ["EVENT_JSON:" + json.dumps({
+                            "standard": "nep141",
+                            "event": "ft_transfer",
+                            "data": [{
+                                "old_owner_id": old_owner,
+                                "new_owner_id": new_owner,
+                                "amount": amount,
+                            }],
+                        })],
+                    },
+                }],
+            }
+
+        contribution = transaction(
+            evidence["contributionHash"], evidence["contributor"], token_id,
+            "ft_transfer", {"receiver_id": dao_id, "amount": "1000000"},
+            "contribution-block", ("D" * 44, evidence["contributor"], dao_id, "1000000"),
+        )
+        payment = transaction(
+            evidence["paymentHash"], evidence["paymentSigner"], dao_id,
+            "act_proposal", {"id": 2, "action": "VoteApprove"},
+            "payment-block", (evidence["paymentReceiptId"], dao_id, recipient, "800000"),
+        )
+
+        def fake_rpc(method, params):
+            if method == "tx":
+                return contribution if params["tx_hash"] == evidence["contributionHash"] else payment
+            if method == "block":
+                timestamp = "1794430000000000000" if params["block_id"] == "contribution-block" else "1794432000000000000"
+                return {"header": {"timestamp_nanosec": timestamp}}
+            raise AssertionError((method, params))
+
+        with patch.object(web_app, "_community_rpc", side_effect=fake_rpc):
+            result = web_app._known_community_activity(
+                dao_id, token_id, {"currency": "USDC", "recipient": recipient}, evidence
+            )
+
+        self.assertTrue(result["complete"])
+        self.assertTrue(result["boundedEvidence"])
+        self.assertEqual(result["contributions"][0]["amount"], "1000000")
+        transfer = result["proposalTransactions"]["2"][0]["transfers"][0]
+        self.assertEqual(transfer["receiptId"], evidence["paymentReceiptId"])
+        self.assertEqual(transfer["amount"], "800000")
+
+    def test_known_usdc_evidence_rejects_wrong_payment_receipt(self):
+        result = {
+            "receipts_outcome": [{
+                "id": "different-receipt",
+                "outcome": {
+                    "executor_id": web_app.CANONICAL_USDC_TOKEN_ID,
+                    "status": {"SuccessValue": ""},
+                    "logs": ["EVENT_JSON:" + json.dumps({
+                        "standard": "nep141",
+                        "event": "ft_transfer",
+                        "data": [{
+                            "old_owner_id": "community.sputnikv2.testnet",
+                            "new_owner_id": "recipient.testnet",
+                            "amount": "800000",
+                        }],
+                    })],
+                },
+            }],
+        }
+        with self.assertRaisesRegex(ValueError, "exact successful token transfer"):
+            web_app._successful_nep141_transfer(
+                result,
+                web_app.CANONICAL_USDC_TOKEN_ID,
+                "community.sputnikv2.testnet",
+                "recipient.testnet",
+                "800000",
+                "expected-receipt",
+            )
 
 
 if __name__ == "__main__":

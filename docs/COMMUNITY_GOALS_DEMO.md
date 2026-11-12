@@ -55,22 +55,26 @@ Finalized Testnet records:
 - Final DAO account balance: `6.05 NEAR`; final contract-reported available amount:
   `0.63632 NEAR`, verified at Testnet block `277330049` on 2026-11-12.
 
-## USDC follow-up — authorization pending
+## Completed USDC customer journey
 
-This is the next customer-facing journey. It has not occurred, so every transaction reference below
-is intentionally blank. Recheck balances, registrations, policy, and the token storage minimum at
-finality immediately before asking for authorization.
+The customer-facing journey was subsequently completed with the canonical Circle Testnet USDC
+contract. No part of the historical native-NEAR balance or transfer is included in these totals.
 
-- [ ] Member A registers `harvestpool-community.sputnikv2.testnet` with the canonical Circle Testnet
-  USDC contract using `storage_deposit`; transaction: **pending**
-- [ ] Member A contributes **1.00 USDC** with `ft_transfer` to the DAO; transaction: **pending**
-- [ ] Member A proposes **0.80 USDC** to `harvestpool-farmer-1.testnet` with the existing **0.1 NEAR**
-  proposal bond; proposal transaction and ID: **pending**
-- [ ] Member A casts the first approval and the UI confirms no outgoing USDC event; transaction:
-  **pending**
-- [ ] Member B casts the second approval; deciding-vote transaction: **pending**
-- [ ] Verify the successful exact-token transfer event/receipt, recipient balance change, approving
-  accounts, and final DAO USDC balance; payment receipt: **pending**
+- [x] Registered `harvestpool-community.sputnikv2.testnet` with the canonical token contract:
+  `Gc7gZ24Z5V6tCyosRyFrg1joximjt2n1WGGE1PbSPctX`.
+- [x] Member A contributed exactly **1.00 Testnet USDC**:
+  `JD8WYyoGFAxxNdApXDNrRfKpia59RAN41SWGDwZSGbE6`.
+- [x] Member A proposed exactly **0.80 Testnet USDC** to
+  `harvestpool-farmer-1.testnet`; proposal transaction
+  `UuxG3XFUra2CDM1wKaT28UGmRGsZMbScVfezRrBEoiX`, proposal `#2`.
+- [x] Member A cast the first approval. The proposal remained open and no USDC moved:
+  `pyRs5SKSNPW4A33E9nxsxMjv9YNB6vWMZFeS8oEGr7Y`.
+- [x] Member B cast the deciding approval:
+  `DNBNDTgi6bEHsjnWX92WaS9v8U1nyhYiqxfKYKsnfA2p`.
+- [x] Finalized NEAR RPC confirmed receipt
+  `FwHKdUzhMXmfH1Ha6HHRTPBrid2MFVVS92JtCjKGrbHf`: the canonical token contract transferred exactly
+  **0.80 Testnet USDC** from the DAO to the configured recipient. The DAO retained exactly
+  **0.20 Testnet USDC**.
 
 The completed native-NEAR evidence above remains historical and is never added to USDC progress or
 balances.

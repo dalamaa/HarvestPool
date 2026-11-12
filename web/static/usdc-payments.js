@@ -22,6 +22,15 @@
     } catch (_error) { return "—"; }
   }
 
+  function formatDollars(value, decimals = 6) {
+    const formatted = formatUnits(value, decimals);
+    if (formatted === "—") return "$—";
+    const [whole, fraction = ""] = formatted.split(".");
+    const groupedWhole = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+    const visibleFraction = fraction.length > 2 ? fraction : fraction.padEnd(2, "0");
+    return `$${groupedWhole}.${visibleFraction}`;
+  }
+
   function paymentAsset(version, tokenDecimals = 6) {
     const isUsdc = String(version || "").toUpperCase() === "V5";
     return isUsdc
@@ -78,5 +87,5 @@
     return { matches, fresh, ready: matches && fresh, reconciledAtMs, ageMs };
   }
 
-  return { contributionMessage, formatPayment, formatUnits, parseUnits, paymentAsset, reconciliationSnapshot, transferCall, usdPrice };
+  return { contributionMessage, formatDollars, formatPayment, formatUnits, parseUnits, paymentAsset, reconciliationSnapshot, transferCall, usdPrice };
 }));

@@ -1,9 +1,8 @@
 # Community Goals on SputnikDAO
 
-Status: the native-NEAR workflow is preserved as finalized Testnet evidence. The next customer-facing
-goal uses canonical Testnet USDC and is implemented and locally tested, but its registration,
-contribution, proposal, and payment transactions have not been submitted. Nothing is deployed on
-the public site.
+Status: the native-NEAR workflow is preserved as finalized historical evidence. The customer-facing
+goal now uses canonical Circle Testnet USDC, and its registration, contribution, two-member approval,
+payment receipt, and retained balance have been verified on NEAR Testnet.
 
 ## Integration boundary
 
@@ -34,12 +33,15 @@ minimum. Contributions call `ft_transfer` directly from the donor to the DAO wit
 SputnikDAO's threshold-crossing vote calls `ft_transfer` from the DAO to the proposal recipient.
 USDC amounts use six-decimal integer units. Proposal bonds and transaction gas remain native NEAR.
 
-Native-transfer or canonical-token history, proposal transaction references, and receipt trees are read from the
-NearBlocks Testnet indexer. A payment is counted only when its proposal action has a matching,
-successful transfer receipt/event for its exact token, recipient, and amount. That receipt remains
-authoritative even if a later status callback fails. Contract balance,
-policy, proposal contents, votes, and status are read at finality directly from NEAR RPC. If indexed
-history is incomplete or unavailable, totals derived from history are hidden rather than guessed.
+Contract balance, policy, proposal contents, votes, and status are read at finality directly from
+NEAR RPC. General history discovery uses the NearBlocks Testnet indexer with bounded pagination,
+retry/backoff, and a short cache. For the completed fixed goal, a public evidence manifest instead
+verifies the exact known contribution and deciding-approval hashes through finalized NEAR RPC. It
+checks the token contract, signer, DAO, proposal ID, action, recipient, exact amount, successful
+execution, NEP-141 event, and payment receipt. The browser also reconciles the verified contribution
+minus verified payment with the DAO's authoritative token balance before treating the manifest as
+complete. If neither fresh nor last-confirmed evidence is available, history-derived totals are
+hidden rather than guessed.
 
 ## One-goal accounting boundary
 
@@ -87,6 +89,16 @@ The authorized demonstration subsequently created and hardened
   `harvestpool-farmer-1.testnet`;
 - a successful matching payment receipt and a final contract-reported available amount of
   `0.63632 NEAR`.
+
+The subsequent canonical-USDC journey verified:
+
+- exact **1.00 USDC** contribution transaction
+  `JD8WYyoGFAxxNdApXDNrRfKpia59RAN41SWGDwZSGbE6`;
+- proposal `#2` for exactly **0.80 USDC** to `harvestpool-farmer-1.testnet`;
+- first approval `pyRs5SKSNPW4A33E9nxsxMjv9YNB6vWMZFeS8oEGr7Y`, which transferred nothing;
+- deciding approval `DNBNDTgi6bEHsjnWX92WaS9v8U1nyhYiqxfKYKsnfA2p`;
+- successful canonical-token receipt `FwHKdUzhMXmfH1Ha6HHRTPBrid2MFVVS92JtCjKGrbHf`
+  for exactly **0.80 USDC**, leaving exactly **0.20 USDC** in the DAO.
 
 The complete transaction references and retained browser evidence are in
 `docs/COMMUNITY_GOALS_DEMO.md`.
@@ -254,10 +266,11 @@ described as private or anonymous.
 - SputnikDAO has no durable “approved and waiting for an organizer to execute” phase. The threshold-
   crossing approval normally executes the transfer. The UI separately labels an approved proposal
   whose exact payment receipt has not yet been verified and never counts it as spent.
-- The history adapter indexes up to 500 account transactions. If that bound or the NearBlocks
+- General history discovery indexes up to 500 account transactions. If that bound or the NearBlocks
   pagination guarantee is exceeded, or more than 40 proposal-action transactions require receipt
-  expansion, history-derived totals are hidden until the adapter is extended; no partial total is
-  labeled as complete.
+  expansion, history-derived totals are hidden until the adapter is extended. The completed fixed
+  goal uses its exact finalized-RPC evidence manifest and balance reconciliation instead; no partial
+  total is labeled as complete.
 - The first minimal policy intentionally cannot change members or upgrade code. A later governance
   expansion requires a separate security review and must not be smuggled into this demonstration.
 

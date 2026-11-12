@@ -5,6 +5,7 @@ that can withdraw, redirect, approve, or mutate contract funds. Wallet transacti
 prepared in the browser and signed by the user's NEAR-compatible wallet.
 """
 
+import base64
 import os
 import re
 import sqlite3
@@ -49,6 +50,9 @@ COMMUNITY_DAO_FACTORY_ID = CANONICAL_SPUTNIK_DAO_FACTORY_ID
 COMMUNITY_DAO_CODE_HASH = CANONICAL_SPUTNIK_DAO_CODE_HASH
 NEARBLOCKS_TESTNET_API = "https://api-testnet.nearblocks.io"
 NEARBLOCKS_API_KEY = os.environ.get("HARVESTPOOL_NEARBLOCKS_API_KEY", "").strip()
+COMMUNITY_RPC_URL = os.environ.get(
+    "HARVESTPOOL_COMMUNITY_RPC_URL", "https://rpc.testnet.fastnear.com"
+).strip()
 COMMUNITY_ACTIVITY_CACHE_SECONDS = max(
     15, int(os.environ.get("HARVESTPOOL_COMMUNITY_ACTIVITY_CACHE_SECONDS", "30"))
 )
@@ -59,6 +63,43 @@ COMMUNITY_ACTIVITY_STALE_SECONDS = max(
 
 _community_activity_cache = {}
 _community_activity_cache_lock = threading.Lock()
+
+
+def _community_evidence_config():
+    """Return an all-or-nothing manifest for a previously verified public journey."""
+    names = {
+        "contributionHash": "HARVESTPOOL_COMMUNITY_EVIDENCE_CONTRIBUTION_TX",
+        "contributor": "HARVESTPOOL_COMMUNITY_EVIDENCE_CONTRIBUTOR",
+        "contributionAmount": "HARVESTPOOL_COMMUNITY_EVIDENCE_CONTRIBUTION_UNITS",
+        "paymentHash": "HARVESTPOOL_COMMUNITY_EVIDENCE_PAYMENT_TX",
+        "paymentSigner": "HARVESTPOOL_COMMUNITY_EVIDENCE_PAYMENT_SIGNER",
+        "paymentProposalId": "HARVESTPOOL_COMMUNITY_EVIDENCE_PAYMENT_PROPOSAL_ID",
+        "paymentReceiptId": "HARVESTPOOL_COMMUNITY_EVIDENCE_PAYMENT_RECEIPT",
+        "paymentAmount": "HARVESTPOOL_COMMUNITY_EVIDENCE_PAYMENT_UNITS",
+    }
+    values = {key: os.environ.get(name, "").strip() for key, name in names.items()}
+    if not any(values.values()):
+        return {}
+    if not all(values.values()):
+        return {"error": "Community Goal evidence configuration must be complete."}
+    hash_pattern = r"[1-9A-HJ-NP-Za-km-z]{40,64}"
+    account_pattern = r"[a-z0-9]+(?:[._-][a-z0-9]+)*"
+    if not all(
+        re.fullmatch(hash_pattern, values[key])
+        for key in ("contributionHash", "paymentHash", "paymentReceiptId")
+    ):
+        return {"error": "Community Goal evidence contains an invalid transaction or receipt hash."}
+    if not all(
+        re.fullmatch(account_pattern, values[key])
+        for key in ("contributor", "paymentSigner")
+    ):
+        return {"error": "Community Goal evidence contains an invalid signer account."}
+    if not all(
+        values[key].isdigit() and int(values[key]) > 0
+        for key in ("contributionAmount", "paymentAmount")
+    ) or not values["paymentProposalId"].isdigit():
+        return {"error": "Community Goal evidence amounts and proposal ID must be exact integers."}
+    return values
 
 
 def _community_goal_config():
@@ -113,6 +154,7 @@ def _community_goal_config():
 
 
 COMMUNITY_GOAL = _community_goal_config()
+COMMUNITY_EVIDENCE = _community_evidence_config()
 NEAR_PRICE_URL = os.environ.get(
     "HARVESTPOOL_NEAR_PRICE_URL",
     "https://api.coingecko.com/api/v3/simple/price?ids=near&vs_currencies=usd&include_last_updated_at=true",
@@ -224,6 +266,213 @@ def _nearblocks_json(path, params=None):
                 delay = 0.5 * (attempt + 1)
             time.sleep(delay)
     raise RuntimeError("NearBlocks retry limit reached")
+
+
+def _community_rpc(method, params):
+    """Make a bounded read-only call to finalized NEAR Testnet state."""
+    request = Request(
+        COMMUNITY_RPC_URL,
+        data=json.dumps(
+            {"jsonrpc": "2.0", "id": "harvestpool-community", "method": method, "params": params}
+        ).encode("utf-8"),
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": "HarvestPool/1.0",
+        },
+    )
+    for attempt in range(3):
+        try:
+            with urlopen(request, timeout=8) as response:
+                body = response.read(2_000_001)
+                if len(body) > 2_000_000:
+                    raise ValueError("NEAR RPC response exceeded the 2 MB safety limit")
+                payload = json.loads(body.decode("utf-8"))
+            if payload.get("error"):
+                raise ValueError("NEAR RPC rejected the evidence lookup")
+            if "result" not in payload:
+                raise ValueError("NEAR RPC returned no result")
+            return payload["result"]
+        except HTTPError as error:
+            if error.code != 429 or attempt == 2:
+                raise
+            retry_after = error.headers.get("Retry-After", "")
+            try:
+                delay = min(2.0, max(0.25, float(retry_after)))
+            except (TypeError, ValueError):
+                delay = 0.5 * (attempt + 1)
+            time.sleep(delay)
+    raise RuntimeError("NEAR RPC retry limit reached")
+
+
+def _successful_execution(result):
+    return result.get("final_execution_status") == "FINAL" and isinstance(
+        result.get("status"), dict
+    ) and any(key.startswith("Success") for key in result["status"])
+
+
+def _function_call(transaction, method_name):
+    actions = transaction.get("actions") or []
+    if len(actions) != 1 or not isinstance(actions[0], dict):
+        raise ValueError("Evidence transaction must contain one reviewed action")
+    call = actions[0].get("FunctionCall")
+    if not isinstance(call, dict) or call.get("method_name") != method_name:
+        raise ValueError("Evidence transaction method does not match")
+    try:
+        args = json.loads(base64.b64decode(call.get("args") or "", validate=True).decode("utf-8"))
+    except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("Evidence transaction arguments are invalid") from error
+    if not isinstance(args, dict):
+        raise ValueError("Evidence transaction arguments are invalid")
+    return call, args
+
+
+def _successful_nep141_transfer(result, token_id, old_owner, new_owner, amount, receipt_id=None):
+    matches = []
+    for receipt in result.get("receipts_outcome") or []:
+        outcome = receipt.get("outcome") or {}
+        status = outcome.get("status") or {}
+        if outcome.get("executor_id") != token_id or not any(
+            key.startswith("Success") for key in status
+        ):
+            continue
+        if receipt_id and receipt.get("id") != receipt_id:
+            continue
+        for log in outcome.get("logs") or []:
+            if not isinstance(log, str) or not log.startswith("EVENT_JSON:"):
+                continue
+            try:
+                event = json.loads(log.removeprefix("EVENT_JSON:"))
+            except json.JSONDecodeError:
+                continue
+            if event.get("standard") != "nep141" or event.get("event") != "ft_transfer":
+                continue
+            for transfer in event.get("data") or []:
+                if (
+                    isinstance(transfer, dict)
+                    and transfer.get("old_owner_id") == old_owner
+                    and transfer.get("new_owner_id") == new_owner
+                    and str(transfer.get("amount") or "") == amount
+                ):
+                    matches.append(receipt.get("id"))
+    if len(matches) != 1:
+        raise ValueError("Evidence did not contain one exact successful token transfer")
+    return matches[0]
+
+
+def _transaction_timestamp(result):
+    block_hash = str(result.get("transaction_outcome", {}).get("block_hash") or "")
+    if not block_hash:
+        raise ValueError("Evidence transaction has no finalized block")
+    block = _community_rpc("block", {"block_id": block_hash})
+    timestamp = str(block.get("header", {}).get("timestamp_nanosec") or "")
+    if not timestamp.isdigit() or int(timestamp) <= 0:
+        raise ValueError("Evidence block has no valid timestamp")
+    return timestamp
+
+
+def _known_community_activity(dao_id, token_id, goal, evidence):
+    """Verify configured public hashes against finalized RPC without trusting an indexer list."""
+    if not evidence or evidence.get("error"):
+        raise ValueError(evidence.get("error") if evidence else "No known evidence is configured")
+    if not token_id or goal.get("currency") != "USDC":
+        raise ValueError("Known Community Goal evidence requires the configured USDC token")
+
+    contribution = _community_rpc(
+        "tx",
+        {
+            "tx_hash": evidence["contributionHash"],
+            "sender_account_id": evidence["contributor"],
+            "wait_until": "FINAL",
+        },
+    )
+    if not _successful_execution(contribution):
+        raise ValueError("Configured contribution transaction did not finalize successfully")
+    contribution_tx = contribution.get("transaction") or {}
+    contribution_call, contribution_args = _function_call(contribution_tx, "ft_transfer")
+    if (
+        contribution_tx.get("hash") != evidence["contributionHash"]
+        or contribution_tx.get("signer_id") != evidence["contributor"]
+        or contribution_tx.get("receiver_id") != token_id
+        or str(contribution_call.get("deposit") or "") != "1"
+        or contribution_args.get("receiver_id") != dao_id
+        or str(contribution_args.get("amount") or "") != evidence["contributionAmount"]
+    ):
+        raise ValueError("Configured contribution transaction does not match this goal")
+    contribution_receipt = _successful_nep141_transfer(
+        contribution,
+        token_id,
+        evidence["contributor"],
+        dao_id,
+        evidence["contributionAmount"],
+    )
+
+    payment = _community_rpc(
+        "tx",
+        {
+            "tx_hash": evidence["paymentHash"],
+            "sender_account_id": evidence["paymentSigner"],
+            "wait_until": "FINAL",
+        },
+    )
+    if not _successful_execution(payment):
+        raise ValueError("Configured payment transaction did not finalize successfully")
+    payment_tx = payment.get("transaction") or {}
+    _payment_call, payment_args = _function_call(payment_tx, "act_proposal")
+    if (
+        payment_tx.get("hash") != evidence["paymentHash"]
+        or payment_tx.get("signer_id") != evidence["paymentSigner"]
+        or payment_tx.get("receiver_id") != dao_id
+        or str(payment_args.get("id")) != evidence["paymentProposalId"]
+        or payment_args.get("action") != "VoteApprove"
+    ):
+        raise ValueError("Configured payment transaction does not match this DAO proposal")
+    payment_receipt = _successful_nep141_transfer(
+        payment,
+        token_id,
+        dao_id,
+        goal.get("recipient"),
+        evidence["paymentAmount"],
+        evidence["paymentReceiptId"],
+    )
+
+    return {
+        "complete": True,
+        "boundedEvidence": True,
+        "contributions": [
+            {
+                "amount": evidence["contributionAmount"],
+                "contributor": evidence["contributor"],
+                "timestamp": _transaction_timestamp(contribution),
+                "transactionHash": evidence["contributionHash"],
+                "receiptId": contribution_receipt,
+                "tokenId": token_id,
+            }
+        ],
+        "proposalTransactions": {
+            evidence["paymentProposalId"]: [
+                {
+                    "action": "VoteApprove",
+                    "signer": evidence["paymentSigner"],
+                    "timestamp": _transaction_timestamp(payment),
+                    "transactionHash": evidence["paymentHash"],
+                    "transfers": [
+                        {
+                            "amount": evidence["paymentAmount"],
+                            "receiver": goal.get("recipient"),
+                            "receiptId": payment_receipt,
+                            "tokenId": token_id,
+                        }
+                    ],
+                }
+            ]
+        },
+        "source": "Finalized NEAR Testnet RPC evidence",
+        "sourceUrl": f"https://testnet.nearblocks.io/address/{dao_id}",
+        "tokenId": token_id,
+        "verifiedAt": datetime.now(timezone.utc).isoformat(),
+        "stale": False,
+    }
 
 
 def _nearblocks_account_pages(dao_id, suffix):
@@ -441,7 +690,11 @@ def _cached_community_activity(dao_id, token_id="", *, force=False):
         if cached and not force and now - cached["cached_at"] < COMMUNITY_ACTIVITY_CACHE_SECONDS:
             return dict(cached["payload"])
     try:
-        payload = _community_activity(dao_id, token_id)
+        payload = (
+            _known_community_activity(dao_id, token_id, COMMUNITY_GOAL, COMMUNITY_EVIDENCE)
+            if COMMUNITY_EVIDENCE
+            else _community_activity(dao_id, token_id)
+        )
     except (OSError, URLError, RuntimeError, ValueError, TypeError, json.JSONDecodeError):
         with _community_activity_cache_lock:
             cached = _community_activity_cache.get(cache_key)
@@ -499,6 +752,11 @@ def close_db(_error):
 @app.get("/")
 def index():
     return render_page("home")
+
+
+@app.get("/favicon.ico")
+def favicon():
+    return "", 204
 
 
 @app.get("/purchases")
