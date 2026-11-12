@@ -6,6 +6,7 @@ prepared in the browser and signed by the user's NEAR-compatible wallet.
 """
 
 import base64
+import hashlib
 import os
 import re
 import sqlite3
@@ -15,7 +16,7 @@ import time
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlparse
 from urllib.request import Request, urlopen
 from pathlib import Path
 
@@ -166,7 +167,7 @@ _near_price_cache = None
 _near_price_cache_lock = threading.Lock()
 
 
-def render_page(page, *, purchase_id=None, share_mode=False):
+def render_page(page, *, purchase_id=None, share_mode=False, fund_slug=None):
     """Render a client-driven page without moving contract authority into Flask."""
     return render_template(
         "index.html",
@@ -182,6 +183,7 @@ def render_page(page, *, purchase_id=None, share_mode=False):
         community_dao_factory_id=COMMUNITY_DAO_FACTORY_ID,
         community_dao_code_hash=COMMUNITY_DAO_CODE_HASH,
         community_goal=COMMUNITY_GOAL,
+        fund_slug=fund_slug,
     )
 
 
@@ -739,7 +741,167 @@ def get_db():
     if "db" not in g:
         g.db = sqlite3.connect(DATABASE)
         g.db.row_factory = sqlite3.Row
+        g.db.execute("PRAGMA foreign_keys = ON")
+        _ensure_community_fund_schema(g.db)
     return g.db
+
+
+COMMUNITY_FUND_CATEGORIES = {
+    "Community equipment",
+    "Food access",
+    "Education",
+    "Emergency support",
+    "Neighborhood improvement",
+    "Other",
+}
+def _ensure_community_fund_schema(db):
+    """Create additive local metadata tables; this never changes on-chain state."""
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS community_fund_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            slug TEXT NOT NULL UNIQUE,
+            title TEXT NOT NULL,
+            category TEXT NOT NULL,
+            city TEXT NOT NULL,
+            state TEXT NOT NULL,
+            description TEXT NOT NULL,
+            intended_purpose TEXT NOT NULL,
+            cover_image_url TEXT NOT NULL DEFAULT '',
+            organizer_name TEXT NOT NULL,
+            contact_email TEXT NOT NULL,
+            organizer_role TEXT NOT NULL,
+            contact_method TEXT NOT NULL DEFAULT '',
+            share_contact INTEGER NOT NULL DEFAULT 0 CHECK (share_contact IN (0, 1)),
+            target_cents INTEGER NOT NULL CHECK (target_cents > 0),
+            budget TEXT NOT NULL,
+            contribution_deadline TEXT NOT NULL,
+            completion_date TEXT NOT NULL,
+            beneficiary TEXT NOT NULL,
+            reached_terms TEXT NOT NULL,
+            not_reached_terms TEXT NOT NULL,
+            payment_requesters TEXT NOT NULL,
+            payment_approvers TEXT NOT NULL,
+            payment_refund_rules TEXT NOT NULL,
+            unused_money_terms TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'Awaiting Fund Setup',
+            owner_token_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS community_fund_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fund_id INTEGER NOT NULL REFERENCES community_fund_requests(id) ON DELETE CASCADE,
+            event_type TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS community_fund_events_fund_id
+            ON community_fund_events(fund_id, id);
+        """
+    )
+    db.commit()
+
+
+def _owner_token_hash(value):
+    return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()
+
+
+def _clean_text(payload, name, *, minimum=1, maximum=2000, errors):
+    value = str(payload.get(name, "")).strip()
+    if len(value) < minimum:
+        errors[name] = "This field is required."
+    elif len(value) > maximum:
+        errors[name] = f"Use {maximum} characters or fewer."
+    return value
+
+
+def _fund_slug(db, title):
+    base = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:60] or "community-fund"
+    slug = base
+    counter = 2
+    while db.execute("SELECT 1 FROM community_fund_requests WHERE slug = ?", (slug,)).fetchone():
+        slug = f"{base}-{counter}"
+        counter += 1
+    return slug
+
+
+def _validate_community_fund(payload):
+    errors = {}
+    fields = {
+        "title": _clean_text(payload, "title", maximum=120, errors=errors),
+        "category": _clean_text(payload, "category", maximum=80, errors=errors),
+        "city": _clean_text(payload, "city", maximum=80, errors=errors),
+        "state": _clean_text(payload, "state", maximum=2, errors=errors).upper(),
+        "description": _clean_text(payload, "description", minimum=40, maximum=3000, errors=errors),
+        "intended_purpose": _clean_text(payload, "intended_purpose", minimum=20, maximum=1000, errors=errors),
+        "organizer_name": _clean_text(payload, "organizer_name", maximum=120, errors=errors),
+        "contact_email": _clean_text(payload, "contact_email", maximum=254, errors=errors),
+        "organizer_role": _clean_text(payload, "organizer_role", maximum=160, errors=errors),
+        "budget": _clean_text(payload, "budget", minimum=20, maximum=3000, errors=errors),
+        "contribution_deadline": _clean_text(payload, "contribution_deadline", maximum=10, errors=errors),
+        "completion_date": _clean_text(payload, "completion_date", maximum=10, errors=errors),
+        "beneficiary": _clean_text(payload, "beneficiary", maximum=200, errors=errors),
+        "reached_terms": _clean_text(payload, "reached_terms", minimum=20, maximum=1500, errors=errors),
+        "not_reached_terms": _clean_text(payload, "not_reached_terms", minimum=20, maximum=1500, errors=errors),
+        "payment_requesters": _clean_text(payload, "payment_requesters", minimum=10, maximum=500, errors=errors),
+        "payment_approvers": _clean_text(payload, "payment_approvers", minimum=10, maximum=500, errors=errors),
+        "payment_refund_rules": _clean_text(payload, "payment_refund_rules", minimum=20, maximum=1500, errors=errors),
+        "unused_money_terms": _clean_text(payload, "unused_money_terms", minimum=20, maximum=1500, errors=errors),
+    }
+    fields["cover_image_url"] = str(payload.get("cover_image_url", "")).strip()[:1000]
+    fields["contact_method"] = str(payload.get("contact_method", "")).strip()[:300]
+    fields["share_contact"] = payload.get("share_contact") is True
+    if fields["category"] not in COMMUNITY_FUND_CATEGORIES:
+        errors["category"] = "Choose a listed category."
+    if not re.fullmatch(r"[A-Z]{2}", fields["state"]):
+        errors["state"] = "Enter a two-letter US state code."
+    if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", fields["contact_email"]):
+        errors["contact_email"] = "Enter a valid email address."
+    if fields["cover_image_url"]:
+        parsed = urlparse(fields["cover_image_url"])
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            errors["cover_image_url"] = "Enter a complete http:// or https:// image URL."
+    try:
+        amount = Decimal(str(payload.get("target_amount", "")))
+        cents = amount * 100
+        if amount < Decimal("1") or amount > Decimal("1000000") or cents != cents.to_integral_value():
+            raise InvalidOperation
+        fields["target_cents"] = int(cents)
+    except (InvalidOperation, ValueError, TypeError):
+        errors["target_amount"] = "Enter an amount from $1.00 to $1,000,000.00 with at most two decimals."
+    today = datetime.now(timezone.utc).date()
+    parsed_dates = {}
+    for name in ("contribution_deadline", "completion_date"):
+        try:
+            parsed_dates[name] = datetime.strptime(fields[name], "%Y-%m-%d").date()
+        except ValueError:
+            errors[name] = "Enter a valid date."
+    if parsed_dates.get("contribution_deadline") and parsed_dates["contribution_deadline"] < today:
+        errors["contribution_deadline"] = "The contribution deadline cannot be in the past."
+    if parsed_dates.get("completion_date") and parsed_dates.get("contribution_deadline") and parsed_dates["completion_date"] < parsed_dates["contribution_deadline"]:
+        errors["completion_date"] = "The completion date must be on or after the contribution deadline."
+    if payload.get("terms_acknowledged") is not True:
+        errors["terms_acknowledged"] = "Confirm that these are proposed terms and contributions stay disabled until setup."
+    token = str(payload.get("owner_token", "")).strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{20,128}", token):
+        errors["owner_token"] = "This browser could not create a secure organizer reference. Refresh and try again."
+    fields["owner_token_hash"] = _owner_token_hash(token)
+    return fields, errors
+
+
+def _public_fund(row, *, owner_token="", include_private=False):
+    item = dict(row)
+    item["targetAmount"] = f"{Decimal(item.pop('target_cents')) / Decimal(100):.2f}"
+    item["location"] = f"{item['city']}, {item['state']}"
+    item["isMine"] = bool(owner_token and item.pop("owner_token_hash") == _owner_token_hash(owner_token))
+    item.pop("owner_token_hash", None)
+    item["shareContact"] = bool(item.pop("share_contact"))
+    if not include_private:
+        item.pop("contact_email", None)
+        if not item["shareContact"]:
+            item.pop("contact_method", None)
+    return item
 
 
 @app.teardown_appcontext
@@ -747,6 +909,158 @@ def close_db(_error):
     db = g.pop("db", None)
     if db is not None:
         db.close()
+
+
+def _verified_fund_directory_item():
+    """Return the configured one-goal treasury as a directory item without inventing metadata."""
+    if not COMMUNITY_DAO_ID or not COMMUNITY_GOAL.get("configured"):
+        return None
+    contributed = None
+    contributor_count = None
+    has_payment = False
+    try:
+        activity = _cached_community_activity(
+            COMMUNITY_DAO_ID, COMMUNITY_GOAL.get("tokenId", "")
+        )
+        if activity.get("complete"):
+            contributions = activity.get("contributions", [])
+            contributed = sum(int(item.get("amount", "0")) for item in contributions)
+            contributor_count = len({
+                item.get("contributor") or item.get("account")
+                for item in contributions
+                if item.get("contributor") or item.get("account")
+            })
+            has_payment = bool(activity.get("proposalTransactions"))
+    except (OSError, URLError, RuntimeError, ValueError, TypeError, json.JSONDecodeError):
+        pass
+    target = int(COMMUNITY_GOAL.get("targetUnits") or COMMUNITY_GOAL.get("targetYocto") or "0")
+    if contributed is None:
+        status = "In Progress"
+    elif has_payment:
+        status = "In Progress"
+    elif contributed >= target:
+        status = "Fully Funded"
+    else:
+        status = "Open for Contributions"
+    decimals = int(COMMUNITY_GOAL.get("decimals", 6))
+    amount = None if contributed is None else f"{Decimal(contributed) / (Decimal(10) ** decimals):.2f}"
+    target_amount = f"{Decimal(target) / (Decimal(10) ** decimals):.2f}"
+    return {
+        "slug": "shared-community-equipment",
+        "title": COMMUNITY_GOAL["title"],
+        "category": "Community equipment",
+        "location": "Online · NEAR Testnet",
+        "description": COMMUNITY_GOAL["purpose"],
+        "status": status,
+        "targetAmount": target_amount,
+        "raisedAmount": amount,
+        "contributorsCount": contributor_count,
+        "contribution_deadline": "No deadline configured",
+        "isVerifiedFund": True,
+        "isMine": False,
+        "detailUrl": "/community-funds/shared-community-equipment",
+    }
+
+
+@app.get("/api/community-funds")
+def list_community_funds():
+    owner_token = request.headers.get("X-HarvestPool-Owner-Token", "")
+    rows = get_db().execute(
+        "SELECT * FROM community_fund_requests ORDER BY created_at DESC, id DESC"
+    ).fetchall()
+    items = []
+    verified = _verified_fund_directory_item()
+    if verified:
+        items.append(verified)
+    for row in rows:
+        item = _public_fund(row, owner_token=owner_token)
+        item.update(
+            {
+                "raisedAmount": "0.00",
+                "contributorsCount": 0,
+                "isVerifiedFund": False,
+                "detailUrl": f"/community-funds/{quote(item['slug'])}",
+            }
+        )
+        items.append(item)
+    return jsonify({"funds": items})
+
+
+@app.post("/api/community-funds")
+def create_community_fund_request():
+    if request.content_length is not None and request.content_length > 64 * 1024:
+        return jsonify({"error": "The fund request is too large."}), 413
+    if not request.is_json:
+        return jsonify({"error": "Send the fund request as JSON."}), 415
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "The fund request is not valid JSON."}), 400
+    fields, errors = _validate_community_fund(payload)
+    if errors:
+        return jsonify({"error": "Review the highlighted fields.", "fields": errors}), 400
+    db = get_db()
+    now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    slug = _fund_slug(db, fields["title"])
+    columns = [
+        "slug", "title", "category", "city", "state", "description", "intended_purpose",
+        "cover_image_url", "organizer_name", "contact_email", "organizer_role", "contact_method",
+        "share_contact", "target_cents", "budget", "contribution_deadline", "completion_date",
+        "beneficiary", "reached_terms", "not_reached_terms", "payment_requesters",
+        "payment_approvers", "payment_refund_rules", "unused_money_terms", "status",
+        "owner_token_hash", "created_at", "updated_at",
+    ]
+    values = {
+        **fields,
+        "slug": slug,
+        "status": "Awaiting Fund Setup",
+        "created_at": now,
+        "updated_at": now,
+    }
+    placeholders = ", ".join("?" for _ in columns)
+    cursor = db.execute(
+        f"INSERT INTO community_fund_requests ({', '.join(columns)}) VALUES ({placeholders})",
+        [values[name] for name in columns],
+    )
+    db.execute(
+        "INSERT INTO community_fund_events (fund_id, event_type, summary, created_at) VALUES (?, ?, ?, ?)",
+        (cursor.lastrowid, "Fund request submitted", "Submitted for treasury and payment-rule review.", now),
+    )
+    db.commit()
+    return jsonify(
+        {
+            "status": "Awaiting Fund Setup",
+            "slug": slug,
+            "url": f"/community-funds/{quote(slug)}",
+            "message": "Fund request saved. Contributions remain disabled until an isolated treasury and reviewed payment rules are configured.",
+        }
+    ), 201
+
+
+@app.get("/api/community-funds/<slug>")
+def community_fund_request_detail(slug):
+    owner_token = request.headers.get("X-HarvestPool-Owner-Token", "")
+    row = get_db().execute(
+        "SELECT * FROM community_fund_requests WHERE slug = ?", (slug,)
+    ).fetchone()
+    if row is None:
+        return jsonify({"error": "Community fund not found."}), 404
+    is_owner = bool(owner_token and row["owner_token_hash"] == _owner_token_hash(owner_token))
+    item = _public_fund(row, owner_token=owner_token, include_private=is_owner)
+    events = [dict(event) for event in get_db().execute(
+        "SELECT event_type, summary, created_at FROM community_fund_events WHERE fund_id = ? ORDER BY id DESC",
+        (row["id"],),
+    ).fetchall()]
+    item.update(
+        {
+            "raisedAmount": "0.00",
+            "contributorsCount": 0,
+            "events": events,
+            "contributions": [],
+            "paymentRequests": [],
+            "votes": [],
+        }
+    )
+    return jsonify({"fund": item})
 
 
 @app.get("/")
@@ -809,9 +1123,27 @@ def decisions():
 
 
 @app.get("/community-goals")
-@app.get("/community-fund")
+@app.get("/community-funds")
 def community_fund():
-    return render_page("community_fund")
+    return render_page("community_directory")
+
+
+@app.get("/community-funds/start")
+def start_community_fund():
+    return render_page("community_create")
+
+
+@app.get("/community-funds/shared-community-equipment")
+@app.get("/community-fund")
+def verified_community_fund():
+    return render_page("community_fund", fund_slug="shared-community-equipment")
+
+
+@app.get("/community-funds/<slug>")
+def requested_community_fund(slug):
+    if get_db().execute("SELECT 1 FROM community_fund_requests WHERE slug = ?", (slug,)).fetchone() is None:
+        return render_page("community_not_found", fund_slug=slug), 404
+    return render_page("community_request", fund_slug=slug)
 
 
 @app.get("/guide")

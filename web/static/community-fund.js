@@ -259,14 +259,14 @@
     const progressBasisPoints = Number((contributed * 10_000n) / target > 10_000n
       ? 10_000n
       : (contributed * 10_000n) / target);
-    let status = contributed >= target ? "Target reached · proposal needed" : "Raising funds";
+    let status = contributed >= target ? "Fully Funded" : "Open for Contributions";
     if (goalAllocations.some((allocation) => allocation.status === "InProgress" && !verifiedPayment(allocation, activity))) {
-      status = "Member vote in progress";
+      status = "In Progress";
     }
     if (goalAllocations.some((allocation) => allocation.status === "Approved" && !verifiedPayment(allocation, activity))) {
-      status = "Approved · payment verification pending";
+      status = "In Progress";
     }
-    if (payments.length) status = "Approved payment recorded";
+    if (payments.length) status = "In Progress";
     return {
       contributed: contributed.toString(),
       target: target.toString(),

@@ -206,12 +206,12 @@ class CommunityFundActivityTests(unittest.TestCase):
             patch.object(web_app, "COMMUNITY_DAO_ID", "community.sputnikv2.testnet"),
             patch.object(web_app, "COMMUNITY_GOAL", goal),
         ):
-            response = web_app.app.test_client().get("/community-goals")
+            response = web_app.app.test_client().get("/community-fund")
         page = response.get_data(as_text=True)
         self.assertEqual(response.status_code, 200)
         self.assertIn("community.sputnikv2.testnet", page)
         self.assertIn("School library books", page)
-        self.assertIn("Community Goals", page)
+        self.assertIn("Community Funds", page)
         self.assertIn("Separate from Group Deal funds", page)
 
     def test_goal_configuration_is_all_or_nothing_and_uses_exact_yocto(self):

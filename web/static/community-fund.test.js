@@ -263,7 +263,7 @@ test("one-goal progress uses verified direct contributions and matching recipien
   assert.equal(snapshot.contributed, "1250");
   assert.equal(snapshot.progressBasisPoints, 10000);
   assert.equal(snapshot.spent, "600");
-  assert.equal(snapshot.status, "Approved payment recorded");
+  assert.equal(snapshot.status, "In Progress");
   assert.equal(fund.goalSnapshot(goal, null, allocations, activity), null);
 });
 

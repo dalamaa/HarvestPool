@@ -1917,7 +1917,7 @@
     return `<article class="fund-proposal-card"><div class="fund-proposal-top"><span class="status ${payment ? "status-funded" : allocation.status === "InProgress" || allocation.status === "Approved" ? "status-pending" : "status-failed"}"><span></span>${escapeHtml(statusCopy)}</span><span class="section-kicker">Request #${allocation.id}</span></div><h3>${escapeHtml(communityAmount(allocation.amount, goal))} to <code>${escapeHtml(allocation.receiverId)}</code></h3><p class="proposal-recipient-check ${matchesGoalRecipient ? "matches" : "differs"}">${matchesGoalRecipient ? "Matches this goal’s intended recipient" : "Warning: this request names a different recipient than the Community Goal"}</p><p>${escapeHtml(allocation.reason)}</p><dl class="fund-proposal-details"><div><dt>Requested by</dt><dd><code>${escapeHtml(allocation.proposer)}</code></dd></div><div><dt>Approvals needed</dt><dd>${required} of ${safety?.memberCount || 0} voting members</dd></div><div><dt>Votes</dt><dd>${counts.approve} approve · ${counts.reject} reject${counts.remove ? ` · ${counts.remove} remove` : ""}</dd></div><div><dt>Submitted</dt><dd>${escapeHtml(communityTime(allocation.submissionTime))}</dd></div></dl>${voters ? `<details class="fund-voters"><summary>See recorded votes</summary><ul>${voters}</ul></details>` : ""}${payment || allocation.status === "Approved" ? `<div class="fund-payment-reference"><strong>${payment ? "Payment confirmed" : "Payment confirmation pending"}</strong>${communityExplorerLink(payment?.transactionHash, "View payment")}</div>` : actions}</article>`;
   }
 
-  function communityHistoryMarkup(fund, allocations, goal) {
+  function communityHistoryMarkup(fund, allocations, goal, mode = "all") {
     const activity = fund.activity;
     if (!activity || activity.error) {
       return `<div class="fund-history-unavailable"><strong>Money in and out is temporarily unavailable</strong><p>${escapeHtml(activity?.error || "The public transaction service did not return a complete record.")} The balance and requests still come directly from the DAO.</p><button class="button button-outline button-small" type="button" data-community-action="refresh-history">Retry activity</button></div>`;
@@ -1930,7 +1930,7 @@
       timestamp: item.timestamp,
       transactionHash: item.transactionHash,
     }));
-    allocations.forEach((allocation) => {
+    if (mode !== "contributions") allocations.forEach((allocation) => {
       const payment = verifiedCommunityPayment(allocation, activity);
       if (!payment) return;
       records.push({
@@ -1955,7 +1955,7 @@
     return `${freshness}<div class="fund-history-list">${records.map((record) => `<article class="fund-history-row"><div><span class="section-kicker">${escapeHtml(record.type)}</span><strong>${escapeHtml(communityAmount(record.amount, goal))}</strong><p>${escapeHtml(record.reason)}</p></div><dl><div><dt>${record.type === "Contribution" ? "From" : "To"}</dt><dd><code>${escapeHtml(record.account)}</code></dd></div>${record.proposer ? `<div><dt>Requested by</dt><dd><code>${escapeHtml(record.proposer)}</code></dd></div><div><dt>Approved by</dt><dd>${record.approvers.map((account) => `<code>${escapeHtml(account)}</code>`).join(", ")}</dd></div>` : ""}<div><dt>Date</dt><dd>${escapeHtml(communityTime(record.timestamp))}</dd></div></dl>${communityExplorerLink(record.transactionHash)}</article>`).join("")}</div>`;
   }
 
-  const COMMUNITY_TABS = new Set(["overview", "needs-vote", "open", "completed", "activity"]);
+  const COMMUNITY_TABS = new Set(["overview", "contributions", "payment-requests", "votes", "activity"]);
 
   function requestedCommunityTab() {
     const requested = new URL(window.location.href).searchParams.get("view");
@@ -2034,15 +2034,14 @@
     const connectMarkup = !state.accountId
       ? '<button class="button button-dark" type="button" data-connect-wallet>Connect wallet to contribute or vote</button>'
       : `<div class="fund-membership ${isMemberAccount ? "is-member" : ""}"><strong>${isMemberAccount ? "You can contribute and vote" : "You can contribute · voting is for members"}</strong><span><code>${escapeHtml(state.accountId)}</code>${isMemberAccount ? " is one of the fixed DAO members." : " is not in the fixed voting group."}</span></div>`;
-    const goalCompleted = Boolean(goalSnapshot && BigInt(goalSnapshot.spent) > 0n);
     const registrationAction = isUsdc && safety.ready && state.accountId && !fund.asset?.daoStorage
       ? `<div class="fund-action-card"><span class="section-kicker">One-time setup</span><h2>Register the treasury for USDC</h2><p>The DAO must be registered with the USDC contract before it can receive tokens. This uses the token contract’s exact minimum storage deposit and transfers no USDC.</p><button class="button button-primary" type="button" data-community-action="register-token">Review registration</button></div>`
       : "";
     const contributionForm = safety.ready && assetReady && state.accountId && goalSnapshot
-      && !goalCompleted && BigInt(goalSnapshot.contributed) < BigInt(targetUnits)
+      && BigInt(goalSnapshot.contributed) < BigInt(targetUnits)
       ? `<form class="fund-action-card" data-community-contribution novalidate><span class="section-kicker">Contribute</span><h2>Help fund this goal</h2><p>Send ${assetLabel} from your wallet to the community’s separate DAO treasury. The transfer is public and cannot be personally withdrawn or automatically refunded.</p><label for="fund-contribution-amount">${isUsdc ? "Amount ($)" : `Amount in ${assetLabel}`}</label><input id="fund-contribution-amount" name="amount" type="number" inputmode="decimal" min="0.000001" step="0.000001" required><div class="form-error-summary" tabindex="-1" role="alert" hidden></div><button class="button button-primary" type="submit">Contribute</button></form>`
       : "";
-    const proposalForm = safety.ready && assetReady && canPropose && activityComplete && goalSnapshot && !goalCompleted
+    const proposalForm = safety.ready && assetReady && canPropose && activityComplete && goalSnapshot
       && sections.open.length === 0
       ? `<form class="fund-action-card" data-community-proposal novalidate><span class="section-kicker">Request payment</span><h2>Ask members to approve</h2><div class="goal-fixed-recipient"><span>Intended recipient</span><code>${escapeHtml(goal.recipient)}</code><small>HarvestPool fixes this recipient in its request form. SputnikDAO itself relies on members checking and approving the recipient written into the request.</small></div><div class="field"><label for="fund-allocation-amount">${isUsdc ? "Amount ($)" : `Amount in ${assetLabel}`}</label><input id="fund-allocation-amount" name="amount" type="number" inputmode="decimal" min="0.000001" step="0.000001" required></div><div class="field"><label for="fund-allocation-reason">Why is this payment needed?</label><textarea id="fund-allocation-reason" name="reason" maxlength="500" rows="3" required></textarea></div><p class="field-help">This public request uses a ${communityFundTools.formatNear(fund.policy.proposal_bond)} Testnet NEAR proposal bond. The payment is sent only after the required approvals.</p><div class="form-error-summary" tabindex="-1" role="alert" hidden></div><button class="button button-primary" type="submit">Request payment</button></form>`
       : "";
@@ -2055,35 +2054,35 @@
         ? (BigInt(goalSnapshot.target) - BigInt(goalSnapshot.contributed)).toString()
         : "0")
       : null;
-    const goalCard = `<section class="community-goal-card" aria-labelledby="community-goal-heading"><div class="goal-card-top"><div><span class="section-kicker">Community Goal</span><h2 id="community-goal-heading">${escapeHtml(goal.title)}</h2></div><span class="status ${goalCompleted ? "status-funded" : "status-pending"}"><span></span>${escapeHtml(goalSnapshot?.status || "Verification unavailable")}</span></div><p class="goal-purpose">${escapeHtml(goal.purpose)}</p>${goalProgress}<dl class="goal-details"><div><dt>Target</dt><dd>${escapeHtml(communityAmount(targetUnits, goal))}</dd></div><div><dt>Raised</dt><dd>${goalSnapshot ? escapeHtml(communityAmount(goalSnapshot.contributed, goal)) : "Unavailable"}</dd></div><div><dt>Remaining</dt><dd>${remaining === null ? "Unavailable" : escapeHtml(communityAmount(remaining, goal))}</dd></div><div><dt>Available funds</dt><dd>${assetReady ? escapeHtml(communityAmount(availableBalance, goal)) : "Unavailable"}</dd></div></dl><p class="goal-boundary-note">Payments use ${assetLabel}. Intended recipient: <code>${escapeHtml(goal.recipient)}</code>. ${safety.ready ? `${safety.requiredVotes} of ${safety.memberCount} members must approve each payment.` : "Payment authority verification failed."}</p></section>`;
+    const goalCard = `<section class="community-goal-card" aria-labelledby="community-goal-heading"><div class="goal-card-top"><div><span class="section-kicker">Community Fund</span><h2 id="community-goal-heading">${escapeHtml(goal.title)}</h2></div><span class="status ${goalSnapshot ? "status-open" : "status-pending"}"><span></span>${escapeHtml(goalSnapshot?.status || "Verification unavailable")}</span></div><p class="goal-purpose">${escapeHtml(goal.purpose)}</p>${goalProgress}<dl class="goal-details"><div><dt>Target</dt><dd>${escapeHtml(communityAmount(targetUnits, goal))}</dd></div><div><dt>Raised</dt><dd>${goalSnapshot ? escapeHtml(communityAmount(goalSnapshot.contributed, goal)) : "Unavailable"}</dd></div><div><dt>Remaining to target</dt><dd>${remaining === null ? "Unavailable" : escapeHtml(communityAmount(remaining, goal))}</dd></div><div><dt>Available funds</dt><dd>${assetReady ? escapeHtml(communityAmount(availableBalance, goal)) : "Unavailable"}</dd></div></dl><p class="goal-boundary-note">Payments use ${assetLabel}. Intended recipient: <code>${escapeHtml(goal.recipient)}</code>. ${safety.ready ? `${safety.requiredVotes} of ${safety.memberCount} fixed DAO members must approve each payment; contributors do not automatically become voters.` : "Payment authority verification failed."}</p></section>`;
     const activeTab = state.communityFund.activeTab || requestedCommunityTab();
     state.communityFund.activeTab = activeTab;
     const countLabel = (count) => count === null ? "" : ` <span>(${count})</span>`;
     const needsVoteCount = state.accountId && fund.proposalsComplete ? sections.needsVote.length : null;
-    const openCount = fund.proposalsComplete ? sections.open.length : null;
-    const completedCount = fund.proposalsComplete && activityComplete ? sections.completed.length : null;
+    const requestCount = fund.proposalsComplete ? sections.open.length + sections.completed.length : null;
     const tabs = [
       ["overview", "Overview", null],
-      ["needs-vote", "Needs your vote", needsVoteCount],
-      ["open", "Open requests", openCount],
-      ["completed", "Completed", completedCount],
+      ["contributions", "Contributions", activityComplete ? (fund.activity?.contributions || []).length : null],
+      ["payment-requests", "Payment Requests", requestCount],
+      ["votes", "Votes", needsVoteCount],
       ["activity", "Activity", null],
     ];
     const tabMarkup = `<div class="fund-tabs" role="tablist" aria-label="Community Goal sections">${tabs.map(([id, label, count]) => `<button class="fund-tab" id="community-tab-${id}" type="button" role="tab" aria-selected="${activeTab === id}" aria-controls="community-panel-${id}" tabindex="${activeTab === id ? "0" : "-1"}" data-community-tab="${id}">${label}${countLabel(count)}</button>`).join("")}</div>`;
     let panelMarkup = "";
     if (activeTab === "overview") {
       panelMarkup = `<section class="fund-overview" id="community-panel-overview" role="tabpanel" aria-labelledby="community-tab-overview"><div class="fund-overview-heading"><div><span class="section-kicker">Take part</span><h2>Contribute or review the goal</h2><p><code>${escapeHtml(appConfig.communityDaoId)}</code></p></div>${connectMarkup}</div><div class="fund-stat-grid compact"><div><span>Paid</span><strong>${spent === null ? "Unavailable" : escapeHtml(communityAmount(spent, goal))}</strong><small>Only successful transfer receipts count</small></div><div><span>Needs approval</span><strong>${pending === null ? "Unavailable" : escapeHtml(communityAmount(pending, goal))}</strong><small>Open payment requests</small></div>${approvedUnverified !== "0" ? `<div><span>Confirmation pending</span><strong>${approvedUnverified === null ? "Unavailable" : escapeHtml(communityAmount(approvedUnverified, goal))}</strong><small>Not counted as paid</small></div>` : ""}</div><p class="fund-public-note">Any registered Testnet wallet can contribute ${assetLabel}. Only the fixed DAO members can request or approve payments.</p>${safetyMarkup}${registrationAction || contributionForm ? `<div class="fund-action-grid single">${registrationAction}${contributionForm}</div>` : ""}</section>`;
-    } else if (activeTab === "needs-vote") {
+    } else if (activeTab === "contributions") {
+      panelMarkup = `<section class="fund-history" id="community-panel-contributions" role="tabpanel" aria-labelledby="community-tab-contributions"><div class="section-heading-inline"><div><span class="section-kicker">Verified transfers in</span><h2>Contributions</h2></div></div>${communityHistoryMarkup(fund, [], goal, "contributions")}</section>`;
+    } else if (activeTab === "votes") {
       const content = !state.accountId
         ? '<div class="dashboard-empty compact"><p>Connect your wallet to see requests you can vote on.</p><button class="button button-dark" type="button" data-connect-wallet>Connect wallet</button></div>'
         : sections.needsVote.length
           ? proposalCards(sections.needsVote)
           : `<div class="dashboard-empty compact"><p>${isMemberAccount ? "You have no payment requests waiting for your vote." : "This wallet is not one of the fixed voting members."}</p></div>`;
-      panelMarkup = `<section class="fund-proposals" id="community-panel-needs-vote" role="tabpanel" aria-labelledby="community-tab-needs-vote"><div class="section-heading-inline"><div><span class="section-kicker">Your actions</span><h2>Needs your vote</h2></div></div>${content}</section>`;
-    } else if (activeTab === "open") {
-      panelMarkup = `<section class="fund-proposals" id="community-panel-open" role="tabpanel" aria-labelledby="community-tab-open"><div class="section-heading-inline"><div><span class="section-kicker">Requests for approval</span><h2>Open payment requests</h2></div></div>${proposalForm ? `<div class="fund-action-grid single">${proposalForm}</div>` : ""}${proposalCards(sections.open) || '<div class="dashboard-empty compact"><p>No payment requests are waiting for member approval.</p></div>'}</section>`;
-    } else if (activeTab === "completed") {
-      panelMarkup = `<section class="fund-proposals" id="community-panel-completed" role="tabpanel" aria-labelledby="community-tab-completed"><div class="section-heading-inline"><div><span class="section-kicker">Recorded decisions</span><h2>Completed requests</h2></div></div>${proposalCards(sections.completed) || '<div class="dashboard-empty compact"><p>No completed payment requests are recorded yet.</p></div>'}</section>`;
+      panelMarkup = `<section class="fund-proposals" id="community-panel-votes" role="tabpanel" aria-labelledby="community-tab-votes"><div class="section-heading-inline"><div><span class="section-kicker">DAO approval rule</span><h2>Votes</h2><p>${safety.requiredVotes} of ${safety.memberCount} fixed DAO members must approve a payment. Contributors do not automatically become voters.</p></div></div>${content}</section>`;
+    } else if (activeTab === "payment-requests") {
+      const allRequests = [...sections.open, ...sections.completed];
+      panelMarkup = `<section class="fund-proposals" id="community-panel-payment-requests" role="tabpanel" aria-labelledby="community-tab-payment-requests"><div class="section-heading-inline"><div><span class="section-kicker">Treasury decisions</span><h2>Payment Requests</h2></div></div>${proposalForm ? `<div class="fund-action-grid single">${proposalForm}</div>` : ""}${proposalCards(allRequests) || '<div class="dashboard-empty compact"><p>No payment requests are recorded.</p></div>'}</section>`;
     } else {
       panelMarkup = `<section class="fund-history" id="community-panel-activity" role="tabpanel" aria-labelledby="community-tab-activity"><div class="section-heading-inline"><div><span class="section-kicker">Public transaction record</span><h2>Money in and out</h2></div><a class="text-link" href="${escapeHtml(fund.activity?.sourceUrl || `https://testnet.nearblocks.io/address/${appConfig.communityDaoId}`)}" target="_blank" rel="noopener noreferrer">Open NearBlocks <span aria-hidden="true">↗</span></a></div>${communityHistoryMarkup(fund, allocations, goal)}</section>`;
     }

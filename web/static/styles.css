@@ -961,6 +961,94 @@ h3 { margin-bottom: 10px; font-size: 21px; line-height: 1.1; }
 }
 
 /* Separate SputnikDAO Community Fund */
+.community-directory-hero > div:first-child { max-width: 760px; }
+.community-directory-hero h1 { max-width: 18ch; }
+.community-directory-hero p { max-width: 68ch; }
+.community-hero-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 24px; }
+.community-directory { padding-top: 10px; padding-bottom: 54px; }
+.community-directory-heading { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin-bottom: 20px; }
+.community-directory-heading h2 { margin: 0 0 7px; font-size: clamp(28px, 4vw, 42px); }
+.community-directory-heading p { margin: 0; color: var(--muted); }
+.community-filter-tabs { display: flex; gap: 8px; margin-bottom: 24px; overflow-x: auto; padding: 2px 2px 8px; scrollbar-width: thin; }
+.community-filter-tabs .filter-tab { flex: 0 0 auto; min-height: 44px; white-space: nowrap; }
+.community-fund-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+.community-directory-card { min-width: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 13px; background: var(--white); box-shadow: var(--shadow); }
+.community-card-image { display: block; width: 100%; height: 180px; object-fit: cover; background: var(--mist); }
+.community-card-body { padding: 24px; }
+.community-card-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.verified-label { color: var(--success); font-size: 12px; font-weight: 700; }
+.community-directory-card h3 { margin: 18px 0 3px; color: var(--pine); font-size: 26px; line-height: 1.15; }
+.community-card-location { margin: 0 0 14px; color: var(--muted); font-size: 13px; font-weight: 700; }
+.community-card-description { min-height: 3.2em; color: var(--ink); line-height: 1.6; }
+.community-card-progress { margin: 20px 0; }
+.community-card-progress > div:last-child { display: flex; justify-content: space-between; gap: 12px; margin-top: 8px; color: var(--muted); font-size: 13px; }
+.community-card-progress strong { color: var(--pine); }
+.community-card-meta { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 0 0 20px; }
+.community-card-meta > div { padding: 12px; border-radius: 8px; background: var(--mist); }
+.community-card-meta dt { color: var(--muted); font-size: 11px; }
+.community-card-meta dd { margin: 4px 0 0; color: var(--pine); font-size: 13px; font-weight: 700; }
+.community-empty { grid-column: 1 / -1; }
+.community-how { padding-top: 46px; padding-bottom: 82px; border-top: 1px solid var(--line); }
+.community-how-steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; margin: 30px 0 0; padding: 1px; border: 1px solid var(--line); border-radius: 12px; background: var(--line); list-style: none; overflow: hidden; }
+.community-how-steps li { display: grid; gap: 10px; padding: 24px; background: var(--white); }
+.community-how-steps strong { color: var(--pine); font-size: 18px; }
+.community-how-steps span { color: var(--muted); line-height: 1.55; }
+.community-create-section { max-width: 1000px; padding-top: 8px; padding-bottom: 80px; }
+.form-required-note { margin: 0 0 14px; color: var(--muted); font-size: 13px; }
+.community-request-form { display: grid; gap: 20px; }
+.community-form-section { margin: 0 0 20px; padding: 28px; border: 1px solid var(--line); border-radius: 13px; background: var(--white); box-shadow: var(--shadow); }
+.community-form-section legend { padding: 0 8px; color: var(--pine); font-family: "Space Grotesk", sans-serif; font-size: 25px; font-weight: 700; }
+.community-form-section > p { margin: 0 0 24px; color: var(--muted); }
+.community-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+.community-form-grid .field { margin: 0; }
+.community-form-grid .field-wide { grid-column: 1 / -1; }
+.community-form-grid label { display: block; margin-bottom: 7px; color: var(--pine); font-size: 13px; font-weight: 700; }
+.community-form-grid label > span { color: var(--muted); font-weight: 500; }
+.community-form-grid input:not([type="checkbox"]), .community-form-grid select, .community-form-grid textarea { width: 100%; min-height: 48px; padding: 11px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); color: var(--ink); font: inherit; font-size: 16px; }
+.community-form-grid textarea { resize: vertical; }
+.community-form-grid input:focus, .community-form-grid select:focus, .community-form-grid textarea:focus { border-color: var(--pine); outline: 3px solid rgba(199, 223, 107, .45); }
+.community-form-grid [aria-invalid="true"] { border-color: var(--danger) !important; }
+.checkbox-row { display: flex !important; align-items: flex-start; gap: 10px; min-height: 44px; margin-top: 12px; cursor: pointer; }
+.checkbox-row input { width: 20px; height: 20px; flex: 0 0 auto; margin-top: 1px; accent-color: var(--pine); }
+.field-error { margin: 6px 0 0; color: var(--danger); font-size: 13px; font-weight: 700; }
+.terms-boundary { padding: 16px 18px; border-left: 4px solid var(--sun); border-radius: 6px; background: var(--sun-soft); color: var(--pine-deep); }
+.terms-boundary p { margin: 5px 0 0; }
+.community-form-section > .terms-boundary { margin-bottom: 24px; }
+.community-form-actions { display: flex; align-items: center; justify-content: flex-end; gap: 12px; }
+.community-review { padding: 30px; border: 1px solid #b9d8c8; border-radius: 13px; background: var(--white); box-shadow: var(--shadow); }
+.community-review-heading { display: flex; align-items: start; justify-content: space-between; gap: 20px; margin-bottom: 24px; }
+.community-review-heading h2 { margin: 6px 0 0; }
+.community-review-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; margin: 0 0 22px; padding: 1px; border: 1px solid var(--line); border-radius: 10px; background: var(--line); overflow: hidden; }
+.community-review-list > div { padding: 16px; background: var(--paper); }
+.community-review-list dt { color: var(--muted); font-size: 12px; font-weight: 700; }
+.community-review-list dd { margin: 7px 0 0; color: var(--ink); line-height: 1.55; white-space: pre-wrap; }
+.community-request-detail { padding-top: 38px; padding-bottom: 80px; }
+.community-saved-notice { margin: 0 0 22px; }
+.detail-breadcrumb { display: flex; gap: 9px; margin-bottom: 28px; color: var(--muted); font-size: 13px; }
+.detail-breadcrumb a { color: var(--pine); font-weight: 700; }
+.request-detail-header { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 32px; margin-bottom: 22px; }
+.request-detail-header h1 { max-width: 19ch; margin: 14px 0 8px; font-size: clamp(38px, 6vw, 70px); line-height: .98; }
+.request-detail-header p { color: var(--muted); }
+.request-goal { display: grid; min-width: 220px; gap: 4px; padding: 20px; border: 1px solid var(--line); border-radius: 11px; background: var(--white); }
+.request-goal span, .request-goal small { color: var(--muted); }
+.request-goal strong { color: var(--pine); font-family: "Space Grotesk", sans-serif; font-size: 32px; }
+.request-setup-boundary { margin-bottom: 20px; }
+.request-tab-panel { padding: 26px; border: 1px solid var(--line); border-radius: 13px; background: var(--white); box-shadow: var(--shadow); }
+.request-overview-grid { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(260px, .7fr); gap: 34px; }
+.request-overview-grid h2, .request-overview-grid h3 { color: var(--pine); }
+.request-overview-grid p { color: var(--ink); line-height: 1.65; white-space: pre-wrap; }
+.request-overview-grid aside { padding: 20px; border-radius: 10px; background: var(--mist); }
+.private-contact { padding: 12px; border-left: 3px solid var(--success); background: #eef8f1; }
+.private-contact span { display: block; margin-top: 4px; color: var(--muted); font-size: 11px; }
+.request-terms { margin-top: 30px; }
+.request-terms dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.request-terms dl > div { padding: 17px; border: 1px solid var(--line); border-radius: 9px; background: var(--paper); }
+.request-terms dt { color: var(--pine); font-weight: 700; }
+.request-terms dd { margin: 8px 0 0; color: var(--ink); line-height: 1.55; white-space: pre-wrap; }
+.request-activity { display: grid; gap: 12px; padding: 0; list-style: none; }
+.request-activity li { display: grid; grid-template-columns: minmax(160px, .5fr) minmax(0, 1fr) auto; gap: 18px; padding: 16px; border-radius: 9px; background: var(--paper); }
+.request-activity span, .request-activity time { color: var(--muted); }
+.request-activity time { font-size: 12px; }
 .community-fund-hero .chain-note { max-width: 430px; }
 .community-fund-section { padding-top: 12px; padding-bottom: 72px; }
 .fund-setup-state { max-width: 760px; padding: 34px; border: 1px solid var(--line); border-left: 5px solid var(--sun); border-radius: 12px; background: var(--white); box-shadow: var(--shadow); }
@@ -1071,6 +1159,14 @@ h3 { margin-bottom: 10px; font-size: 21px; line-height: 1.1; }
 }
 
 @media (max-width: 760px) {
+  .community-directory-heading, .community-card-top, .community-review-heading { align-items: flex-start; flex-direction: column; }
+  .community-fund-grid, .community-how-steps, .community-form-grid, .community-review-list, .request-detail-header, .request-overview-grid, .request-terms dl, .request-activity li { grid-template-columns: 1fr; }
+  .community-form-grid .field-wide { grid-column: auto; }
+  .community-form-section, .community-review, .request-tab-panel { padding: 18px; }
+  .community-form-actions { align-items: stretch; flex-direction: column-reverse; }
+  .community-form-actions .button, .community-hero-actions .button { width: 100%; }
+  .request-goal { min-width: 0; }
+  .community-card-meta { grid-template-columns: 1fr; }
   .community-fund-section { padding-bottom: 74px; }
   .community-goal-card, .fund-overview, .fund-proposals, .fund-history, .fund-action-card, .fund-setup-state { padding: 18px; }
   .goal-card-top, .fund-overview-heading, .fund-proposal-top, .fund-payment-reference { align-items: flex-start; flex-direction: column; }
