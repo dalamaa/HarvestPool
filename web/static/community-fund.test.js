@@ -135,6 +135,47 @@ test("native NEAR allocation payload uses Sputnik Transfer and structured purpos
   assert.equal(fund.decodeDescription(proposal.description), "Buy shared garden tools");
 });
 
+test("USDC allocation payload and reads stay separate from historical NEAR", () => {
+  const tokenId = "usdc.testnet";
+  const proposal = fund.transferProposal("recipient.testnet", "800000", "Buy shared tools", tokenId);
+  assert.deepEqual(proposal.kind.Transfer, {
+    token_id: tokenId,
+    receiver_id: "recipient.testnet",
+    amount: "800000",
+    msg: null,
+  });
+  const stored = { ...proposal, id: 4, status: "InProgress", proposer: "alice.testnet", votes: {}, submission_time: "1" };
+  assert.equal(fund.allocationFromProposal(stored), null);
+  assert.equal(fund.allocationFromProposal(stored, tokenId).tokenId, tokenId);
+  assert.equal(fund.sumAllocations([stored], ["InProgress"]), "0");
+  assert.equal(fund.sumAllocations([stored], ["InProgress"], tokenId), "800000");
+});
+
+test("USDC registration and direct contribution payloads are exact", () => {
+  assert.deepEqual(fund.storageRegistration("community.sputnikv2.testnet"), {
+    account_id: "community.sputnikv2.testnet",
+    registration_only: true,
+  });
+  assert.deepEqual(fund.tokenContribution("community.sputnikv2.testnet", "1000000", "Shared Equipment"), {
+    receiver_id: "community.sputnikv2.testnet",
+    amount: "1000000",
+    memo: "Contribution toward Shared Equipment",
+  });
+});
+
+test("USDC payment proof requires the configured token receipt", () => {
+  const allocation = { id: 8, receiverId: "recipient.testnet", amount: "200000", tokenId: "usdc.testnet" };
+  const activity = { proposalTransactions: { 8: [{
+    action: "VoteApprove",
+    transactionHash: "vote-hash",
+    transfers: [
+      { receiver: "recipient.testnet", amount: "200000", tokenId: "" },
+      { receiver: "recipient.testnet", amount: "200000", tokenId: "usdc.testnet", receiptId: "ft-receipt" },
+    ],
+  }] } };
+  assert.equal(fund.verifiedPayment(allocation, activity).transfer.receiptId, "ft-receipt");
+});
+
 test("authoritative proposal totals include only requested statuses", () => {
   const base = (id, status, amount) => ({
     id,
@@ -224,4 +265,11 @@ test("one-goal progress uses verified direct contributions and matching recipien
   assert.equal(snapshot.spent, "600");
   assert.equal(snapshot.status, "Approved payment recorded");
   assert.equal(fund.goalSnapshot(goal, null, allocations, activity), null);
+});
+
+test("USDC goal progress uses targetUnits without a NEAR target", () => {
+  const snapshot = fund.goalSnapshot({ configured: true, recipient: "recipient.testnet", targetUnits: "1000000" }, "250000", [], {});
+  assert.equal(snapshot.target, "1000000");
+  assert.equal(snapshot.contributed, "250000");
+  assert.equal(snapshot.progressBasisPoints, 2500);
 });

@@ -27,6 +27,7 @@ from web.config import (
     CANONICAL_PORT,
     CANONICAL_SPUTNIK_DAO_CODE_HASH,
     CANONICAL_SPUTNIK_DAO_FACTORY_ID,
+    CANONICAL_USDC_TOKEN_ID,
     CANONICAL_V3_CONTRACT_ID,
 )
 
@@ -64,11 +65,21 @@ def _community_goal_config():
     title = os.environ.get("HARVESTPOOL_COMMUNITY_GOAL_TITLE", "").strip()
     purpose = os.environ.get("HARVESTPOOL_COMMUNITY_GOAL_PURPOSE", "").strip()
     recipient = os.environ.get("HARVESTPOOL_COMMUNITY_GOAL_RECIPIENT", "").strip()
+    currency = os.environ.get("HARVESTPOOL_COMMUNITY_GOAL_CURRENCY", "NEAR").strip().upper()
     target_near = os.environ.get("HARVESTPOOL_COMMUNITY_GOAL_TARGET_NEAR", "").strip()
-    values_present = any((title, purpose, recipient, target_near))
+    target_usdc = os.environ.get("HARVESTPOOL_COMMUNITY_GOAL_TARGET_USDC", "").strip()
+    target = target_usdc if currency == "USDC" else target_near
+    decimals = 6 if currency == "USDC" else 24
+    values_present = any((title, purpose, recipient, target_near, target_usdc))
     errors = []
-    target_yocto = ""
-    if values_present and not all((title, purpose, recipient, target_near)):
+    target_units = ""
+    if currency not in {"NEAR", "USDC"}:
+        errors.append("Community Goal currency must be NEAR or USDC.")
+    if currency == "USDC" and target_near:
+        errors.append("USDC Community Goals cannot also configure a NEAR target.")
+    if currency == "NEAR" and target_usdc:
+        errors.append("NEAR Community Goals cannot also configure a USDC target.")
+    if values_present and not all((title, purpose, recipient, target)):
         errors.append("All Community Goal fields must be configured together.")
     if len(title) > 120 or len(purpose) > 500:
         errors.append("Community Goal title or purpose exceeds its supported length.")
@@ -76,21 +87,27 @@ def _community_goal_config():
         errors.append("Community Goal recipient is not a valid NEAR account ID.")
     if recipient and not 2 <= len(recipient) <= 64:
         errors.append("Community Goal recipient must be 2 to 64 characters.")
-    if target_near:
+    if target:
         try:
-            target_value = Decimal(target_near)
-            scaled = target_value * (Decimal(10) ** 24)
+            target_value = Decimal(target)
+            scaled = target_value * (Decimal(10) ** decimals)
             if target_value <= 0 or scaled != scaled.to_integral_value():
                 raise InvalidOperation
-            target_yocto = str(int(scaled))
+            target_units = str(int(scaled))
         except (InvalidOperation, ValueError, OverflowError):
-            errors.append("Community Goal target must be a positive NEAR amount with at most 24 decimals.")
+            errors.append(
+                f"Community Goal target must be a positive {currency} amount with at most {decimals} decimals."
+            )
     return {
         "configured": bool(values_present and not errors),
         "title": title,
         "purpose": purpose,
         "recipient": recipient,
-        "targetYocto": target_yocto,
+        "currency": currency,
+        "decimals": decimals,
+        "tokenId": CANONICAL_USDC_TOKEN_ID if currency == "USDC" else "",
+        "targetUnits": target_units,
+        "targetYocto": target_units if currency == "NEAR" else "",
         "configurationError": " ".join(errors),
     }
 
@@ -209,8 +226,8 @@ def _nearblocks_json(path, params=None):
     raise RuntimeError("NearBlocks retry limit reached")
 
 
-def _community_activity(dao_id):
-    transactions = []
+def _nearblocks_account_pages(dao_id, suffix):
+    records = []
     next_page = None
     complete = True
     for _page in range(5):
@@ -218,17 +235,30 @@ def _community_activity(dao_id):
         if next_page:
             params["next"] = next_page
         payload = _nearblocks_json(
-            f"/v3/accounts/{quote(dao_id, safe='.')}/txns", params
+            f"/v3/accounts/{quote(dao_id, safe='.')}/{suffix}", params
         )
         batch = payload.get("data")
         if not isinstance(batch, list):
             raise ValueError("NearBlocks returned an invalid transaction list")
-        transactions.extend(batch)
+        records.extend(batch)
         next_page = payload.get("meta", {}).get("next_page")
         if not next_page:
             break
     else:
         complete = not bool(next_page)
+    return records, complete
+
+
+def _community_activity(dao_id, token_id=""):
+    transactions, complete = _nearblocks_account_pages(dao_id, "txns")
+    ft_events = []
+    if token_id:
+        ft_events, ft_complete = _nearblocks_account_pages(dao_id, "ft-txns")
+        complete = complete and ft_complete
+        ft_events = [
+            event for event in ft_events
+            if str(event.get("contract_account_id") or "") == token_id
+        ]
 
     contributions = []
     proposal_transactions = {}
@@ -241,7 +271,8 @@ def _community_activity(dao_id):
         signer = str(transaction.get("signer_account_id") or "")
         transaction_hash = str(transaction.get("transaction_hash") or "")
         if (
-            success
+            not token_id
+            and success
             and receiver == dao_id
             and signer != dao_id
             and len(actions) == 1
@@ -274,6 +305,18 @@ def _community_activity(dao_id):
                 f"/v3/txns/{quote(transaction_hash, safe='')}/receipts"
             ).get("data", {})
             transfers = []
+            successful_receipt_ids = set()
+
+            def collect_successful_receipts(receipt):
+                if not isinstance(receipt, dict):
+                    return
+                receipt_id = str(receipt.get("receipt_id") or "")
+                if receipt_id and receipt.get("outcome", {}).get("status") is True:
+                    successful_receipt_ids.add(receipt_id)
+                for child in receipt.get("receipts") or []:
+                    collect_successful_receipts(child)
+
+            collect_successful_receipts(receipt_root)
 
             def collect_transfers(receipt, depth=0):
                 if not isinstance(receipt, dict):
@@ -299,7 +342,28 @@ def _community_activity(dao_id):
                 for child in receipt.get("receipts") or []:
                     collect_transfers(child, depth + 1)
 
-            collect_transfers(receipt_root)
+            if not token_id:
+                collect_transfers(receipt_root)
+            else:
+                for event in ft_events:
+                    if str(event.get("transaction_hash") or "") != transaction_hash:
+                        continue
+                    amount = str(event.get("delta_amount") or "")
+                    receipt_id = str(event.get("receipt_id") or "")
+                    if (
+                        not re.fullmatch(r"-\d+", amount)
+                        or not receipt_id
+                        or receipt_id not in successful_receipt_ids
+                    ):
+                        continue
+                    transfers.append(
+                        {
+                            "amount": amount[1:],
+                            "receiver": str(event.get("involved_account_id") or ""),
+                            "receiptId": receipt_id,
+                            "tokenId": token_id,
+                        }
+                    )
             for action in detail.get("actions") or []:
                 if action.get("method") != "act_proposal":
                     continue
@@ -320,9 +384,28 @@ def _community_activity(dao_id):
                         "transfers": transfers,
                     }
                 )
-        except (OSError, URLError, ValueError, TypeError, json.JSONDecodeError):
+        except (OSError, URLError, RuntimeError, ValueError, TypeError, json.JSONDecodeError):
             receipt_reads_complete = False
             continue
+
+    if token_id:
+        for event in ft_events:
+            amount = str(event.get("delta_amount") or "")
+            if not re.fullmatch(r"\d+", amount) or int(amount) <= 0:
+                continue
+            contributor = str(event.get("involved_account_id") or "")
+            transaction_hash = str(event.get("transaction_hash") or "")
+            if contributor and transaction_hash:
+                contributions.append(
+                    {
+                        "amount": amount,
+                        "contributor": contributor,
+                        "timestamp": str(event.get("block_timestamp") or "0"),
+                        "transactionHash": transaction_hash,
+                        "receiptId": str(event.get("receipt_id") or ""),
+                        "tokenId": token_id,
+                    }
+                )
 
     complete = complete and len(proposal_candidates) <= 40 and receipt_reads_complete
 
@@ -333,6 +416,7 @@ def _community_activity(dao_id):
         "proposalTransactions": proposal_transactions,
         "source": "NearBlocks Testnet API",
         "sourceUrl": f"https://testnet.nearblocks.io/address/{dao_id}",
+        "tokenId": token_id,
         "verifiedAt": verified_at,
         "stale": False,
     }
@@ -349,24 +433,25 @@ def _activity_coverage(payload):
     return contributions, actions, transfers
 
 
-def _cached_community_activity(dao_id, *, force=False):
+def _cached_community_activity(dao_id, token_id="", *, force=False):
+    cache_key = (dao_id, token_id)
     now = time.monotonic()
     with _community_activity_cache_lock:
-        cached = _community_activity_cache.get(dao_id)
+        cached = _community_activity_cache.get(cache_key)
         if cached and not force and now - cached["cached_at"] < COMMUNITY_ACTIVITY_CACHE_SECONDS:
             return dict(cached["payload"])
     try:
-        payload = _community_activity(dao_id)
-    except (OSError, URLError, ValueError, TypeError, json.JSONDecodeError):
+        payload = _community_activity(dao_id, token_id)
+    except (OSError, URLError, RuntimeError, ValueError, TypeError, json.JSONDecodeError):
         with _community_activity_cache_lock:
-            cached = _community_activity_cache.get(dao_id)
+            cached = _community_activity_cache.get(cache_key)
             if cached and now - cached["cached_at"] < COMMUNITY_ACTIVITY_STALE_SECONDS:
                 stale_payload = dict(cached["payload"])
                 stale_payload["stale"] = True
                 return stale_payload
         raise
     with _community_activity_cache_lock:
-        cached = _community_activity_cache.get(dao_id)
+        cached = _community_activity_cache.get(cache_key)
         coverage_dropped = cached and any(
             current < previous
             for current, previous in zip(
@@ -381,7 +466,7 @@ def _cached_community_activity(dao_id, *, force=False):
             stale_payload["stale"] = True
             return stale_payload
     with _community_activity_cache_lock:
-        _community_activity_cache[dao_id] = {"cached_at": time.monotonic(), "payload": payload}
+        _community_activity_cache[cache_key] = {"cached_at": time.monotonic(), "payload": payload}
     return dict(payload)
 
 
@@ -391,8 +476,9 @@ def community_fund_activity():
         return jsonify({"error": "Community Goals DAO is not configured."}), 404
     try:
         force = request.args.get("refresh") == "1"
-        return jsonify(_cached_community_activity(COMMUNITY_DAO_ID, force=force))
-    except (OSError, URLError, ValueError, TypeError, json.JSONDecodeError) as error:
+        token_id = COMMUNITY_GOAL.get("tokenId", "") if COMMUNITY_GOAL.get("configured") else ""
+        return jsonify(_cached_community_activity(COMMUNITY_DAO_ID, token_id, force=force))
+    except (OSError, URLError, RuntimeError, ValueError, TypeError, json.JSONDecodeError) as error:
         return jsonify({"error": f"Community Goals transaction history unavailable: {error}"}), 503
 
 

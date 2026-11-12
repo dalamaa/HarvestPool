@@ -54,3 +54,23 @@ Finalized Testnet records:
 - Recipient payment receipt: `Epq9xCvgMrgpkJSpuvtTebdNVjiurDffjcMYnBjcMyJ9`
 - Final DAO account balance: `6.05 NEAR`; final contract-reported available amount:
   `0.63632 NEAR`, verified at Testnet block `277330049` on 2026-11-12.
+
+## USDC follow-up — authorization pending
+
+This is the next customer-facing journey. It has not occurred, so every transaction reference below
+is intentionally blank. Recheck balances, registrations, policy, and the token storage minimum at
+finality immediately before asking for authorization.
+
+- [ ] Member A registers `harvestpool-community.sputnikv2.testnet` with the canonical Circle Testnet
+  USDC contract using `storage_deposit`; transaction: **pending**
+- [ ] Member A contributes **1.00 USDC** with `ft_transfer` to the DAO; transaction: **pending**
+- [ ] Member A proposes **0.80 USDC** to `harvestpool-farmer-1.testnet` with the existing **0.1 NEAR**
+  proposal bond; proposal transaction and ID: **pending**
+- [ ] Member A casts the first approval and the UI confirms no outgoing USDC event; transaction:
+  **pending**
+- [ ] Member B casts the second approval; deciding-vote transaction: **pending**
+- [ ] Verify the successful exact-token transfer event/receipt, recipient balance change, approving
+  accounts, and final DAO USDC balance; payment receipt: **pending**
+
+The completed native-NEAR evidence above remains historical and is never added to USDC progress or
+balances.

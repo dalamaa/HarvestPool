@@ -1,16 +1,20 @@
 # Community Goals on SputnikDAO
 
-Status: native-NEAR workflow implemented, locally tested, and verified with finalized Testnet
-transactions. It remains isolated from V5 purchase escrow and is not deployed on the public site.
+Status: the native-NEAR workflow is preserved as finalized Testnet evidence. The next customer-facing
+goal uses canonical Testnet USDC and is implemented and locally tested, but its registration,
+contribution, proposal, and payment transactions have not been submitted. Nothing is deployed on
+the public site.
 
 ## Integration boundary
 
 Community Goals uses one separate SputnikDAO account for one clearly identified goal in the initial
 demonstration. It does not call, own, or receive tokens from
-the V5 purchase contract, the V3-for-V5 decision contract, Circle USDC, or the finalizer. The Flask
+the V5 purchase contract, the V3-for-V5 decision contract, or the finalizer. The Community Goals DAO
+may hold the same canonical Circle Testnet USDC token as V5, but it is a different account with no
+access to V5 escrow. The Flask
 service remains read-only. Wallets sign every contribution, proposal, and vote in the browser.
 
-The implementation uses native Testnet NEAR because SputnikDAO supports it directly:
+The implementation supports one explicitly configured asset at a time:
 
 - a normal native transfer contributes to the DAO account;
 - `get_available_amount` returns spendable DAO balance after contract storage and locked bonds;
@@ -24,9 +28,15 @@ The implementation uses native Testnet NEAR because SputnikDAO supports it direc
 - current contract source attempts to mark a failed transfer `Failed`, but the interface never treats
   proposal status or a successful top-level vote transaction alone as proof of payment.
 
-Direct-transfer history, proposal transaction references, and receipt trees are read from the
+For the customer-facing Phase 3 journey, `token_id` is the canonical Circle Testnet USDC contract.
+The DAO must first be registered by calling that token's `storage_deposit` with the exact current
+minimum. Contributions call `ft_transfer` directly from the donor to the DAO with one yoctoNEAR.
+SputnikDAO's threshold-crossing vote calls `ft_transfer` from the DAO to the proposal recipient.
+USDC amounts use six-decimal integer units. Proposal bonds and transaction gas remain native NEAR.
+
+Native-transfer or canonical-token history, proposal transaction references, and receipt trees are read from the
 NearBlocks Testnet indexer. A payment is counted only when its proposal action has a matching,
-successful, direct DAO transfer receipt for its exact recipient and amount. That receipt remains
+successful transfer receipt/event for its exact token, recipient, and amount. That receipt remains
 authoritative even if a later status callback fails. Contract balance,
 policy, proposal contents, votes, and status are read at finality directly from NEAR RPC. If indexed
 history is incomplete or unavailable, totals derived from history are hidden rather than guessed.
@@ -36,11 +46,14 @@ history is incomplete or unavailable, totals derived from history are hidden rat
 One DAO treasury does not provide goal-specific subaccounts. The initial demonstration therefore
 supports exactly one configured goal and one dedicated DAO. Its title, purpose, target, and intended
 recipient are public application configuration; they are not new escrow terms and do not create
-automatic release or refund rights. Goal progress is the sum of successful direct transfers indexed
-for that DAO, excluding the factory creation reserve and proposal bonds. Available balance remains
-the contract's `get_available_amount` result.
+automatic release or refund rights. Goal progress is the sum of successful transfers of the
+configured asset indexed for that DAO. In USDC mode, available balance is the token contract's
+authoritative `ft_balance_of(DAO)` result; native `get_available_amount` is not mixed into USDC
+totals. Native proposal bonds and the earlier NEAR contribution/payment remain visible on explorers
+but are excluded from the USDC goal's progress, requests, and history.
 
-Any connected Testnet wallet can contribute a native transfer. Only the fixed member group in the
+Any connected Testnet wallet registered with the canonical token and holding Testnet USDC can
+contribute. Only the fixed member group in the
 verified DAO policy can create a payment proposal or vote. The HarvestPool proposal journey fixes
 the configured goal recipient, while the underlying SputnikDAO policy still relies on the required
 member approvals rather than a recipient allowlist. All transfer proposals remain visible so an
@@ -203,8 +216,9 @@ NEAR, the creator account, and all three member IDs.
    HARVESTPOOL_COMMUNITY_DAO_ID=harvestpool-community.sputnikv2.testnet
    HARVESTPOOL_COMMUNITY_GOAL_TITLE=Shared community equipment
    HARVESTPOOL_COMMUNITY_GOAL_PURPOSE=Explain the exact public need and intended community benefit
-   HARVESTPOOL_COMMUNITY_GOAL_TARGET_NEAR=1.5
    HARVESTPOOL_COMMUNITY_GOAL_RECIPIENT=reviewed-recipient.testnet
+   HARVESTPOOL_COMMUNITY_GOAL_CURRENCY=USDC
+   HARVESTPOOL_COMMUNITY_GOAL_TARGET_USDC=1.00
    ```
 
    Replace every example with the explicitly reviewed demonstration goal. All four goal fields are
@@ -235,7 +249,7 @@ described as private or anonymous.
 
 ## Known scope limits
 
-- This is one native-NEAR goal and treasury workflow, not a general accounting system. Do not run
+- This is one configured-asset goal and treasury workflow, not a general accounting system. Do not run
   simultaneous goals through this DAO or label its shared balance as segregated goal escrow.
 - SputnikDAO has no durable “approved and waiting for an organizer to execute” phase. The threshold-
   crossing approval normally executes the transfer. The UI separately labels an approved proposal

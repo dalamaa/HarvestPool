@@ -156,25 +156,45 @@
     }
   }
 
-  function transferProposal(receiverId, amountYocto, reason) {
+  function transferProposal(receiverId, amount, reason, tokenId = "") {
     const receiver = String(receiverId || "").trim();
     if (!/^[a-z0-9._-]{2,64}$/.test(receiver)) throw new Error("Enter a valid NEAR Testnet recipient account.");
-    if (!/^\d+$/.test(String(amountYocto || "")) || BigInt(amountYocto) <= 0n) {
+    if (!/^\d+$/.test(String(amount || "")) || BigInt(amount) <= 0n) {
       throw new Error("Enter an allocation amount greater than zero.");
     }
     return {
       description: encodeDescription(reason),
-      kind: { Transfer: { token_id: "", receiver_id: receiver, amount: String(amountYocto), msg: null } },
+      kind: { Transfer: { token_id: String(tokenId || ""), receiver_id: receiver, amount: String(amount), msg: null } },
     };
   }
 
-  function allocationFromProposal(proposal) {
+  function storageRegistration(accountId) {
+    const account = String(accountId || "").trim();
+    if (!/^[a-z0-9._-]{2,64}$/.test(account)) throw new Error("Enter a valid NEAR Testnet account.");
+    return { account_id: account, registration_only: true };
+  }
+
+  function tokenContribution(daoId, amount, goalTitle) {
+    const receiver = String(daoId || "").trim();
+    if (!/^[a-z0-9._-]{2,64}$/.test(receiver)) throw new Error("Enter a valid DAO account.");
+    if (!/^\d+$/.test(String(amount || "")) || BigInt(amount) <= 0n) {
+      throw new Error("Enter a contribution amount greater than zero.");
+    }
+    return {
+      receiver_id: receiver,
+      amount: String(amount),
+      memo: `Contribution toward ${String(goalTitle || "Community Goal").trim()}`,
+    };
+  }
+
+  function allocationFromProposal(proposal, tokenId = "") {
     const transfer = proposal?.kind?.Transfer;
-    if (!transfer || String(transfer.token_id || "") !== "") return null;
+    if (!transfer || String(transfer.token_id || "") !== String(tokenId || "")) return null;
     return {
       id: Number(proposal.id),
       amount: String(transfer.amount || "0"),
       receiverId: String(transfer.receiver_id || ""),
+      tokenId: String(transfer.token_id || ""),
       reason: decodeDescription(proposal.description),
       proposer: String(proposal.proposer || ""),
       status: String(proposal.status || ""),
@@ -184,10 +204,10 @@
     };
   }
 
-  function sumAllocations(proposals, statuses) {
+  function sumAllocations(proposals, statuses, tokenId = "") {
     const accepted = new Set(statuses);
     return (proposals || []).reduce((total, proposal) => {
-      const allocation = allocationFromProposal(proposal);
+      const allocation = allocationFromProposal(proposal, tokenId);
       return allocation && accepted.has(allocation.status) ? total + BigInt(allocation.amount) : total;
     }, 0n).toString();
   }
@@ -199,14 +219,15 @@
       if (!["VoteApprove", "Finalize"].includes(action.action)) continue;
       const transfer = (action.transfers || []).find((item) =>
         String(item.receiver) === allocation.receiverId && String(item.amount) === allocation.amount
+        && String(item.tokenId || "") === String(allocation.tokenId || "")
       );
       if (transfer) return { ...action, transfer };
     }
     return null;
   }
 
-  function proposalSections(proposals, activity, safety, accountId) {
-    const allocations = (proposals || []).map(allocationFromProposal).filter(Boolean);
+  function proposalSections(proposals, activity, safety, accountId, tokenId = "") {
+    const allocations = (proposals || []).map((proposal) => allocationFromProposal(proposal, tokenId)).filter(Boolean);
     const memberCanVote = Boolean(safety?.ready && accountId && safety.voterAccounts?.has(accountId));
     const needsVote = allocations.filter((allocation) =>
       memberCanVote && allocation.status === "InProgress" && !allocation.votes?.[accountId]
@@ -223,8 +244,9 @@
   }
 
   function goalSnapshot(goal, contributionTotal, allocations, activity) {
-    if (!goal?.configured || !/^\d+$/.test(String(goal.targetYocto || ""))) return null;
-    const target = BigInt(goal.targetYocto);
+    const targetUnits = goal?.targetUnits || goal?.targetYocto;
+    if (!goal?.configured || !/^\d+$/.test(String(targetUnits || ""))) return null;
+    const target = BigInt(targetUnits);
     if (target <= 0n || contributionTotal === null || !/^\d+$/.test(String(contributionTotal))) return null;
     const contributed = BigInt(contributionTotal);
     const goalAllocations = (allocations || []).filter((allocation) =>
@@ -268,7 +290,9 @@
     proposalSections,
     roleAccounts,
     sumAllocations,
+    storageRegistration,
     thresholdFor,
+    tokenContribution,
     transferProposal,
     verifiedPayment,
   };

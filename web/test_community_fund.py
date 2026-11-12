@@ -140,7 +140,7 @@ class CommunityFundActivityTests(unittest.TestCase):
         self.assertFalse(first["stale"])
         self.assertEqual(second["verifiedAt"], payload["verifiedAt"])
 
-        web_app._community_activity_cache["community.sputnikv2.testnet"] = {
+        web_app._community_activity_cache[("community.sputnikv2.testnet", "")] = {
             "cached_at": time.monotonic(),
             "payload": payload,
         }
@@ -154,7 +154,7 @@ class CommunityFundActivityTests(unittest.TestCase):
             "contributions": [{"transactionHash": "in"}],
             "proposalTransactions": {"1": [{"transfers": [{"receiptId": "paid"}]}]},
         }
-        web_app._community_activity_cache["community.sputnikv2.testnet"] = {
+        web_app._community_activity_cache[("community.sputnikv2.testnet", "")] = {
             "cached_at": time.monotonic(),
             "payload": confirmed,
         }
@@ -202,6 +202,111 @@ class CommunityFundActivityTests(unittest.TestCase):
             goal = web_app._community_goal_config()
         self.assertFalse(goal["configured"])
         self.assertIn("configured together", goal["configurationError"])
+
+    def test_usdc_goal_configuration_uses_exact_six_decimal_units(self):
+        complete = {
+            "HARVESTPOOL_COMMUNITY_GOAL_TITLE": "Shared equipment",
+            "HARVESTPOOL_COMMUNITY_GOAL_PURPOSE": "Buy a shared equipment kit.",
+            "HARVESTPOOL_COMMUNITY_GOAL_RECIPIENT": "recipient.testnet",
+            "HARVESTPOOL_COMMUNITY_GOAL_CURRENCY": "USDC",
+            "HARVESTPOOL_COMMUNITY_GOAL_TARGET_USDC": "1.250001",
+            "HARVESTPOOL_COMMUNITY_GOAL_TARGET_NEAR": "",
+        }
+        with patch.dict("os.environ", complete, clear=False):
+            goal = web_app._community_goal_config()
+        self.assertTrue(goal["configured"])
+        self.assertEqual(goal["targetUnits"], "1250001")
+        self.assertEqual(goal["targetYocto"], "")
+        self.assertEqual(goal["tokenId"], web_app.CANONICAL_USDC_TOKEN_ID)
+
+        mixed = {**complete, "HARVESTPOOL_COMMUNITY_GOAL_TARGET_NEAR": "1"}
+        with patch.dict("os.environ", mixed, clear=False):
+            goal = web_app._community_goal_config()
+        self.assertFalse(goal["configured"])
+        self.assertIn("cannot also configure a NEAR target", goal["configurationError"])
+
+    def test_usdc_activity_separates_ft_history_and_requires_successful_payment_receipt(self):
+        token_id = web_app.CANONICAL_USDC_TOKEN_ID
+        transaction_page = {
+            "data": [{
+                "actions": [{"action": "FUNCTION_CALL", "method": "act_proposal"}],
+                "outcomes": {"status": True},
+                "receiver_account_id": "community.sputnikv2.testnet",
+                "signer_account_id": "bob.testnet",
+                "transaction_hash": "vote-hash",
+            }],
+            "meta": {},
+        }
+        ft_page = {
+            "data": [
+                {
+                    "contract_account_id": token_id,
+                    "delta_amount": "250000",
+                    "involved_account_id": "alice.testnet",
+                    "transaction_hash": "contribution-hash",
+                    "receipt_id": "contribution-receipt",
+                    "block_timestamp": "1794430000000000000",
+                },
+                {
+                    "contract_account_id": token_id,
+                    "delta_amount": "-200000",
+                    "involved_account_id": "recipient.testnet",
+                    "transaction_hash": "vote-hash",
+                    "receipt_id": "payment-receipt",
+                    "block_timestamp": "1794432000000000000",
+                },
+                {
+                    "contract_account_id": token_id,
+                    "delta_amount": "-999999",
+                    "involved_account_id": "attacker.testnet",
+                    "transaction_hash": "vote-hash",
+                    "receipt_id": "failed-receipt",
+                    "block_timestamp": "1794432000000000000",
+                },
+            ],
+            "meta": {},
+        }
+        detail = {"data": {
+            "actions": [{"method": "act_proposal", "args": {"args_json": {"id": 9, "action": "VoteApprove"}}}],
+            "signer_account_id": "bob.testnet",
+            "block_timestamp": "1794432000000000000",
+        }}
+        receipts = {"data": {
+            "outcome": {"status": True},
+            "receipts": [{
+                "receipt_id": "payment-receipt",
+                "outcome": {"status": True},
+                "receipts": [],
+            }, {
+                "receipt_id": "failed-receipt",
+                "outcome": {"status": False},
+                "receipts": [],
+            }],
+        }}
+
+        def fake_read(path, params=None):
+            if path.endswith("/txns"):
+                return transaction_page
+            if path.endswith("/ft-txns"):
+                return ft_page
+            if path.endswith("/vote-hash/receipts"):
+                return receipts
+            if path.endswith("/vote-hash"):
+                return detail
+            raise AssertionError(path)
+
+        with patch.object(web_app, "_nearblocks_json", side_effect=fake_read):
+            result = web_app._community_activity("community.sputnikv2.testnet", token_id)
+
+        self.assertEqual(result["tokenId"], token_id)
+        self.assertEqual(result["contributions"][0]["amount"], "250000")
+        transfers = result["proposalTransactions"]["9"][0]["transfers"]
+        self.assertEqual(transfers, [{
+            "amount": "200000",
+            "receiver": "recipient.testnet",
+            "receiptId": "payment-receipt",
+            "tokenId": token_id,
+        }])
 
 
 if __name__ == "__main__":
