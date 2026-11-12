@@ -1,7 +1,7 @@
 # Community Goals on SputnikDAO
 
-Status: implementation prepared and locally tested; no DAO has been created, funded, configured, or
-transacted by this change.
+Status: native-NEAR workflow implemented, locally tested, and verified with finalized Testnet
+transactions. It remains isolated from V5 purchase escrow and is not deployed on the public site.
 
 ## Integration boundary
 
@@ -48,7 +48,7 @@ out-of-band proposal cannot be hidden by the interface.
 
 ## Verified Testnet deployment facts
 
-Public, read-only checks on 2026-11-11 established:
+Public, read-only checks before creation established:
 
 - `sputnikv2.testnet` exists and exposes the current factory views.
 - At Testnet block 277,274,970, `get_number_daos` returned `5588`.
@@ -60,8 +60,23 @@ Public, read-only checks on 2026-11-11 established:
 - That DAO's account code hash matched the factory default hash above.
 - Factory-created DAOs start with `auto_update: true`; this is not acceptable for the Community
   Goals promise. It must be changed to `false` by the member policy before contributions begin.
-- `harvestpool-community.sputnikv2.testnet` did not exist at final block 277,276,028. Account-name
-  availability is not reserved and must be rechecked immediately before an authorized creation.
+
+The authorized demonstration subsequently created and hardened
+`harvestpool-community.sputnikv2.testnet`. Read-only checks at final block `277330049` on
+2026-11-12 established:
+
+- code hash `AA4nA45vauiac3jdVwJTzSdUP3oj2r1fDaPAb2mHdgcH` and no account access keys;
+- exactly the fixed members `harvestpool-member-a-2026.testnet`, `dalamaa.testnet`, and
+  `harvestpool-farmer-2026.testnet` with a two-of-three threshold;
+- only the reviewed transfer and factory-info-update proposal/vote permissions;
+- factory `sputnikv2.testnet` with `auto_update: false`;
+- proposal `#1` approved by Member A and Member B for exactly `0.20 NEAR` to
+  `harvestpool-farmer-1.testnet`;
+- a successful matching payment receipt and a final contract-reported available amount of
+  `0.63632 NEAR`.
+
+The complete transaction references and retained browser evidence are in
+`docs/COMMUNITY_GOALS_DEMO.md`.
 
 The UI pins the reviewed DAO code hash and version. It disables every financial action if the code
 hash changes, the version changes, an access key exists, factory auto-updates remain enabled, a
