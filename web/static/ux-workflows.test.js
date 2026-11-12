@@ -48,6 +48,11 @@ test("accept and decline have distinct labels and an explicit application review
 
 test("wallet restoration and live state refresh are explicit and bounded", () => {
   assert.match(appSource, /walletStatus: "initializing"/);
+  assert.match(appSource, /WALLET_INITIALIZATION_TIMEOUT_MS = 15_000/);
+  assert.match(appSource, /WALLET_SESSION_RESTORE_TIMEOUT_MS = 3_000/);
+  assert.match(appSource, /\/static\/wallet-selector-bundle\.js/);
+  assert.match(appSource, /walletButton\.textContent = "Retry wallet"/);
+  assert.doesNotMatch(appSource, /https:\/\/esm\.sh/);
   assert.match(appSource, /state\.walletStatus = state\.accountId \? "connected" : "disconnected"/);
   assert.match(appSource, /async function refreshLiveData/);
   assert.match(appSource, /Date\.now\(\) - state\.lastLiveRefreshAt < 12_000/);

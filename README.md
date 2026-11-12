@@ -77,8 +77,10 @@ transactions; inspect the receiver, method, arguments, amount, and explorer resu
   startup command and open the printed URL. The launcher never kills another process.
 - **Package installation fails:** confirm internet access and that a corporate proxy or certificate
   policy permits PyPI. Do not use `sudo pip`.
-- **Deals or wallet controls do not load:** allow HTTPS access to FastNEAR and `esm.sh`, allow wallet
-  popups/redirects for the local URL, and confirm the wallet is on Testnet—not Mainnet.
+- **Deals or wallet controls do not load:** allow HTTPS access to FastNEAR, allow wallet
+  popups/redirects for the local URL, and confirm the wallet is on Testnet—not Mainnet. The pinned
+  Wallet Selector/Meteor browser bundle is served locally; rebuild it only after an intentional
+  dependency update with `npm ci && npm run build:wallet`.
 - **The launcher rejects configuration:** compare `.env` with `.env.example`; the default launcher
   intentionally runs only the canonical V5 contract pair and Circle Testnet token.
 
@@ -90,6 +92,9 @@ cp .env.example .env
 ./start.sh
 ./status.sh
 ```
+
+The checked-in example contains only public Testnet identifiers and enables the verified Shared
+Community Equipment DAO view. It contains no wallet credential or signing key.
 
 Use `./restart.sh` and `./stop.sh` for the managed process. These scripts require `lsof`, always
 manage V5 on port 5011, and refuse an unrelated listener. Windows does not need Git Bash or WSL;

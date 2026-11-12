@@ -77,6 +77,16 @@ class PortableStartupTests(unittest.TestCase):
         self.assertIn(CANONICAL_CONTRACT_ID, page)
         self.assertIn(CANONICAL_V3_CONTRACT_ID, page)
 
+    def test_checked_in_environment_enables_verified_community_fund(self):
+        values = run.read_env_file(run.ROOT / ".env.example")
+        self.assertEqual(
+            values["HARVESTPOOL_COMMUNITY_DAO_ID"],
+            "harvestpool-community.sputnikv2.testnet",
+        )
+        self.assertEqual(values["HARVESTPOOL_COMMUNITY_GOAL_CURRENCY"], "USDC")
+        self.assertEqual(values["HARVESTPOOL_COMMUNITY_GOAL_TARGET_USDC"], "1.00")
+        self.assertEqual(values["HARVESTPOOL_COMMUNITY_EVIDENCE_PAYMENT_PROPOSAL_ID"], "2")
+
 
 if __name__ == "__main__":
     unittest.main()

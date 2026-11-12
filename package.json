@@ -1,0 +1,18 @@
+{
+  "name": "harvestpool-v5-browser",
+  "private": true,
+  "scripts": {
+    "build:wallet": "esbuild web/wallet-selector-entry.js --bundle --format=esm --platform=browser --target=es2022 --define:global=globalThis --inject:web/browser-polyfills.js --minify --outfile=web/static/wallet-selector-bundle.js"
+  },
+  "dependencies": {
+    "@near-wallet-selector/core": "10.1.4",
+    "@near-wallet-selector/meteor-wallet": "10.1.4",
+    "buffer": "6.0.3",
+    "near-api-js": "6.5.1",
+    "process": "0.11.10",
+    "util": "0.12.5"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12"
+  }
+}

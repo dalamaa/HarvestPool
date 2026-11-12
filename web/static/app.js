@@ -37,6 +37,8 @@
   if (!actionCenterTools) throw new Error("HarvestPool action center module did not load.");
   const communityFundTools = window.HarvestPoolCommunityFund;
   if (!communityFundTools) throw new Error("HarvestPool Community Fund helpers did not load.");
+  const walletInitializationTools = window.HarvestPoolWalletInitialization;
+  if (!walletInitializationTools) throw new Error("HarvestPool wallet initialization helpers did not load.");
   const pendingActionStore = confirmationTools.pendingStore(window.localStorage);
   const submissionGate = confirmationTools.actionGate();
   const state = {
@@ -116,8 +118,9 @@
     "decline_decision",
     "expire_decision",
   ];
-  const WALLET_SELECTOR_VERSION = "10.1.4";
-  const METEOR_SDK_NEAR_API_VERSION = "6.5.1";
+  const WALLET_INITIALIZATION_TIMEOUT_MS = 15_000;
+  const WALLET_SESSION_RESTORE_TIMEOUT_MS = 3_000;
+  const WALLET_BUNDLE_VERSION = "2026-11-12.3";
   const YOCTO_PER_NEAR = 10n ** 24n;
   const PRICE_SCALE = 1_000_000n;
   const RECONCILIATION_MAX_AGE_MS = 5 * 60_000;
@@ -126,6 +129,7 @@
   const EXPLORE_REFRESH_INTERVAL_MS = 15_000;
   const CREATE_SUBMITTED_KEY = "harvestpool:create-submitted:v1";
   let exploreRefreshTimer = null;
+  let walletInitializationAttempt = 0;
 
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
@@ -925,28 +929,71 @@
   }
 
   async function setupNear() {
+    const attempt = ++walletInitializationAttempt;
     state.near = { networkId: "testnet", nodeUrl: "https://test.rpc.fastnear.com" };
+    state.walletStatus = "initializing";
+    state.walletError = null;
+    updateWalletUi();
     try {
-      const [{ setupWalletSelector, actionCreators }, { setupMeteorWallet }] = await Promise.all([
-        import(`https://esm.sh/@near-wallet-selector/core@${WALLET_SELECTOR_VERSION}?bundle`),
-        // Meteor SDK 1.0.24 requires near-api-js ^6.0.0. Pin the ESM dependency
-        // so esm.sh does not resolve the incompatible latest major version.
-        import(`https://esm.sh/@near-wallet-selector/meteor-wallet@${WALLET_SELECTOR_VERSION}?bundle&deps=near-api-js@${METEOR_SDK_NEAR_API_VERSION}`),
-      ]);
-      state.selector = await setupWalletSelector({
-        network: "testnet",
-        modules: [setupMeteorWallet()],
-      });
-      state.actionCreators = actionCreators;
-      state.wallet = await state.selector.wallet("meteor-wallet");
-      await syncWalletAccount();
+      const initialized = await walletInitializationTools.withTimeout((async () => {
+        const { setupWalletSelector, actionCreators, setupMeteorWallet } = await import(
+          `/static/wallet-selector-bundle.js?v=${WALLET_BUNDLE_VERSION}`
+        );
+        const selector = await setupWalletSelector({
+          network: "testnet",
+          modules: [setupMeteorWallet()],
+        });
+        const wallet = await selector.wallet("meteor-wallet");
+        return { actionCreators, selector, wallet };
+      })(), WALLET_INITIALIZATION_TIMEOUT_MS);
+      if (attempt !== walletInitializationAttempt) return false;
+      state.selector = initialized.selector;
+      state.actionCreators = initialized.actionCreators;
+      state.wallet = initialized.wallet;
+      let accounts = [];
+      try {
+        accounts = await walletInitializationTools.withTimeout(
+          state.wallet.getAccounts(),
+          WALLET_SESSION_RESTORE_TIMEOUT_MS,
+          "Wallet session restoration timed out.",
+        );
+      } catch (error) {
+        console.info("Meteor has no restorable wallet session.", error);
+      }
+      await applyWalletAccounts(accounts);
       state.selector.store?.observable?.subscribe(() => syncWalletAccount());
+      return true;
     } catch (error) {
+      if (attempt !== walletInitializationAttempt) return false;
+      console.error("HarvestPool wallet initialization failed.", error);
       state.walletError = error;
       state.wallet = null;
-      state.walletStatus = "disconnected";
+      state.walletStatus = "unavailable";
+      showToast(walletInitializationTools.failureMessage(error), "error");
     }
     updateWalletUi();
+    return false;
+  }
+
+  async function applyWalletAccounts(accounts) {
+    const previousAccountId = state.accountId;
+    state.accountId = accounts?.[0]?.accountId || null;
+    state.walletStatus = state.accountId ? "connected" : "disconnected";
+    if (state.accountId && !previousAccountId) migrateUnconnectedCreateDraft();
+    state.memberStatus = null;
+    state.fundedMembership = new Map();
+    updateWalletUi();
+    if (state.dataLoaded) {
+      await loadWalletState();
+      updateWalletUi();
+      const accountChanged = String(previousAccountId || "") !== String(state.accountId || "");
+      if (accountChanged || !editableSurfaceOpen()) renderCurrentPage();
+      else restoreDraftsInDom();
+    } else if (appConfig.page === "community_fund") {
+      await loadCommunityFundData();
+      updateWalletUi();
+      renderCurrentPage();
+    }
   }
 
   async function syncWalletAccount() {
@@ -955,28 +1002,11 @@
       return;
     }
     try {
-      const previousAccountId = state.accountId;
-      const accounts = await state.wallet.getAccounts();
-      state.accountId = accounts?.[0]?.accountId || null;
-      state.walletStatus = state.accountId ? "connected" : "disconnected";
-      if (state.accountId && !previousAccountId) migrateUnconnectedCreateDraft();
-      state.memberStatus = null;
-      state.fundedMembership = new Map();
-      updateWalletUi();
-      if (state.dataLoaded) {
-        await loadWalletState();
-        updateWalletUi();
-        const accountChanged = String(previousAccountId || "") !== String(state.accountId || "");
-        if (accountChanged || !editableSurfaceOpen()) renderCurrentPage();
-        else restoreDraftsInDom();
-      } else if (appConfig.page === "community_fund") {
-        await loadCommunityFundData();
-        updateWalletUi();
-        renderCurrentPage();
-      }
+      await applyWalletAccounts(await state.wallet.getAccounts());
     } catch (_error) {
       state.accountId = null;
       state.walletStatus = "disconnected";
+      updateWalletUi();
     }
   }
 
@@ -1655,7 +1685,12 @@
 
   async function connectWallet() {
     if (!state.wallet) {
-      showToast(state.walletError ? "The Meteor connector could not load. Reload the page and check the wallet guide." : "The Meteor connector is still loading. Reload the page and try again.", "error");
+      if (state.walletError) {
+        const ready = await setupNear();
+        if (ready) return connectWallet();
+      } else {
+        showToast("The Meteor connector is still loading. Wait a moment and try again.", "error");
+      }
       return;
     }
     try {
@@ -1709,7 +1744,23 @@
       }
       return;
     }
-    if (walletButton) { walletButton.disabled = false; walletButton.removeAttribute("aria-busy"); }
+    if (walletButton) {
+      walletButton.disabled = false;
+      walletButton.removeAttribute("aria-busy");
+      walletButton.removeAttribute("title");
+      walletButton.removeAttribute("aria-label");
+    }
+    if (state.walletStatus === "unavailable") {
+      if (walletButton) {
+        walletButton.textContent = "Retry wallet";
+        walletButton.title = "Wallet setup failed. Retry wallet initialization.";
+        walletButton.setAttribute("aria-label", "Wallet setup failed. Retry wallet initialization.");
+      }
+      if (accountLabel) accountLabel.textContent = "Wallet unavailable";
+      if (copy) copy.textContent = walletInitializationTools.failureMessage(state.walletError);
+      if (signout) signout.hidden = true;
+      return;
+    }
     if (state.accountId) {
       if (walletButton) walletButton.textContent = shortAccount(state.accountId);
       if (accountLabel) accountLabel.textContent = state.accountId;
@@ -1731,9 +1782,7 @@
     } else {
       if (walletButton) walletButton.textContent = "Connect wallet";
       if (accountLabel) accountLabel.textContent = "Not connected";
-      if (copy) copy.textContent = state.walletError
-        ? "The Meteor connector could not load. Public browsing still works; reload after checking the wallet guide."
-        : "Meteor Wallet is ready on NEAR Testnet. Connect the account you intend to use to check eligibility and sign actions.";
+      if (copy) copy.textContent = "Meteor Wallet is ready on NEAR Testnet. Connect the account you intend to use to check eligibility and sign actions.";
       if (signout) signout.hidden = true;
     }
   }
@@ -4394,7 +4443,11 @@
 
   function bindGlobalEvents() {
     normalizeExploreFilters();
-    $("#wallet-button")?.addEventListener("click", () => state.accountId ? openWalletPanel() : connectWallet());
+    $("#wallet-button")?.addEventListener("click", () => {
+      if (state.accountId) openWalletPanel();
+      else if (state.walletStatus === "unavailable") setupNear();
+      else connectWallet();
+    });
     $("#wallet-panel-close")?.addEventListener("click", closeWalletPanel);
     $("#wallet-signout")?.addEventListener("click", disconnectWallet);
     $("#menu-toggle")?.addEventListener("click", () => {
