@@ -35,6 +35,8 @@
   }
   const actionCenterTools = window.HarvestPoolActionCenter;
   if (!actionCenterTools) throw new Error("HarvestPool action center module did not load.");
+  const communityFundTools = window.HarvestPoolCommunityFund;
+  if (!communityFundTools) throw new Error("HarvestPool Community Fund helpers did not load.");
   const pendingActionStore = confirmationTools.pendingStore(window.localStorage);
   const submissionGate = confirmationTools.actionGate();
   const state = {
@@ -69,6 +71,21 @@
     openFinancialOperationsId: null,
     refreshingLiveData: null,
     lastLiveRefreshAt: 0,
+    communityFund: {
+      loaded: false,
+      error: null,
+      config: null,
+      policy: null,
+      factoryInfo: null,
+      version: null,
+      availableAmount: null,
+      proposals: [],
+      proposalsComplete: false,
+      accessKeys: null,
+      codeHash: null,
+      activity: null,
+      safety: null,
+    },
   };
 
   const CHANGE_METHODS = [
@@ -954,6 +971,10 @@
         const accountChanged = String(previousAccountId || "") !== String(state.accountId || "");
         if (accountChanged || !editableSurfaceOpen()) renderCurrentPage();
         else restoreDraftsInDom();
+      } else if (appConfig.page === "community_fund") {
+        await loadCommunityFundData();
+        updateWalletUi();
+        renderCurrentPage();
       }
     } catch (_error) {
       state.accountId = null;
@@ -985,6 +1006,76 @@
     if (payload.error) throw new Error(payload.error.message || "The testnet read failed.");
     const raw = new TextDecoder().decode(new Uint8Array(payload.result.result));
     return JSON.parse(raw);
+  }
+
+  async function queryRpc(params) {
+    if (!state.near) throw new Error("The testnet connection is not ready.");
+    const response = await fetch(state.near.nodeUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: "harvestpool-community-fund", method: "query", params }),
+    });
+    if (!response.ok) throw new Error(`The testnet read returned HTTP ${response.status}.`);
+    const payload = await response.json();
+    if (payload.error) throw new Error(payload.error.message || "The testnet read failed.");
+    return payload.result;
+  }
+
+  async function loadCommunityFundData() {
+    const fund = state.communityFund;
+    if (!appConfig.communityDaoId) {
+      fund.loaded = true;
+      fund.error = null;
+      return fund;
+    }
+    try {
+      const daoId = appConfig.communityDaoId;
+      const [config, policy, factoryInfo, version, availableAmount, lastProposalId, accessKeyResult, accountResult, activityResult] = await Promise.all([
+        viewOnContract(daoId, "get_config"),
+        viewOnContract(daoId, "get_policy"),
+        viewOnContract(daoId, "get_factory_info"),
+        viewOnContract(daoId, "version"),
+        viewOnContract(daoId, "get_available_amount"),
+        viewOnContract(daoId, "get_last_proposal_id"),
+        queryRpc({ request_type: "view_access_key_list", finality: "final", account_id: daoId }),
+        queryRpc({ request_type: "view_account", finality: "final", account_id: daoId }),
+        fetch("/api/community-fund/activity", { headers: { Accept: "application/json" } }).then(async (response) => {
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload.error || "Transaction history is unavailable.");
+          return payload;
+        }).catch((error) => ({ error: String(error?.message || error) })),
+      ]);
+      const proposalCount = Number(lastProposalId || 0);
+      const proposalLimit = Math.min(proposalCount, 500);
+      const proposals = [];
+      for (let fromIndex = 0; fromIndex < proposalLimit; fromIndex += 100) {
+        const batch = await viewOnContract(daoId, "get_proposals", {
+          from_index: fromIndex,
+          limit: Math.min(100, proposalLimit - fromIndex),
+        });
+        proposals.push(...(batch || []));
+      }
+      fund.config = config;
+      fund.policy = policy;
+      fund.factoryInfo = factoryInfo;
+      fund.version = version;
+      fund.availableAmount = String(availableAmount ?? "0");
+      fund.proposals = proposals.reverse();
+      fund.proposalsComplete = proposalCount <= 500;
+      fund.accessKeys = accessKeyResult?.keys || [];
+      fund.codeHash = String(accountResult?.code_hash || "");
+      fund.activity = activityResult;
+      fund.safety = communityFundTools.analyzePolicy(policy, factoryInfo, fund.accessKeys, {
+        codeHash: fund.codeHash,
+        expectedCodeHash: appConfig.communityDaoCodeHash,
+        version,
+      });
+      fund.error = null;
+    } catch (error) {
+      fund.error = error;
+    }
+    fund.loaded = true;
+    return fund;
   }
 
   async function view(methodName, args = {}) {
@@ -1030,6 +1121,13 @@
     if (!force && Date.now() - state.lastLiveRefreshAt < 12_000) return false;
     if (state.refreshingLiveData) return state.refreshingLiveData;
     state.refreshingLiveData = (async () => {
+      if (appConfig.page === "community_fund") {
+        await loadCommunityFundData();
+        state.lastLiveRefreshAt = Date.now();
+        updateWalletUi();
+        if (render) renderCurrentPage();
+        return true;
+      }
       await loadBaseData();
       const purchaseId = pagePurchaseId();
       if (["details", "agreement", "issue_form", "supplier_invitation"].includes(appConfig.page) && purchaseId !== null) {
@@ -1537,8 +1635,10 @@
     }
     try {
       const accounts = await state.wallet.signIn({
-        contractId: appConfig.contractId,
-        methodNames: CHANGE_METHODS,
+        contractId: appConfig.page === "community_fund" && appConfig.communityDaoId
+          ? appConfig.communityDaoId
+          : appConfig.contractId,
+        methodNames: appConfig.page === "community_fund" ? ["add_proposal", "act_proposal"] : CHANGE_METHODS,
         successUrl: window.location.href,
         failureUrl: window.location.href,
       });
@@ -1590,7 +1690,12 @@
       if (accountLabel) accountLabel.textContent = state.accountId;
       const supplier = state.suppliers.some((item) => String(item.account_id) === String(state.accountId));
       const openMembership = ["V4", "V5"].includes(String(state.config?.version || appConfig.contractVersion || "").toUpperCase());
-      if (copy) copy.textContent = supplier
+      if (copy && appConfig.page === "community_fund") {
+        const safety = state.communityFund.safety;
+        copy.textContent = safety?.members?.includes(state.accountId)
+          ? "Wallet connected. This account is a Community Goals voting member."
+          : "Wallet connected. This account can read the public fund but is not a voting member.";
+      } else if (copy) copy.textContent = supplier
         ? "Wallet connected. This account is an eligible pilot supplier. Supplier actions do not require buyer community membership."
         : openMembership
           ? "Wallet connected. Buyer eligibility is checked for each Group Deal when contributing."
@@ -1711,6 +1816,160 @@
     }
   }
 
+  function communityTime(ns) {
+    try {
+      const milliseconds = Number(BigInt(String(ns || "0")) / 1_000_000n);
+      return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(milliseconds));
+    } catch (_error) {
+      return "Time unavailable";
+    }
+  }
+
+  function communityExplorerLink(transactionHash, label = "View transaction") {
+    if (!transactionHash) return '<span class="fund-reference-missing">Transaction reference is still being indexed</span>';
+    return `<a class="text-link" href="https://testnet.nearblocks.io/txns/${encodeURIComponent(transactionHash)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)} <span aria-hidden="true">↗</span></a>`;
+  }
+
+  function communityVoteCounts(allocation) {
+    const votes = Object.values(allocation.votes || {});
+    return {
+      approve: votes.filter((vote) => vote === "Approve").length,
+      reject: votes.filter((vote) => vote === "Reject").length,
+      remove: votes.filter((vote) => vote === "Remove").length,
+    };
+  }
+
+  function verifiedCommunityPayment(allocation, activity) {
+    return communityFundTools.verifiedPayment(allocation, activity);
+  }
+
+  function communityProposalCard(proposal, safety, activity, goal) {
+    const allocation = communityFundTools.allocationFromProposal(proposal);
+    if (!allocation) return "";
+    const counts = communityVoteCounts(allocation);
+    const required = safety?.requiredVotes || 0;
+    const ownVote = state.accountId ? allocation.votes[state.accountId] : null;
+    const payment = verifiedCommunityPayment(allocation, activity);
+    const matchesGoalRecipient = !goal?.recipient || allocation.receiverId === goal.recipient;
+    const canVote = Boolean(
+      safety?.ready && state.accountId && safety.voterAccounts.has(state.accountId)
+      && allocation.status === "InProgress" && !ownVote && !payment
+    );
+    const decidingVote = canVote && counts.approve + 1 >= required;
+    const voters = Object.entries(allocation.votes || {}).map(([account, vote]) =>
+      `<li><code>${escapeHtml(account)}</code><strong>${escapeHtml(vote)}</strong></li>`
+    ).join("");
+    const statusCopy = payment
+      ? `Paid by the DAO · contract status ${allocation.status}`
+      : allocation.status === "Approved"
+        ? "Approved · payment receipt unverified"
+      : allocation.status === "InProgress"
+        ? "Awaiting member votes"
+        : allocation.status;
+    const actions = canVote
+      ? matchesGoalRecipient
+        ? `<div class="fund-proposal-actions"><button class="button button-primary" type="button" data-community-action="vote" data-proposal-id="${allocation.id}" data-vote-action="VoteApprove">${decidingVote ? "Approve & execute payment" : "Approve goal payment"}</button><button class="button button-outline" type="button" data-community-action="vote" data-proposal-id="${allocation.id}" data-vote-action="VoteReject">Reject</button></div><p class="field-help">${decidingVote ? "This approval reaches the required threshold. SputnikDAO will send the payment in the same on-chain action if execution succeeds." : `The payment executes automatically when ${required} approvals are recorded.`}</p>`
+        : `<div class="fund-proposal-actions"><button class="button button-outline" type="button" data-community-action="vote" data-proposal-id="${allocation.id}" data-vote-action="VoteReject">Reject different recipient</button></div><p class="field-help">HarvestPool will not submit an approval for a recipient that differs from the configured goal.</p>`
+      : ownVote
+        ? `<p class="fund-own-vote">Your recorded vote: <strong>${escapeHtml(ownVote)}</strong></p>`
+        : "";
+    return `<article class="fund-proposal-card"><div class="fund-proposal-top"><span class="status ${payment ? "status-funded" : allocation.status === "InProgress" || allocation.status === "Approved" ? "status-pending" : "status-failed"}"><span></span>${escapeHtml(statusCopy)}</span><span class="section-kicker">Proposal #${allocation.id}</span></div><h3>${communityFundTools.formatNear(allocation.amount)} Testnet NEAR to <code>${escapeHtml(allocation.receiverId)}</code></h3><p class="proposal-recipient-check ${matchesGoalRecipient ? "matches" : "differs"}">${matchesGoalRecipient ? "Matches the configured Community Goal recipient" : "Warning: this proposal names a different recipient than the configured Community Goal"}</p><p>${escapeHtml(allocation.reason)}</p><dl class="fund-proposal-details"><div><dt>Proposed by</dt><dd><code>${escapeHtml(allocation.proposer)}</code></dd></div><div><dt>Required approval</dt><dd>${required} of ${safety?.memberCount || 0} voting members</dd></div><div><dt>Votes</dt><dd>${counts.approve} approve · ${counts.reject} reject${counts.remove ? ` · ${counts.remove} remove` : ""}</dd></div><div><dt>Submitted</dt><dd>${escapeHtml(communityTime(allocation.submissionTime))}</dd></div></dl>${voters ? `<details class="fund-voters"><summary>See each recorded vote</summary><ul>${voters}</ul></details>` : ""}${payment || allocation.status === "Approved" ? `<div class="fund-payment-reference"><strong>${payment ? "Verified payment record" : "Payment is not yet verified"}</strong>${communityExplorerLink(payment?.transactionHash, "Open deciding vote and payment receipts")}</div>` : actions}</article>`;
+  }
+
+  function communityHistoryMarkup(fund, allocations, goal) {
+    const activity = fund.activity;
+    if (!activity || activity.error) {
+      return `<div class="fund-history-unavailable"><strong>Transaction history is unavailable</strong><p>${escapeHtml(activity?.error || "The indexer did not return authoritative activity.")} Balance and proposal actions still come directly from the DAO contract.</p><button class="button button-outline button-small" type="button" data-community-action="refresh">Retry history</button></div>`;
+    }
+    const records = (activity.contributions || []).map((item) => ({
+      type: "Contribution",
+      amount: item.amount,
+      account: item.contributor,
+      reason: `Direct contribution toward ${goal?.title || "the Community Goal"}`,
+      timestamp: item.timestamp,
+      transactionHash: item.transactionHash,
+    }));
+    allocations.forEach((allocation) => {
+      const payment = verifiedCommunityPayment(allocation, activity);
+      if (!payment) return;
+      records.push({
+        type: "Approved payment",
+        amount: allocation.amount,
+        account: allocation.receiverId,
+        reason: allocation.reason,
+        timestamp: payment.timestamp || allocation.submissionTime,
+        transactionHash: payment.transactionHash,
+        proposer: allocation.proposer,
+        approvers: Object.entries(allocation.votes || {}).filter(([, vote]) => vote === "Approve").map(([account]) => account),
+      });
+    });
+    records.sort((left, right) => {
+      try { return BigInt(right.timestamp) > BigInt(left.timestamp) ? 1 : -1; } catch (_error) { return 0; }
+    });
+    if (!records.length) return '<div class="dashboard-empty compact"><p>No direct contributions or approved payments are recorded yet.</p></div>';
+    return `<div class="fund-history-list">${records.map((record) => `<article class="fund-history-row"><div><span class="section-kicker">${escapeHtml(record.type)}</span><strong>${communityFundTools.formatNear(record.amount)} Testnet NEAR</strong><p>${escapeHtml(record.reason)}</p></div><dl><div><dt>${record.type === "Contribution" ? "From" : "To"}</dt><dd><code>${escapeHtml(record.account)}</code></dd></div>${record.proposer ? `<div><dt>Proposed by</dt><dd><code>${escapeHtml(record.proposer)}</code></dd></div><div><dt>Approved by</dt><dd>${record.approvers.map((account) => `<code>${escapeHtml(account)}</code>`).join(", ")}</dd></div>` : ""}<div><dt>Date</dt><dd>${escapeHtml(communityTime(record.timestamp))}</dd></div></dl>${communityExplorerLink(record.transactionHash)}</article>`).join("")}</div>`;
+  }
+
+  function renderCommunityFundPage() {
+    const root = $("#community-fund-root");
+    if (!root) return;
+    const fund = state.communityFund;
+    const goal = appConfig.communityGoal || {};
+    if (!appConfig.communityDaoId || !goal.configured) {
+      const configurationNote = goal.configurationError
+        ? `<p class="fund-configuration-error">${escapeHtml(goal.configurationError)}</p>`
+        : "";
+      root.innerHTML = `<div class="fund-setup-state"><span class="section-kicker">Configuration required</span><h2>Community Goals is not live yet.</h2><p>The SputnikDAO integration is prepared, but one dedicated goal and its hardened DAO treasury must be authorized and configured together. No goal balance, progress, vote, or payment is presented as real.</p>${configurationNote}<p class="fund-account-line">Expected factory: <code>${escapeHtml(appConfig.communityDaoFactoryId || "sputnikv2.testnet")}</code></p></div>`;
+      return;
+    }
+    if (!fund.loaded) return;
+    if (fund.error) {
+      showError(root, "Community Goal reads are unavailable", "HarvestPool could not verify the goal treasury contract, policy, balance, proposals, factory permissions, and access keys. Financial actions stay disabled.", '<button class="button button-outline" type="button" data-community-action="refresh">Retry authoritative reads</button>');
+      return;
+    }
+    const safety = fund.safety;
+    const allocations = fund.proposals.map(communityFundTools.allocationFromProposal).filter(Boolean);
+    const activityComplete = fund.activity && !fund.activity.error && fund.activity.complete;
+    const contributed = activityComplete
+      ? (fund.activity.contributions || []).reduce((total, item) => total + BigInt(item.amount), 0n).toString()
+      : null;
+    const goalSnapshot = communityFundTools.goalSnapshot(goal, contributed, allocations, fund.activity);
+    const verifiedPayments = allocations.filter((allocation) => verifiedCommunityPayment(allocation, fund.activity));
+    const spent = fund.proposalsComplete && activityComplete
+      ? verifiedPayments.reduce((total, allocation) => total + BigInt(allocation.amount), 0n).toString()
+      : null;
+    const pending = fund.proposalsComplete ? communityFundTools.sumAllocations(fund.proposals, ["InProgress"]) : null;
+    const approvedUnverified = fund.proposalsComplete
+      ? allocations.filter((allocation) => allocation.status === "Approved" && !verifiedCommunityPayment(allocation, fund.activity))
+        .reduce((total, allocation) => total + BigInt(allocation.amount), 0n).toString()
+      : null;
+    const isMemberAccount = Boolean(state.accountId && safety.members.includes(state.accountId));
+    const canPropose = Boolean(state.accountId && safety.proposerAccounts.has(state.accountId));
+    const safetyMarkup = safety.ready
+      ? `<div class="fund-safety-ready"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4 7v5c0 4.5 3.4 7.9 8 9 4.6-1.1 8-4.5 8-9V7l-8-4Z"/><path d="m8.5 12 2.2 2.2 4.8-5"/></svg><div><strong>Contract protections verified</strong><span>No account access keys · factory auto-updates off · ${safety.requiredVotes} of ${safety.memberCount} member approvals required · no policy, upgrade, or arbitrary-call permission</span></div></div>`
+      : `<div class="fund-safety-blocked" role="alert"><strong>Financial actions are disabled</strong><p>HarvestPool cannot make the no-unilateral-withdrawal promise for this DAO:</p><ul>${safety.reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}</ul></div>`;
+    const connectMarkup = !state.accountId
+      ? '<button class="button button-dark" type="button" data-connect-wallet>Connect wallet to contribute or vote</button>'
+      : `<div class="fund-membership ${isMemberAccount ? "is-member" : ""}"><strong>${isMemberAccount ? "Voting member and contributor" : "Contributor · not a voting member"}</strong><span><code>${escapeHtml(state.accountId)}</code>${isMemberAccount ? " can contribute, propose the goal payment, and vote under the DAO policy." : " can contribute, but is not in the fixed DAO voting group."}</span></div>`;
+    const contributionForm = safety.ready && state.accountId && goalSnapshot
+      && BigInt(goalSnapshot.contributed) < BigInt(goal.targetYocto)
+      ? `<form class="fund-action-card" data-community-contribution novalidate><span class="section-kicker">Contribute to this goal</span><h2>Help fund ${escapeHtml(goal.title)}</h2><p>This sends native Testnet NEAR directly from your wallet to the dedicated DAO treasury. Any connected Testnet wallet may contribute; only configured DAO members can propose or vote. Contributions are public and the contract does not provide personal withdrawals or automatic refunds.</p><label for="fund-contribution-amount">Amount in Testnet NEAR</label><input id="fund-contribution-amount" name="amount" type="number" inputmode="decimal" min="0.000001" step="0.000001" required><div class="form-error-summary" tabindex="-1" role="alert" hidden></div><button class="button button-primary" type="submit">Review goal contribution</button></form>`
+      : "";
+    const proposalForm = safety.ready && canPropose && activityComplete && goalSnapshot
+      && BigInt(goalSnapshot.spent) < BigInt(goal.targetYocto)
+      ? `<form class="fund-action-card" data-community-proposal novalidate><span class="section-kicker">Propose the goal payment</span><h2>Ask members to approve payment</h2><div class="goal-fixed-recipient"><span>Configured goal recipient</span><code>${escapeHtml(goal.recipient)}</code><small>The HarvestPool journey fixes this recipient, but SputnikDAO itself relies on member review and does not enforce a recipient allowlist.</small></div><div class="field"><label for="fund-allocation-amount">Amount in Testnet NEAR</label><input id="fund-allocation-amount" name="amount" type="number" inputmode="decimal" min="0.000001" step="0.000001" required></div><div class="field"><label for="fund-allocation-reason">Why should members approve this payment?</label><textarea id="fund-allocation-reason" name="reason" maxlength="500" rows="3" required></textarea></div><p class="field-help">Creating a proposal attaches exactly ${communityFundTools.formatNear(fund.policy.proposal_bond)} Testnet NEAR as the DAO’s on-chain proposal bond. The recipient and amount become part of the public proposal; payment occurs only after the required approvals.</p><div class="form-error-summary" tabindex="-1" role="alert" hidden></div><button class="button button-primary" type="submit">Review goal payment proposal</button></form>`
+      : "";
+    const proposalCards = fund.proposals.map((proposal) => communityProposalCard(proposal, safety, fund.activity, goal)).filter(Boolean).join("");
+    const goalProgress = goalSnapshot
+      ? `<div class="goal-progress" role="progressbar" aria-label="Verified contributions toward ${escapeHtml(goal.title)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.floor(goalSnapshot.progressBasisPoints / 100)}" aria-valuetext="${escapeHtml(`${communityFundTools.formatNear(goalSnapshot.contributed)} of ${communityFundTools.formatNear(goalSnapshot.target)} Testnet NEAR contributed`)}"><span style="width:${goalSnapshot.progressBasisPoints / 100}%"></span></div><div class="goal-progress-label"><strong>${communityFundTools.formatNear(goalSnapshot.contributed)} Testnet NEAR verified</strong><span>of ${communityFundTools.formatNear(goalSnapshot.target)} target</span></div>`
+      : '<div class="goal-progress-unavailable">Verified contribution progress is unavailable until complete indexed history is available.</div>';
+    const voteRuleCopy = safety.ready
+      ? `Only the fixed DAO members shown by the policy can propose or vote, and ${safety.requiredVotes} approvals are required.`
+      : "Voting and payment actions remain disabled because the DAO policy did not pass verification.";
+    const goalCard = `<section class="community-goal-card" aria-labelledby="community-goal-heading"><div class="goal-card-top"><div><span class="section-kicker">One dedicated Community Goal</span><h2 id="community-goal-heading">${escapeHtml(goal.title)}</h2></div><span class="status ${goalSnapshot?.status === "Approved payment recorded" ? "status-funded" : "status-pending"}"><span></span>${escapeHtml(goalSnapshot?.status || "Verification unavailable")}</span></div><p class="goal-purpose">${escapeHtml(goal.purpose)}</p>${goalProgress}<dl class="goal-details"><div><dt>Target</dt><dd>${communityFundTools.formatNear(goal.targetYocto)} Testnet NEAR</dd></div><div><dt>Recipient</dt><dd><code>${escapeHtml(goal.recipient)}</code></dd></div><div><dt>Approved and paid</dt><dd>${goalSnapshot ? `${communityFundTools.formatNear(goalSnapshot.spent)} Testnet NEAR` : "Unavailable"}</dd></div><div><dt>Who decides</dt><dd>${safety.ready ? `${safety.requiredVotes} of ${safety.memberCount} fixed DAO members` : "DAO policy verification failed"}</dd></div></dl><p class="goal-boundary-note">The target and purpose explain this demonstration goal; they do not create goal-specific escrow, automatic release, or refunds. Verified contributions are direct transfers to this one DAO treasury. Members must approve a separate on-chain payment proposal before money leaves.</p></section>`;
+    root.innerHTML = `${goalCard}${safetyMarkup}<section class="fund-overview" aria-labelledby="fund-overview-heading"><div class="fund-overview-heading"><div><span class="section-kicker">Authoritative treasury overview</span><h2 id="fund-overview-heading">Goal treasury</h2><p><code>${escapeHtml(appConfig.communityDaoId)}</code> · SputnikDAO ${escapeHtml(fund.version)}</p></div>${connectMarkup}</div><div class="fund-stat-grid"><div><span>Verified contributions</span><strong>${contributed === null ? "Unavailable" : `${communityFundTools.formatNear(contributed)} Ⓝ`}</strong><small>${activityComplete ? "Successful direct transfers indexed on Testnet; deployment reserves are separate" : "Hidden until complete indexed history is available"}</small></div><div><span>Available balance</span><strong>${communityFundTools.formatNear(fund.availableAmount)} Ⓝ</strong><small>DAO contract balance after storage and locked proposal bonds</small></div><div><span>Total spent</span><strong>${spent === null ? "Unavailable" : `${communityFundTools.formatNear(spent)} Ⓝ`}</strong><small>All proposals with an exact successful DAO transfer receipt</small></div><div><span>Awaiting member approval</span><strong>${pending === null ? "Unavailable" : `${communityFundTools.formatNear(pending)} Ⓝ`}</strong><small>Proposed payments still awaiting votes</small></div><div><span>Approved, receipt unverified</span><strong>${approvedUnverified === null ? "Unavailable" : `${communityFundTools.formatNear(approvedUnverified)} Ⓝ`}</strong><small>Not counted as spent until a matching receipt is indexed</small></div></div><p class="fund-public-note">Any connected Testnet wallet can contribute. ${escapeHtml(voteRuleCopy)} All goal activity is public on NEAR Testnet; it is not private or anonymous.</p></section>${contributionForm || proposalForm ? `<section class="fund-action-grid">${contributionForm}${proposalForm}</section>` : ""}<section class="fund-proposals" aria-labelledby="fund-proposals-heading"><div class="section-heading-inline"><div><span class="section-kicker">Recorded member decisions</span><h2 id="fund-proposals-heading">Goal payment proposals</h2></div><span class="meta-label">${allocations.length} proposals</span></div>${proposalCards || '<div class="dashboard-empty compact"><p>No native-NEAR goal payment proposals are recorded yet.</p></div>'}</section><section class="fund-history" aria-labelledby="fund-history-heading"><div class="section-heading-inline"><div><span class="section-kicker">Public transaction record</span><h2 id="fund-history-heading">Verified money in and payments out</h2></div><a class="text-link" href="${escapeHtml(fund.activity?.sourceUrl || `https://testnet.nearblocks.io/address/${appConfig.communityDaoId}`)}" target="_blank" rel="noopener noreferrer">Powered by NearBlocks <span aria-hidden="true">↗</span></a></div>${communityHistoryMarkup(fund, allocations, goal)}</section>`;
+  }
+
   function renderCurrentPage() {
     if (appConfig.page === "explore") renderExplore();
     if (appConfig.page === "details") {
@@ -1729,6 +1988,7 @@
       renderFarmer();
       renderFarmerPaymentTotals();
     }
+    if (appConfig.page === "community_fund") renderCommunityFundPage();
     if (appConfig.page === "create" && state.recoveredCreateRecord) renderRecoveredCreateSuccess(state.recoveredCreateRecord);
     decorateMoneyText();
     restoreDraftsInDom();
@@ -3694,6 +3954,233 @@
     "decision-vote", "resolve-issue", "agree-decision", "decline-decision", "expire-decision",
   ]);
 
+  async function handleCommunityContribution(form) {
+    const summary = $(".form-error-summary", form);
+    if (!form.reportValidity()) {
+      setErrorSummary(summary, "Enter a contribution amount greater than zero.");
+      return;
+    }
+    const amountYocto = communityFundTools.decimalToYocto(form.elements.amount.value);
+    if (!amountYocto) {
+      setErrorSummary(summary, "Enter a contribution with no more than 24 decimal places.");
+      return;
+    }
+    if (!state.accountId || !state.communityFund.safety?.ready || !appConfig.communityGoal?.configured) {
+      setErrorSummary(summary, "Connect a Testnet wallet and wait for the goal treasury safety checks before contributing.");
+      return;
+    }
+    const activity = state.communityFund.activity;
+    if (!activity?.complete) {
+      setErrorSummary(summary, "Complete verified contribution history is required before adding money to this goal.");
+      return;
+    }
+    const contributed = (activity.contributions || []).reduce((total, item) => total + BigInt(item.amount), 0n);
+    const target = BigInt(appConfig.communityGoal.targetYocto);
+    if (contributed >= target || BigInt(amountYocto) > target - contributed) {
+      setErrorSummary(summary, "This contribution would exceed the goal’s published target.");
+      return;
+    }
+    setErrorSummary(summary, "");
+    const approved = await reviewTransaction({
+      title: "Review Community Goal contribution",
+      summary: `Send ${communityFundTools.formatNear(amountYocto)} Testnet NEAR toward ${appConfig.communityGoal.title}.`,
+      signer: state.accountId,
+      receiver: appConfig.communityDaoId,
+      method: "Native NEAR transfer",
+      args: { purpose: `Contribution toward ${appConfig.communityGoal.title}` },
+      gas: "Wallet-estimated transfer fee",
+      deposit: `${amountYocto} yoctoNEAR (${communityFundTools.formatNear(amountYocto)} Testnet NEAR)`,
+      warning: "This public Testnet transfer is not a purchase contribution. It has no automatic refund or personal withdrawal path; spending requires an approved DAO payment proposal.",
+      confirmLabel: "Continue to Meteor",
+    });
+    if (!approved) return;
+    const button = $("button[type='submit']", form);
+    const outcome = await performTransaction(
+      button,
+      "Contribution submitted",
+      () => state.wallet.signAndSendTransaction({
+        ...transactionTools.buildTransferTransaction({
+          actionCreators: state.actionCreators,
+          signerId: state.accountId,
+          receiverId: appConfig.communityDaoId,
+          amountYocto,
+        }),
+        callbackUrl: window.location.href,
+      }),
+      "Community Goal contribution confirmed on Testnet.",
+      { onError: (message, error) => showFormTransactionError(form, message, error) },
+    );
+    if (!outcome) return;
+    form.reset();
+    await refreshLiveData({ force: true });
+  }
+
+  async function handleCommunityProposal(form) {
+    const summary = $(".form-error-summary", form);
+    if (!form.reportValidity()) {
+      setErrorSummary(summary, "Complete the amount and reason before continuing.");
+      return;
+    }
+    const fund = state.communityFund;
+    const goal = appConfig.communityGoal || {};
+    if (!goal.configured || !fund.safety?.ready || !fund.safety.proposerAccounts.has(state.accountId)) {
+      setErrorSummary(summary, "This connected wallet does not have the on-chain permission to propose transfers.");
+      return;
+    }
+    const amountYocto = communityFundTools.decimalToYocto(form.elements.amount.value);
+    try {
+      if (!amountYocto) throw new Error("Enter a goal payment amount greater than zero with no more than 24 decimal places.");
+      if (!fund.activity?.complete) {
+        throw new Error("Complete verified contribution history is required before proposing the goal payment.");
+      }
+      const verifiedContributions = (fund.activity.contributions || [])
+        .reduce((total, item) => total + BigInt(item.amount), 0n);
+      const verifiedSpent = fund.proposals.map(communityFundTools.allocationFromProposal).filter(Boolean)
+        .reduce((total, allocation) => verifiedCommunityPayment(allocation, fund.activity)
+          ? total + BigInt(allocation.amount)
+          : total, 0n);
+      const verifiedGoalPaid = fund.proposals.map(communityFundTools.allocationFromProposal).filter(Boolean)
+        .reduce((total, allocation) => allocation.receiverId === goal.recipient
+          && verifiedCommunityPayment(allocation, fund.activity)
+          ? total + BigInt(allocation.amount)
+          : total, 0n);
+      const verifiedUnspentContributions = verifiedContributions > verifiedSpent
+        ? verifiedContributions - verifiedSpent
+        : 0n;
+      const remainingTarget = BigInt(goal.targetYocto) > verifiedGoalPaid
+        ? BigInt(goal.targetYocto) - verifiedGoalPaid
+        : 0n;
+      if (BigInt(amountYocto) > verifiedUnspentContributions) {
+        throw new Error("The proposed payment is greater than verified unspent goal contributions.");
+      }
+      if (BigInt(amountYocto) > remainingTarget) {
+        throw new Error("The proposed payment is greater than the unpaid portion of this goal’s published target.");
+      }
+      if (BigInt(amountYocto) > BigInt(fund.availableAmount)) {
+        throw new Error("The proposed payment is greater than the DAO’s current available balance.");
+      }
+      const proposal = communityFundTools.transferProposal(
+        goal.recipient,
+        amountYocto,
+        form.elements.reason.value,
+      );
+      setErrorSummary(summary, "");
+      const bond = String(fund.policy.proposal_bond);
+      const approved = await reviewTransaction({
+        title: "Review goal payment proposal",
+        summary: `${communityFundTools.formatNear(amountYocto)} Testnet NEAR to ${proposal.kind.Transfer.receiver_id}: ${communityFundTools.decodeDescription(proposal.description)}`,
+        signer: state.accountId,
+        receiver: appConfig.communityDaoId,
+        method: "add_proposal",
+        args: { proposal },
+        gas: "30000000000000",
+        deposit: `${bond} yoctoNEAR proposal bond (${communityFundTools.formatNear(bond)} Testnet NEAR)`,
+        warning: `This does not pay the recipient. The DAO requires ${fund.safety.requiredVotes} member approvals; the deciding approval executes the payment.`,
+      });
+      if (!approved) return;
+      const button = $("button[type='submit']", form);
+      const outcome = await performTransaction(
+        button,
+        "Proposal submitted",
+        () => sendChangeTo(appConfig.communityDaoId, "add_proposal", { proposal }, bond, true),
+        "Goal payment proposal confirmed on-chain.",
+        { onError: (message, error) => showFormTransactionError(form, message, error) },
+      );
+      if (!outcome) return;
+      form.reset();
+      await refreshLiveData({ force: true });
+    } catch (error) {
+      setErrorSummary(summary, error.message || "The proposal is invalid.");
+    }
+  }
+
+  async function handleCommunityVote(button) {
+    const fund = state.communityFund;
+    const proposalId = Number(button.dataset.proposalId);
+    const proposal = fund.proposals.find((item) => Number(item.id) === proposalId);
+    const allocation = communityFundTools.allocationFromProposal(proposal);
+    const action = button.dataset.voteAction;
+    const existingPayment = verifiedCommunityPayment(allocation, fund.activity);
+    if (!allocation || allocation.status !== "InProgress" || !["VoteApprove", "VoteReject"].includes(action)) {
+      showToast("This proposal is no longer available for that vote.", "error");
+      return;
+    }
+    if (existingPayment) {
+      showToast("This allocation already has a verified DAO payment receipt. No further vote was sent.", "error");
+      return;
+    }
+    if (action === "VoteApprove" && (!appConfig.communityGoal?.configured || allocation.receiverId !== appConfig.communityGoal.recipient)) {
+      showToast("This proposal does not match the configured Community Goal recipient, so HarvestPool will not submit a vote.", "error");
+      return;
+    }
+    if (!fund.safety?.ready || !fund.safety.voterAccounts.has(state.accountId) || allocation.votes[state.accountId]) {
+      showToast("This wallet is not eligible to cast this vote.", "error");
+      return;
+    }
+    const counts = communityVoteCounts(allocation);
+    const decidingApproval = action === "VoteApprove" && counts.approve + 1 >= fund.safety.requiredVotes;
+    const args = { id: proposalId, action };
+    const approved = await reviewTransaction({
+      title: decidingApproval ? "Approve and execute this payment?" : action === "VoteApprove" ? "Approve this goal payment?" : "Reject this goal payment?",
+      summary: `${communityFundTools.formatNear(allocation.amount)} Testnet NEAR to ${allocation.receiverId}: ${allocation.reason}`,
+      signer: state.accountId,
+      receiver: appConfig.communityDaoId,
+      method: "act_proposal",
+      args,
+      gas: "30000000000000",
+      deposit: "0 yoctoNEAR",
+      warning: decidingApproval
+        ? "This is the threshold-crossing vote. SputnikDAO will transfer the funds in this same on-chain action if the payment execution succeeds."
+        : "Your vote is public and permanent. Network gas may still apply.",
+      confirmLabel: decidingApproval ? "Approve payment in Meteor" : "Continue to Meteor",
+    });
+    if (!approved) return;
+    const outcome = await performTransaction(
+      button,
+      "Vote submitted",
+      () => sendChangeTo(appConfig.communityDaoId, "act_proposal", args),
+      "DAO vote transaction returned from the wallet.",
+      { confirmOnReturn: false },
+    );
+    if (!outcome) return;
+    const confirmed = await confirmationTools.waitForState(
+      async () => {
+        await loadCommunityFundData();
+        const updatedProposal = state.communityFund.proposals.find((item) => Number(item.id) === proposalId);
+        return {
+          allocation: communityFundTools.allocationFromProposal(updatedProposal),
+          activity: state.communityFund.activity,
+        };
+      },
+      ({ allocation: updated, activity }) => {
+        if (!updated) return null;
+        if (decidingApproval) {
+          const payment = verifiedCommunityPayment(updated, activity);
+          if (payment) return { state: "paid", allocation: updated, payment };
+          if (["Failed", "Rejected", "Removed", "Expired"].includes(updated.status)) {
+            return { state: "failed", allocation: updated };
+          }
+          return null;
+        }
+        if (updated.votes?.[state.accountId] === (action === "VoteApprove" ? "Approve" : "Reject")) {
+          return { state: "voted", allocation: updated };
+        }
+        return null;
+      },
+      { attempts: 8, delayMs: 1000 },
+    );
+    renderCurrentPage();
+    if (confirmed?.state === "paid") {
+      showToast("The deciding approval and matching DAO payment receipt are confirmed.", "success");
+    } else if (confirmed?.state === "voted") {
+      showToast("Your recorded DAO vote is confirmed on-chain.", "success");
+    } else if (confirmed?.state === "failed") {
+      showToast("The proposal reached a terminal state without a verified payment. Review the on-chain record.", "error");
+    } else {
+      showToast("The vote was submitted, but the payment or vote record is still being verified. Do not submit again.");
+    }
+  }
+
   async function dispatchGuardedTransaction(action, button) {
     const purchase = state.purchases.find((item) => String(item.id) === String(button.dataset.purchaseId));
     const decision = state.decisions.find((item) => String(item.id) === String(button.dataset.decisionId));
@@ -3744,6 +4231,14 @@
     $("#sale-unit")?.addEventListener("change", updateSaleUnitFields);
     $("#farmer-account")?.addEventListener("change", updateSupplierSelection);
     document.addEventListener("click", async (event) => {
+      const communityButton = event.target.closest("[data-community-action]");
+      if (communityButton) {
+        event.preventDefault();
+        const action = communityButton.dataset.communityAction;
+        if (action === "refresh") await refreshLiveData({ force: true });
+        if (action === "vote") await runGuardedSubmission(communityButton, () => handleCommunityVote(communityButton));
+        return;
+      }
       const connectButton = event.target.closest("[data-connect-wallet]");
       if (connectButton) {
         event.preventDefault();
@@ -3895,6 +4390,16 @@
       saveDraft(event.target);
     });
     document.addEventListener("submit", (event) => {
+      if (event.target.matches("[data-community-contribution]")) {
+        event.preventDefault();
+        runGuardedSubmission(event.target, () => handleCommunityContribution(event.target));
+        return;
+      }
+      if (event.target.matches("[data-community-proposal]")) {
+        event.preventDefault();
+        runGuardedSubmission(event.target, () => handleCommunityProposal(event.target));
+        return;
+      }
       if (!event.target.matches("[data-evidence-form]")) return;
       event.preventDefault();
       runGuardedSubmission(event.target, () => handleEvidence(event.target));
@@ -3922,7 +4427,10 @@
     try {
       await setupNear();
       captureWalletCallbackHash();
-      await Promise.allSettled([loadBaseData(), loadNearPrice()]);
+      await Promise.allSettled([
+        appConfig.page === "community_fund" ? loadCommunityFundData() : loadBaseData(),
+        loadNearPrice(),
+      ]);
       state.lastLiveRefreshAt = Date.now();
       if (["details", "agreement", "issue_form", "supplier_invitation"].includes(appConfig.page)) {
         const id = $("[data-purchase-id]")?.dataset.purchaseId;

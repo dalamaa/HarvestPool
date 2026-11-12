@@ -5,12 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#143b32">
     <meta name="description" content="HarvestPool helps households organize clear, protected Group Deals.">
-    <title>{% if page == "home" %}HarvestPool · Buy together, save more{% elif page == "explore" %}Explore Group Deals · HarvestPool{% elif page == "create" %}Post a Group Deal · HarvestPool{% elif page == "supplier_invitation" %}Supplier invitation · HarvestPool{% elif page == "dashboard" %}My Group Buys · HarvestPool{% elif page == "decisions" %}Action Center · HarvestPool{% elif page == "guide" %}Wallet guide · HarvestPool{% elif page == "farmer" %}My Sales · HarvestPool{% elif page == "agreement" %}Deal Terms · HarvestPool{% elif page == "issue_form" %}Raise an Issue · HarvestPool{% else %}Group Deal details · HarvestPool{% endif %}</title>
+    <title>{% if page == "home" %}HarvestPool · Buy together, save more{% elif page == "explore" %}Explore Group Deals · HarvestPool{% elif page == "create" %}Post a Group Deal · HarvestPool{% elif page == "supplier_invitation" %}Supplier invitation · HarvestPool{% elif page == "dashboard" %}My Group Buys · HarvestPool{% elif page == "decisions" %}Action Center · HarvestPool{% elif page == "community_fund" %}Community Goals · HarvestPool{% elif page == "guide" %}Wallet guide · HarvestPool{% elif page == "farmer" %}My Sales · HarvestPool{% elif page == "agreement" %}Deal Terms · HarvestPool{% elif page == "issue_form" %}Raise an Issue · HarvestPool{% else %}Group Deal details · HarvestPool{% endif %}</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
-    <script type="application/json" id="app-config">{{ {"page": page, "purchaseId": purchase_id, "shareMode": share_mode, "network": network, "contractId": contract_id, "contractVersion": contract_version, "v3ContractId": v3_contract_id, "publicBaseUrl": public_base_url}|tojson }}</script>
+    <script type="application/json" id="app-config">{{ {"page": page, "purchaseId": purchase_id, "shareMode": share_mode, "network": network, "contractId": contract_id, "contractVersion": contract_version, "v3ContractId": v3_contract_id, "publicBaseUrl": public_base_url, "communityDaoId": community_dao_id, "communityDaoFactoryId": community_dao_factory_id, "communityDaoCodeHash": community_dao_code_hash, "communityGoal": community_goal}|tojson }}</script>
   </head>
   <body class="page-{{ page }} wallet-session-loading">
     <a class="skip-link" href="#main-content">Skip to content</a>
@@ -27,6 +27,7 @@
           <a class="nav-link {% if page == 'explore' or page == 'details' or page == 'agreement' %}active{% endif %}" href="/deals">Explore Deals</a>
           <a class="nav-link {% if page == 'create' %}active{% endif %}" href="/create">Post a Group Deal</a>
           <a class="nav-link {% if page == 'dashboard' %}active{% endif %}" href="/dashboard">My Group Buys</a>
+          <a class="nav-link {% if page == 'community_fund' %}active{% endif %}" href="/community-goals">Community Goals</a>
           <a class="nav-link {% if page == 'decisions' or page == 'issue_form' %}active{% endif %}" href="/decisions">Action Center <span class="nav-count" id="action-center-count" role="status" aria-live="polite" aria-atomic="true" aria-label="pending actions" hidden></span></a>
           <a class="nav-link {% if page == 'farmer' %}active{% endif %}" href="/farmer">My Sales</a>
           <a class="nav-link {% if page == 'guide' %}active{% endif %}" href="/guide">Help</a>
@@ -138,6 +139,10 @@
         <section class="page-hero section-shell compact-hero"><div><h1>Action Center</h1><p>Review pending actions, completed activity, and issues for the connected account.</p></div></section>
         <section class="decisions-section section-shell" id="decisions-root"><div class="connect-card"><div class="connect-card-mark"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4 7v5c0 4.5 3.4 7.9 8 9 4.6-1.1 8-4.5 8-9V7l-8-4Z"/><path d="m8.5 12 2.2 2.2 4.8-5"/></svg></div><div><h2>Connect a wallet to load your actions.</h2><p>Eligibility is checked from confirmed deals, votes, supplier roles, refunds, and submitted transactions.</p></div><button class="button button-dark" type="button" data-connect-wallet>Connect wallet</button></div></section>
 
+      {% elif page == "community_fund" %}
+        <section class="page-hero section-shell compact-hero community-fund-hero"><div><p class="eyebrow">Community Goals</p><h1>Raise together. Decide together.</h1><p>Support one clear community need and see every verified contribution, vote, and payment. No one can take money from the goal treasury without the required member approval.</p></div><div class="chain-note"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4 7v5c0 4.5 3.4 7.9 8 9 4.6-1.1 8-4.5 8-9V7l-8-4Z"/><path d="m8.5 12 2.2 2.2 4.8-5"/></svg><span>Separate SputnikDAO treasury · never connected to Group Deal escrow</span></div></section>
+        <section class="community-fund-section section-shell" id="community-fund-root" aria-live="polite"><div class="loading-shell"><span class="loading-bar"></span><span class="loading-bar short"></span><span class="loading-block"></span></div></section>
+
       {% elif page == "guide" %}
         <section class="page-hero section-shell compact-hero guide-hero"><div><p class="eyebrow">First-time setup</p><h1>A small wallet, a clear next step.</h1><p>You can browse every public purchase without a wallet. Connect Meteor only when you want HarvestPool to check eligibility or ask you to approve a transaction.</p></div><div class="chain-note"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4 7v5c0 4.5 3.4 7.9 8 9 4.6-1.1 8-4.5 8-9V7l-8-4Z"/><path d="m8.5 12 2.2 2.2 4.8-5"/></svg><span>Never share a seed phrase or private key with HarvestPool.</span></div></section>
         <section class="journey-section section-shell" aria-labelledby="journey-heading"><div class="section-intro"><p class="eyebrow">How it works</p><h2 id="journey-heading">One Group Deal, from idea to finish.</h2><p>A supplier can post a deal, or a community member can propose one for the named supplier to approve.</p></div><ol class="journey-steps"><li><strong>Post or propose</strong><span>The supplier posts a deal, or a member sends complete terms to a supplier.</span></li><li><strong>Supplier review</strong><span>A member proposal opens only after the named supplier accepts it.</span></li><li><strong>Buyers join</strong><span>Buyers read the terms, choose a quantity, and authorize the exact Testnet payment.</span></li><li><strong>The group closes</strong><span>If the minimum quantity is reached, the deal can proceed. Otherwise it must be finalized as failed before refunds become available.</span></li><li><strong>Supplier fulfills</strong><span>The supplier prepares the group order and submits fulfillment details by the agreed deadline.</span></li><li><strong>Buyers review</strong><span>Eligible funded buyers approve fulfillment or raise a concern under the deal rules.</span></li><li><strong>Payment or refund</strong><span>After the required confirmations, an eligible user must initiate supplier payment or claim an available refund. HarvestPool does not promise automatic transfers.</span></li></ol></section>
@@ -182,6 +187,7 @@
     <script src="{{ url_for('static', filename='action-center.js') }}" defer></script>
     <script src="{{ url_for('static', filename='v3-confirmation.js') }}" defer></script>
     <script src="{{ url_for('static', filename='voting-format.js') }}" defer></script>
+    <script src="{{ url_for('static', filename='community-fund.js') }}" defer></script>
     <script src="{{ url_for('static', filename='app.js') }}" defer></script>
   </body>
 </html>

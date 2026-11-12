@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const {
   assertNajFunctionCall,
   buildFunctionCallTransaction,
+  buildTransferTransaction,
   gasForMethod,
 } = require("./transaction-actions.js");
 
@@ -35,8 +36,23 @@ function najActionCreators() {
         functionCall: { methodName, args: new Uint8Array(), gas, deposit },
       };
     },
+    transfer(deposit) {
+      return { enum: "transfer", transfer: { deposit } };
+    },
   };
 }
+
+test("shared adapter builds a native NEAR transfer with BigInt deposit", () => {
+  const transaction = buildTransferTransaction({
+    actionCreators: najActionCreators(),
+    signerId: "member.testnet",
+    receiverId: "community.sputnikv2.testnet",
+    amountYocto: "250000000000000000000000",
+  });
+  assert.equal(transaction.receiverId, "community.sputnikv2.testnet");
+  assert.equal(transaction.actions[0].enum, "transfer");
+  assert.equal(transaction.actions[0].transfer.deposit, 250000000000000000000000n);
+});
 
 test("shared adapter builds NAJ actions for every wallet-signed method", () => {
   const actionCreators = najActionCreators();

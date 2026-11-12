@@ -45,6 +45,17 @@
     return assertNajFunctionCall(actionCreators.functionCall(methodName, args, gas, deposit));
   }
 
+  function transferAction(actionCreators, amountYocto) {
+    if (!actionCreators || typeof actionCreators.transfer !== "function") {
+      throw new Error("Wallet Selector v10 transfer action creator is unavailable.");
+    }
+    const action = actionCreators.transfer(yoctoBigInt(amountYocto, "Transfer amount"));
+    if (!action || action.enum !== "transfer" || !action.transfer || typeof action.transfer.deposit !== "bigint") {
+      throw new TypeError("Wallet Selector v10 did not return a NAJ transfer action.");
+    }
+    return action;
+  }
+
   function buildFunctionCallTransaction({
     actionCreators,
     signerId,
@@ -64,6 +75,15 @@
     };
   }
 
+  function buildTransferTransaction({ actionCreators, signerId, receiverId, amountYocto }) {
+    if (!signerId || !receiverId) throw new Error("A signer and receiver are required for a wallet transfer.");
+    return {
+      signerId,
+      receiverId,
+      actions: [transferAction(actionCreators, amountYocto)],
+    };
+  }
+
   function gasForMethod(receiverId, v3ContractId, methodName) {
     if (TOKEN_ASYNC_METHODS.has(methodName)) return TOKEN_ASYNC_TRANSACTION_GAS;
     if (methodName === "reconcile_token_balance") return RECONCILIATION_TRANSACTION_GAS;
@@ -75,8 +95,10 @@
   return {
     assertNajFunctionCall,
     buildFunctionCallTransaction,
+    buildTransferTransaction,
     functionCallAction,
     gasForMethod,
     yoctoBigInt,
+    transferAction,
   };
 }));

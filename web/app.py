@@ -6,6 +6,7 @@ prepared in the browser and signed by the user's NEAR-compatible wallet.
 """
 
 import os
+import re
 import sqlite3
 import json
 import threading
@@ -13,6 +14,7 @@ import time
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from urllib.error import URLError
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 from pathlib import Path
 
@@ -23,6 +25,8 @@ from web.config import (
     CANONICAL_CONTRACT_VERSION,
     CANONICAL_NETWORK,
     CANONICAL_PORT,
+    CANONICAL_SPUTNIK_DAO_CODE_HASH,
+    CANONICAL_SPUTNIK_DAO_FACTORY_ID,
     CANONICAL_V3_CONTRACT_ID,
 )
 
@@ -39,6 +43,49 @@ CONTRACT_VERSION = os.environ.get(
 ).upper()
 PUBLIC_BASE_URL = os.environ.get("HARVESTPOOL_PUBLIC_BASE_URL", "").rstrip("/")
 NETWORK = os.environ.get("NEAR_NETWORK", CANONICAL_NETWORK)
+COMMUNITY_DAO_ID = os.environ.get("HARVESTPOOL_COMMUNITY_DAO_ID", "").strip()
+COMMUNITY_DAO_FACTORY_ID = CANONICAL_SPUTNIK_DAO_FACTORY_ID
+COMMUNITY_DAO_CODE_HASH = CANONICAL_SPUTNIK_DAO_CODE_HASH
+NEARBLOCKS_TESTNET_API = "https://api-testnet.nearblocks.io"
+NEARBLOCKS_API_KEY = os.environ.get("HARVESTPOOL_NEARBLOCKS_API_KEY", "").strip()
+
+
+def _community_goal_config():
+    title = os.environ.get("HARVESTPOOL_COMMUNITY_GOAL_TITLE", "").strip()
+    purpose = os.environ.get("HARVESTPOOL_COMMUNITY_GOAL_PURPOSE", "").strip()
+    recipient = os.environ.get("HARVESTPOOL_COMMUNITY_GOAL_RECIPIENT", "").strip()
+    target_near = os.environ.get("HARVESTPOOL_COMMUNITY_GOAL_TARGET_NEAR", "").strip()
+    values_present = any((title, purpose, recipient, target_near))
+    errors = []
+    target_yocto = ""
+    if values_present and not all((title, purpose, recipient, target_near)):
+        errors.append("All Community Goal fields must be configured together.")
+    if len(title) > 120 or len(purpose) > 500:
+        errors.append("Community Goal title or purpose exceeds its supported length.")
+    if recipient and not re.fullmatch(r"[a-z0-9]+(?:[._-][a-z0-9]+)*", recipient):
+        errors.append("Community Goal recipient is not a valid NEAR account ID.")
+    if recipient and not 2 <= len(recipient) <= 64:
+        errors.append("Community Goal recipient must be 2 to 64 characters.")
+    if target_near:
+        try:
+            target_value = Decimal(target_near)
+            scaled = target_value * (Decimal(10) ** 24)
+            if target_value <= 0 or scaled != scaled.to_integral_value():
+                raise InvalidOperation
+            target_yocto = str(int(scaled))
+        except (InvalidOperation, ValueError, OverflowError):
+            errors.append("Community Goal target must be a positive NEAR amount with at most 24 decimals.")
+    return {
+        "configured": bool(values_present and not errors),
+        "title": title,
+        "purpose": purpose,
+        "recipient": recipient,
+        "targetYocto": target_yocto,
+        "configurationError": " ".join(errors),
+    }
+
+
+COMMUNITY_GOAL = _community_goal_config()
 NEAR_PRICE_URL = os.environ.get(
     "HARVESTPOOL_NEAR_PRICE_URL",
     "https://api.coingecko.com/api/v3/simple/price?ids=near&vs_currencies=usd&include_last_updated_at=true",
@@ -62,6 +109,10 @@ def render_page(page, *, purchase_id=None, share_mode=False):
         v3_contract_id=V3_CONTRACT_ID,
         contract_version=CONTRACT_VERSION,
         public_base_url=PUBLIC_BASE_URL,
+        community_dao_id=COMMUNITY_DAO_ID,
+        community_dao_factory_id=COMMUNITY_DAO_FACTORY_ID,
+        community_dao_code_hash=COMMUNITY_DAO_CODE_HASH,
+        community_goal=COMMUNITY_GOAL,
     )
 
 
@@ -119,6 +170,155 @@ def near_price():
         return jsonify(_near_price_payload())
     except RuntimeError as error:
         return jsonify({"error": str(error), "source": NEAR_PRICE_SOURCE}), 503
+
+
+def _nearblocks_json(path, params=None):
+    url = f"{NEARBLOCKS_TESTNET_API}{path}"
+    if params:
+        url = f"{url}?{urlencode(params)}"
+    headers = {"Accept": "application/json", "User-Agent": "HarvestPool/1.0"}
+    if NEARBLOCKS_API_KEY:
+        headers["Authorization"] = f"Bearer {NEARBLOCKS_API_KEY}"
+    request = Request(url, headers=headers)
+    with urlopen(request, timeout=6) as response:
+        body = response.read(2_000_001)
+        if len(body) > 2_000_000:
+            raise ValueError("NearBlocks response exceeded the 2 MB safety limit")
+        return json.loads(body.decode("utf-8"))
+
+
+def _community_activity(dao_id):
+    transactions = []
+    next_page = None
+    complete = True
+    for _page in range(5):
+        params = {"limit": 100}
+        if next_page:
+            params["next"] = next_page
+        payload = _nearblocks_json(
+            f"/v3/accounts/{quote(dao_id, safe='.')}/txns", params
+        )
+        batch = payload.get("data")
+        if not isinstance(batch, list):
+            raise ValueError("NearBlocks returned an invalid transaction list")
+        transactions.extend(batch)
+        next_page = payload.get("meta", {}).get("next_page")
+        if not next_page:
+            break
+    else:
+        complete = not bool(next_page)
+
+    contributions = []
+    proposal_transactions = {}
+    proposal_candidates = []
+    for transaction in transactions:
+        actions = transaction.get("actions") or []
+        success = transaction.get("outcomes", {}).get("status") is True
+        receiver = str(transaction.get("receiver_account_id") or "")
+        signer = str(transaction.get("signer_account_id") or "")
+        transaction_hash = str(transaction.get("transaction_hash") or "")
+        if (
+            success
+            and receiver == dao_id
+            and signer != dao_id
+            and len(actions) == 1
+            and actions[0].get("action") == "TRANSFER"
+        ):
+            amount = str(transaction.get("actions_agg", {}).get("deposit") or "0")
+            if amount.isdigit() and int(amount) > 0 and transaction_hash:
+                contributions.append(
+                    {
+                        "amount": amount,
+                        "contributor": signer,
+                        "timestamp": str(transaction.get("block_timestamp") or "0"),
+                        "transactionHash": transaction_hash,
+                    }
+                )
+        if (
+            success
+            and receiver == dao_id
+            and transaction_hash
+            and any(action.get("method") == "act_proposal" for action in actions)
+        ):
+            proposal_candidates.append(transaction_hash)
+
+    for transaction_hash in proposal_candidates[:40]:
+        try:
+            detail = _nearblocks_json(
+                f"/v3/txns/{quote(transaction_hash, safe='')}"
+            ).get("data", {})
+            receipt_root = _nearblocks_json(
+                f"/v3/txns/{quote(transaction_hash, safe='')}/receipts"
+            ).get("data", {})
+            transfers = []
+
+            def collect_transfers(receipt, depth=0):
+                if not isinstance(receipt, dict):
+                    return
+                if (
+                    depth == 1
+                    and str(receipt.get("predecessor_account_id") or "") == dao_id
+                    and receipt.get("outcome", {}).get("status") is True
+                ):
+                    for receipt_action in receipt.get("actions") or []:
+                        if receipt_action.get("action") != "TRANSFER":
+                            continue
+                        amount = str(receipt_action.get("args", {}).get("deposit") or "0")
+                        receiver = str(receipt.get("receiver_account_id") or "")
+                        if amount.isdigit() and int(amount) > 0 and receiver:
+                            transfers.append(
+                                {
+                                    "amount": amount,
+                                    "receiver": receiver,
+                                    "receiptId": str(receipt.get("receipt_id") or ""),
+                                }
+                            )
+                for child in receipt.get("receipts") or []:
+                    collect_transfers(child, depth + 1)
+
+            collect_transfers(receipt_root)
+            for action in detail.get("actions") or []:
+                if action.get("method") != "act_proposal":
+                    continue
+                args = action.get("args", {}).get("args_json") or {}
+                proposal_id = args.get("id")
+                action_name = args.get("action")
+                if proposal_id is None or action_name not in {
+                    "VoteApprove", "VoteReject", "VoteRemove", "Finalize"
+                }:
+                    continue
+                key = str(proposal_id)
+                proposal_transactions.setdefault(key, []).append(
+                    {
+                        "action": action_name,
+                        "signer": str(detail.get("signer_account_id") or ""),
+                        "timestamp": str(detail.get("block_timestamp") or "0"),
+                        "transactionHash": transaction_hash,
+                        "transfers": transfers,
+                    }
+                )
+        except (OSError, URLError, ValueError, TypeError, json.JSONDecodeError):
+            continue
+
+    complete = complete and len(proposal_candidates) <= 40
+
+    return {
+        "complete": complete,
+        "contributions": contributions,
+        "proposalTransactions": proposal_transactions,
+        "source": "NearBlocks Testnet API",
+        "sourceUrl": f"https://testnet.nearblocks.io/address/{dao_id}",
+    }
+
+
+@app.get("/api/community-fund/activity")
+def community_fund_activity():
+    if not COMMUNITY_DAO_ID:
+        return jsonify({"error": "Community Goals DAO is not configured."}), 404
+    try:
+        return jsonify(_community_activity(COMMUNITY_DAO_ID))
+    except (OSError, URLError, ValueError, TypeError, json.JSONDecodeError) as error:
+        return jsonify({"error": f"Community Goals transaction history unavailable: {error}"}), 503
 
 
 def get_db():
@@ -187,6 +387,12 @@ def dashboard():
 @app.get("/decisions")
 def decisions():
     return render_page("decisions")
+
+
+@app.get("/community-goals")
+@app.get("/community-fund")
+def community_fund():
+    return render_page("community_fund")
 
 
 @app.get("/guide")
