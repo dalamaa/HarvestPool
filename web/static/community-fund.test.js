@@ -177,6 +177,35 @@ test("payment proof requires the exact proposal action, recipient, and amount re
   assert.equal(fund.verifiedPayment({ ...allocation, amount: "101" }, activity), null);
 });
 
+test("proposal sections expose only actions available to the connected member", () => {
+  const proposal = (id, status, votes = {}) => ({
+    id,
+    status,
+    description: fund.encodeDescription(`Reason ${id}`),
+    proposer: "alice.testnet",
+    kind: { Transfer: { token_id: "", receiver_id: "recipient.testnet", amount: "100", msg: null } },
+    votes,
+    vote_counts: {},
+    submission_time: "1",
+  });
+  const safety = { ready: true, voterAccounts: new Set(["alice.testnet", "bob.testnet"]) };
+  const activity = {
+    proposalTransactions: {
+      3: [{ action: "VoteApprove", transfers: [{ receiver: "recipient.testnet", amount: "100" }] }],
+    },
+  };
+  const sections = fund.proposalSections([
+    proposal(1, "InProgress"),
+    proposal(2, "InProgress", { "alice.testnet": "Approve" }),
+    proposal(3, "Approved"),
+    proposal(4, "Rejected"),
+  ], activity, safety, "alice.testnet");
+  assert.deepEqual(sections.needsVote.map(({ id }) => id), [1]);
+  assert.deepEqual(sections.open.map(({ id }) => id), [1, 2]);
+  assert.deepEqual(sections.completed.map(({ id }) => id), [3, 4]);
+  assert.equal(fund.proposalSections([proposal(1, "InProgress")], activity, safety, null).needsVote.length, 0);
+});
+
 test("one-goal progress uses verified direct contributions and matching recipient payments", () => {
   const goal = { configured: true, recipient: "school.testnet", targetYocto: "1000" };
   const allocations = [

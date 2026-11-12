@@ -13,12 +13,12 @@ import threading
 import time
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 from pathlib import Path
 
-from flask import Flask, g, jsonify, render_template
+from flask import Flask, g, jsonify, render_template, request
 
 from web.config import (
     CANONICAL_CONTRACT_ID,
@@ -48,6 +48,16 @@ COMMUNITY_DAO_FACTORY_ID = CANONICAL_SPUTNIK_DAO_FACTORY_ID
 COMMUNITY_DAO_CODE_HASH = CANONICAL_SPUTNIK_DAO_CODE_HASH
 NEARBLOCKS_TESTNET_API = "https://api-testnet.nearblocks.io"
 NEARBLOCKS_API_KEY = os.environ.get("HARVESTPOOL_NEARBLOCKS_API_KEY", "").strip()
+COMMUNITY_ACTIVITY_CACHE_SECONDS = max(
+    15, int(os.environ.get("HARVESTPOOL_COMMUNITY_ACTIVITY_CACHE_SECONDS", "30"))
+)
+COMMUNITY_ACTIVITY_STALE_SECONDS = max(
+    COMMUNITY_ACTIVITY_CACHE_SECONDS,
+    int(os.environ.get("HARVESTPOOL_COMMUNITY_ACTIVITY_STALE_SECONDS", "900")),
+)
+
+_community_activity_cache = {}
+_community_activity_cache_lock = threading.Lock()
 
 
 def _community_goal_config():
@@ -180,11 +190,23 @@ def _nearblocks_json(path, params=None):
     if NEARBLOCKS_API_KEY:
         headers["Authorization"] = f"Bearer {NEARBLOCKS_API_KEY}"
     request = Request(url, headers=headers)
-    with urlopen(request, timeout=6) as response:
-        body = response.read(2_000_001)
-        if len(body) > 2_000_000:
-            raise ValueError("NearBlocks response exceeded the 2 MB safety limit")
-        return json.loads(body.decode("utf-8"))
+    for attempt in range(3):
+        try:
+            with urlopen(request, timeout=6) as response:
+                body = response.read(2_000_001)
+                if len(body) > 2_000_000:
+                    raise ValueError("NearBlocks response exceeded the 2 MB safety limit")
+                return json.loads(body.decode("utf-8"))
+        except HTTPError as error:
+            if error.code != 429 or attempt == 2:
+                raise
+            retry_after = error.headers.get("Retry-After", "")
+            try:
+                delay = min(2.0, max(0.25, float(retry_after)))
+            except (TypeError, ValueError):
+                delay = 0.5 * (attempt + 1)
+            time.sleep(delay)
+    raise RuntimeError("NearBlocks retry limit reached")
 
 
 def _community_activity(dao_id):
@@ -211,6 +233,7 @@ def _community_activity(dao_id):
     contributions = []
     proposal_transactions = {}
     proposal_candidates = []
+    receipt_reads_complete = True
     for transaction in transactions:
         actions = transaction.get("actions") or []
         success = transaction.get("outcomes", {}).get("status") is True
@@ -298,17 +321,68 @@ def _community_activity(dao_id):
                     }
                 )
         except (OSError, URLError, ValueError, TypeError, json.JSONDecodeError):
+            receipt_reads_complete = False
             continue
 
-    complete = complete and len(proposal_candidates) <= 40
+    complete = complete and len(proposal_candidates) <= 40 and receipt_reads_complete
 
+    verified_at = datetime.now(timezone.utc).isoformat()
     return {
         "complete": complete,
         "contributions": contributions,
         "proposalTransactions": proposal_transactions,
         "source": "NearBlocks Testnet API",
         "sourceUrl": f"https://testnet.nearblocks.io/address/{dao_id}",
+        "verifiedAt": verified_at,
+        "stale": False,
     }
+
+
+def _activity_coverage(payload):
+    contributions = len(payload.get("contributions") or [])
+    actions = sum(len(items or []) for items in (payload.get("proposalTransactions") or {}).values())
+    transfers = sum(
+        len(action.get("transfers") or [])
+        for items in (payload.get("proposalTransactions") or {}).values()
+        for action in (items or [])
+    )
+    return contributions, actions, transfers
+
+
+def _cached_community_activity(dao_id, *, force=False):
+    now = time.monotonic()
+    with _community_activity_cache_lock:
+        cached = _community_activity_cache.get(dao_id)
+        if cached and not force and now - cached["cached_at"] < COMMUNITY_ACTIVITY_CACHE_SECONDS:
+            return dict(cached["payload"])
+    try:
+        payload = _community_activity(dao_id)
+    except (OSError, URLError, ValueError, TypeError, json.JSONDecodeError):
+        with _community_activity_cache_lock:
+            cached = _community_activity_cache.get(dao_id)
+            if cached and now - cached["cached_at"] < COMMUNITY_ACTIVITY_STALE_SECONDS:
+                stale_payload = dict(cached["payload"])
+                stale_payload["stale"] = True
+                return stale_payload
+        raise
+    with _community_activity_cache_lock:
+        cached = _community_activity_cache.get(dao_id)
+        coverage_dropped = cached and any(
+            current < previous
+            for current, previous in zip(
+                _activity_coverage(payload), _activity_coverage(cached["payload"])
+            )
+        )
+        if cached and (
+            (cached["payload"].get("complete") and not payload.get("complete"))
+            or coverage_dropped
+        ):
+            stale_payload = dict(cached["payload"])
+            stale_payload["stale"] = True
+            return stale_payload
+    with _community_activity_cache_lock:
+        _community_activity_cache[dao_id] = {"cached_at": time.monotonic(), "payload": payload}
+    return dict(payload)
 
 
 @app.get("/api/community-fund/activity")
@@ -316,7 +390,8 @@ def community_fund_activity():
     if not COMMUNITY_DAO_ID:
         return jsonify({"error": "Community Goals DAO is not configured."}), 404
     try:
-        return jsonify(_community_activity(COMMUNITY_DAO_ID))
+        force = request.args.get("refresh") == "1"
+        return jsonify(_cached_community_activity(COMMUNITY_DAO_ID, force=force))
     except (OSError, URLError, ValueError, TypeError, json.JSONDecodeError) as error:
         return jsonify({"error": f"Community Goals transaction history unavailable: {error}"}), 503
 

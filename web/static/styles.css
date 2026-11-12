@@ -962,12 +962,12 @@ h3 { margin-bottom: 10px; font-size: 21px; line-height: 1.1; }
 
 /* Separate SputnikDAO Community Fund */
 .community-fund-hero .chain-note { max-width: 430px; }
-.community-fund-section { padding-top: 18px; padding-bottom: 92px; }
+.community-fund-section { padding-top: 12px; padding-bottom: 72px; }
 .fund-setup-state { max-width: 760px; padding: 34px; border: 1px solid var(--line); border-left: 5px solid var(--sun); border-radius: 12px; background: var(--white); box-shadow: var(--shadow); }
 .fund-setup-state h2 { margin: 8px 0 12px; font-size: clamp(30px, 4vw, 44px); }
 .fund-setup-state p { max-width: 65ch; color: var(--muted); }
 .fund-account-line code, .fund-overview code, .fund-proposal-card code, .fund-history-row code, .fund-membership code, .fund-action-card code { overflow-wrap: anywhere; }
-.fund-safety-ready, .fund-safety-blocked { margin-bottom: 24px; padding: 18px 20px; border-radius: 11px; }
+.fund-safety-ready, .fund-safety-blocked { margin: 18px 0 0; padding: 18px 20px; border-radius: 11px; }
 .fund-safety-ready { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 14px; border: 1px solid #b9d8c8; background: #eef8f1; }
 .fund-safety-ready svg { width: 30px; height: 30px; fill: none; stroke: var(--success); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .fund-safety-ready strong, .fund-safety-ready span { display: block; }
@@ -976,26 +976,31 @@ h3 { margin-bottom: 10px; font-size: 21px; line-height: 1.1; }
 .fund-safety-blocked { border: 1px solid #e7b9ad; border-left: 5px solid var(--danger); background: var(--coral-soft); }
 .fund-safety-blocked p { margin: 5px 0; }
 .fund-safety-blocked ul { margin: 8px 0 0; padding-left: 20px; }
-.community-goal-card { margin-bottom: 24px; padding: 30px; border: 1px solid #b9d8c8; border-radius: 13px; background: linear-gradient(135deg, #f4faf5 0%, var(--white) 70%); box-shadow: var(--shadow); }
+.community-goal-card { margin-bottom: 16px; padding: 24px; border: 1px solid #b9d8c8; border-radius: 13px; background: linear-gradient(135deg, #f4faf5 0%, var(--white) 70%); box-shadow: var(--shadow); }
 .goal-card-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
-.goal-card-top h2 { max-width: 24ch; margin: 7px 0 0; font-size: clamp(31px, 4vw, 48px); line-height: 1.04; }
-.goal-purpose { max-width: 70ch; margin: 17px 0 22px; color: var(--ink); font-size: 17px; line-height: 1.65; white-space: pre-wrap; }
+.goal-card-top h2 { max-width: 28ch; margin: 5px 0 0; font-size: clamp(27px, 3vw, 38px); line-height: 1.08; }
+.goal-purpose { max-width: 70ch; margin: 12px 0 16px; color: var(--ink); font-size: 15px; line-height: 1.55; white-space: pre-wrap; }
 .goal-progress { height: 14px; overflow: hidden; border: 1px solid #b9d8c8; border-radius: 999px; background: #e3eee7; }
 .goal-progress > span { display: block; height: 100%; border-radius: inherit; background: var(--success); }
 .goal-progress-label { display: flex; justify-content: space-between; gap: 16px; margin-top: 9px; color: var(--muted); font-size: 13px; }
 .goal-progress-label strong { color: var(--pine); }
 .goal-progress-unavailable { padding: 14px 16px; border: 1px dashed var(--line); border-radius: 8px; background: var(--mist); color: var(--muted); font-size: 13px; }
-.goal-details { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; margin: 23px 0 0; padding: 1px; overflow: hidden; border: 1px solid var(--line); border-radius: 9px; background: var(--line); }
+.goal-details { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; margin: 17px 0 0; padding: 1px; overflow: hidden; border: 1px solid var(--line); border-radius: 9px; background: var(--line); }
 .goal-details > div { min-width: 0; padding: 14px; background: var(--white); }
 .goal-details dt { color: var(--muted); font-size: 11px; text-transform: uppercase; }
 .goal-details dd { margin: 5px 0 0; color: var(--pine); font-size: 14px; font-weight: 700; overflow-wrap: anywhere; }
-.goal-boundary-note { margin: 16px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
+.goal-boundary-note { margin: 12px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
 .goal-fixed-recipient { display: grid; gap: 5px; margin: 15px 0 17px; padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--mist); }
 .goal-fixed-recipient > span { color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
 .goal-fixed-recipient code { color: var(--pine); overflow-wrap: anywhere; }
 .goal-fixed-recipient small { color: var(--muted); font-size: 11px; line-height: 1.45; }
 .fund-configuration-error { color: var(--danger); font-weight: 700; }
-.fund-overview, .fund-proposals, .fund-history { padding: 30px; border: 1px solid var(--line); border-radius: 13px; background: var(--white); box-shadow: var(--shadow); }
+.fund-tabs { display: flex; gap: 6px; margin-bottom: 16px; padding: 5px; overflow-x: auto; border: 1px solid var(--line); border-radius: 11px; background: var(--white); box-shadow: var(--shadow); scrollbar-width: thin; }
+.fund-tab { min-height: 44px; flex: 0 0 auto; padding: 9px 14px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); font: inherit; font-size: 13px; font-weight: 700; white-space: nowrap; cursor: pointer; }
+.fund-tab:hover { background: var(--mist); color: var(--pine); }
+.fund-tab[aria-selected="true"] { background: var(--pine); color: var(--white); }
+.fund-tab:focus-visible { outline: 3px solid rgba(199, 223, 107, .65); outline-offset: 2px; }
+.fund-overview, .fund-proposals, .fund-history { padding: 24px; border: 1px solid var(--line); border-radius: 13px; background: var(--white); box-shadow: var(--shadow); }
 .fund-overview-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
 .fund-overview-heading h2 { margin: 6px 0 8px; }
 .fund-overview-heading p { color: var(--muted); }
@@ -1003,13 +1008,14 @@ h3 { margin-bottom: 10px; font-size: 21px; line-height: 1.1; }
 .fund-membership.is-member { border-color: #b9d8c8; background: #eef8f1; }
 .fund-membership strong { color: var(--pine); font-size: 13px; }
 .fund-membership span { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
-.fund-stat-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 1px; margin: 24px 0; padding: 1px; border: 1px solid var(--line); border-radius: 11px; background: var(--line); overflow: hidden; }
-.fund-stat-grid > div { display: grid; align-content: start; gap: 6px; min-height: 150px; padding: 18px; background: var(--paper); }
+.fund-stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 1px; margin: 20px 0; padding: 1px; border: 1px solid var(--line); border-radius: 11px; background: var(--line); overflow: hidden; }
+.fund-stat-grid > div { display: grid; align-content: start; gap: 6px; min-height: 118px; padding: 16px; background: var(--paper); }
 .fund-stat-grid span { color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
 .fund-stat-grid strong { color: var(--pine); font-family: "Space Grotesk", sans-serif; font-size: 25px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .fund-stat-grid small { color: var(--muted); font-size: 11px; line-height: 1.45; }
 .fund-public-note { max-width: 78ch; margin: 0; padding: 13px 15px; border-left: 3px solid var(--sun); background: var(--sun-soft); color: var(--pine-deep); font-size: 13px; }
-.fund-action-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; margin-top: 24px; }
+.fund-action-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; margin-top: 18px; }
+.fund-action-grid.single { grid-template-columns: minmax(0, 620px); }
 .fund-action-card { min-width: 0; padding: 26px; border: 1px solid var(--line); border-radius: 12px; background: var(--white); }
 .fund-action-card h2 { margin: 7px 0 12px; font-size: 30px; }
 .fund-action-card > p { color: var(--muted); font-size: 14px; line-height: 1.6; }
@@ -1019,7 +1025,7 @@ h3 { margin-bottom: 10px; font-size: 21px; line-height: 1.1; }
 .fund-action-card textarea { min-height: 100px; resize: vertical; }
 .fund-action-card input:focus, .fund-action-card textarea:focus { border-color: var(--pine); outline: 3px solid rgba(199, 223, 107, .45); outline-offset: 0; }
 .fund-action-card .form-error-summary { margin: 15px 0; }
-.fund-proposals, .fund-history { margin-top: 24px; }
+.fund-proposals, .fund-history { margin-top: 0; }
 .fund-proposals .section-heading-inline, .fund-history .section-heading-inline { margin-bottom: 22px; }
 .fund-proposal-card { padding: 23px; border: 1px solid var(--line); border-radius: 11px; background: var(--paper); }
 .fund-proposal-card + .fund-proposal-card { margin-top: 14px; }
@@ -1051,6 +1057,11 @@ h3 { margin-bottom: 10px; font-size: 21px; line-height: 1.1; }
 .fund-history-row dl > div { min-width: 0; }
 .fund-history-unavailable { padding: 20px; border: 1px dashed var(--line); border-radius: 9px; background: var(--mist); }
 .fund-history-unavailable p { color: var(--muted); }
+.fund-history-freshness { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; padding: 10px 12px; border-radius: 8px; background: var(--mist); color: var(--muted); font-size: 12px; }
+.fund-history-freshness.is-stale { border-left: 3px solid var(--sun); background: var(--sun-soft); color: var(--pine-deep); }
+.fund-protection-details { margin-top: 18px; }
+.fund-protection-details summary { min-height: 44px; display: flex; align-items: center; color: var(--pine); font-weight: 700; cursor: pointer; }
+.fund-protection-details p, .fund-protection-details li { color: var(--muted); font-size: 13px; line-height: 1.55; }
 
 @media (max-width: 1100px) {
   .fund-stat-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
@@ -1061,11 +1072,13 @@ h3 { margin-bottom: 10px; font-size: 21px; line-height: 1.1; }
 
 @media (max-width: 760px) {
   .community-fund-section { padding-bottom: 74px; }
-  .community-goal-card, .fund-overview, .fund-proposals, .fund-history, .fund-action-card, .fund-setup-state { padding: 21px; }
+  .community-goal-card, .fund-overview, .fund-proposals, .fund-history, .fund-action-card, .fund-setup-state { padding: 18px; }
   .goal-card-top, .fund-overview-heading, .fund-proposal-top, .fund-payment-reference { align-items: flex-start; flex-direction: column; }
   .goal-details, .fund-stat-grid, .fund-action-grid, .fund-proposal-details, .fund-history-row { grid-template-columns: 1fr; }
   .goal-progress-label { align-items: flex-start; flex-direction: column; gap: 3px; }
   .fund-stat-grid > div { min-height: 0; }
   .fund-proposal-actions .button, .fund-action-card > .button { width: 100%; }
   .fund-history-row > .text-link, .fund-history-row > .fund-reference-missing { grid-column: auto; }
+  .fund-history-freshness { align-items: flex-start; flex-direction: column; }
+  .fund-history-freshness .button { width: 100%; }
 }

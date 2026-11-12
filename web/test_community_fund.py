@@ -1,10 +1,15 @@
 import unittest
+import time
+from urllib.error import URLError
 from unittest.mock import patch
 
 from web import app as web_app
 
 
 class CommunityFundActivityTests(unittest.TestCase):
+    def setUp(self):
+        web_app._community_activity_cache.clear()
+
     def test_activity_counts_only_successful_direct_transfers_and_maps_votes(self):
         transaction_page = {
             "data": [
@@ -126,6 +131,39 @@ class CommunityFundActivityTests(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
         self.assertIn("not configured", response.get_json()["error"])
 
+    def test_activity_cache_reuses_fresh_data_and_preserves_last_confirmed_on_failure(self):
+        payload = {"complete": True, "contributions": [], "verifiedAt": "2026-11-12T00:00:00+00:00", "stale": False}
+        with patch.object(web_app, "_community_activity", return_value=payload) as read:
+            first = web_app._cached_community_activity("community.sputnikv2.testnet")
+            second = web_app._cached_community_activity("community.sputnikv2.testnet")
+        self.assertEqual(read.call_count, 1)
+        self.assertFalse(first["stale"])
+        self.assertEqual(second["verifiedAt"], payload["verifiedAt"])
+
+        web_app._community_activity_cache["community.sputnikv2.testnet"] = {
+            "cached_at": time.monotonic(),
+            "payload": payload,
+        }
+        with patch.object(web_app, "_community_activity", side_effect=URLError("rate limited")):
+            stale = web_app._cached_community_activity("community.sputnikv2.testnet", force=True)
+        self.assertTrue(stale["stale"])
+        self.assertEqual(stale["verifiedAt"], payload["verifiedAt"])
+
+        confirmed = {
+            **payload,
+            "contributions": [{"transactionHash": "in"}],
+            "proposalTransactions": {"1": [{"transfers": [{"receiptId": "paid"}]}]},
+        }
+        web_app._community_activity_cache["community.sputnikv2.testnet"] = {
+            "cached_at": time.monotonic(),
+            "payload": confirmed,
+        }
+        lower_coverage = {**payload, "contributions": [{"transactionHash": "in"}], "proposalTransactions": {}}
+        with patch.object(web_app, "_community_activity", return_value=lower_coverage):
+            preserved = web_app._cached_community_activity("community.sputnikv2.testnet", force=True)
+        self.assertTrue(preserved["stale"])
+        self.assertEqual(preserved["proposalTransactions"]["1"][0]["transfers"][0]["receiptId"], "paid")
+
     def test_community_page_exposes_separate_dao_configuration(self):
         goal = {
             "configured": True,
@@ -145,7 +183,7 @@ class CommunityFundActivityTests(unittest.TestCase):
         self.assertIn("community.sputnikv2.testnet", page)
         self.assertIn("School library books", page)
         self.assertIn("Community Goals", page)
-        self.assertIn("Separate SputnikDAO treasury", page)
+        self.assertIn("Separate from Group Deal funds", page)
 
     def test_goal_configuration_is_all_or_nothing_and_uses_exact_yocto(self):
         complete = {

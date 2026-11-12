@@ -205,6 +205,23 @@
     return null;
   }
 
+  function proposalSections(proposals, activity, safety, accountId) {
+    const allocations = (proposals || []).map(allocationFromProposal).filter(Boolean);
+    const memberCanVote = Boolean(safety?.ready && accountId && safety.voterAccounts?.has(accountId));
+    const needsVote = allocations.filter((allocation) =>
+      memberCanVote && allocation.status === "InProgress" && !allocation.votes?.[accountId]
+      && !verifiedPayment(allocation, activity)
+    );
+    const open = allocations.filter((allocation) =>
+      allocation.status === "InProgress" && !verifiedPayment(allocation, activity)
+    );
+    const completed = allocations.filter((allocation) =>
+      Boolean(verifiedPayment(allocation, activity))
+      || ["Rejected", "Removed", "Failed", "Expired"].includes(allocation.status)
+    );
+    return { allocations, needsVote, open, completed };
+  }
+
   function goalSnapshot(goal, contributionTotal, allocations, activity) {
     if (!goal?.configured || !/^\d+$/.test(String(goal.targetYocto || ""))) return null;
     const target = BigInt(goal.targetYocto);
@@ -248,6 +265,7 @@
     formatNear,
     goalSnapshot,
     grants,
+    proposalSections,
     roleAccounts,
     sumAllocations,
     thresholdFor,

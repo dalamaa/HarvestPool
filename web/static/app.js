@@ -85,6 +85,7 @@
       codeHash: null,
       activity: null,
       safety: null,
+      activeTab: null,
     },
   };
 
@@ -1021,7 +1022,7 @@
     return payload.result;
   }
 
-  async function loadCommunityFundData() {
+  async function loadCommunityFundData({ refreshActivity = false } = {}) {
     const fund = state.communityFund;
     if (!appConfig.communityDaoId) {
       fund.loaded = true;
@@ -1039,7 +1040,7 @@
         viewOnContract(daoId, "get_last_proposal_id"),
         queryRpc({ request_type: "view_access_key_list", finality: "final", account_id: daoId }),
         queryRpc({ request_type: "view_account", finality: "final", account_id: daoId }),
-        fetch("/api/community-fund/activity", { headers: { Accept: "application/json" } }).then(async (response) => {
+        fetch(`/api/community-fund/activity${refreshActivity ? "?refresh=1" : ""}`, { headers: { Accept: "application/json" } }).then(async (response) => {
           const payload = await response.json();
           if (!response.ok) throw new Error(payload.error || "Transaction history is unavailable.");
           return payload;
@@ -1844,7 +1845,7 @@
   }
 
   function communityProposalCard(proposal, safety, activity, goal) {
-    const allocation = communityFundTools.allocationFromProposal(proposal);
+    const allocation = proposal?.receiverId ? proposal : communityFundTools.allocationFromProposal(proposal);
     if (!allocation) return "";
     const counts = communityVoteCounts(allocation);
     const required = safety?.requiredVotes || 0;
@@ -1862,24 +1863,24 @@
     const statusCopy = payment
       ? `Paid by the DAO · contract status ${allocation.status}`
       : allocation.status === "Approved"
-        ? "Approved · payment receipt unverified"
+        ? "Payment confirmation pending"
       : allocation.status === "InProgress"
-        ? "Awaiting member votes"
+        ? "Needs member approval"
         : allocation.status;
     const actions = canVote
       ? matchesGoalRecipient
-        ? `<div class="fund-proposal-actions"><button class="button button-primary" type="button" data-community-action="vote" data-proposal-id="${allocation.id}" data-vote-action="VoteApprove">${decidingVote ? "Approve & execute payment" : "Approve goal payment"}</button><button class="button button-outline" type="button" data-community-action="vote" data-proposal-id="${allocation.id}" data-vote-action="VoteReject">Reject</button></div><p class="field-help">${decidingVote ? "This approval reaches the required threshold. SputnikDAO will send the payment in the same on-chain action if execution succeeds." : `The payment executes automatically when ${required} approvals are recorded.`}</p>`
+        ? `<div class="fund-proposal-actions"><button class="button button-primary" type="button" data-community-action="vote" data-proposal-id="${allocation.id}" data-vote-action="VoteApprove">${decidingVote ? "Approve & send payment" : "Approve request"}</button><button class="button button-outline" type="button" data-community-action="vote" data-proposal-id="${allocation.id}" data-vote-action="VoteReject">Reject</button></div><p class="field-help">${decidingVote ? "This is the deciding approval. The DAO sends the payment in the same on-chain action if execution succeeds." : `The payment is sent when ${required} approvals are recorded.`}</p>`
         : `<div class="fund-proposal-actions"><button class="button button-outline" type="button" data-community-action="vote" data-proposal-id="${allocation.id}" data-vote-action="VoteReject">Reject different recipient</button></div><p class="field-help">HarvestPool will not submit an approval for a recipient that differs from the configured goal.</p>`
       : ownVote
         ? `<p class="fund-own-vote">Your recorded vote: <strong>${escapeHtml(ownVote)}</strong></p>`
         : "";
-    return `<article class="fund-proposal-card"><div class="fund-proposal-top"><span class="status ${payment ? "status-funded" : allocation.status === "InProgress" || allocation.status === "Approved" ? "status-pending" : "status-failed"}"><span></span>${escapeHtml(statusCopy)}</span><span class="section-kicker">Proposal #${allocation.id}</span></div><h3>${communityFundTools.formatNear(allocation.amount)} Testnet NEAR to <code>${escapeHtml(allocation.receiverId)}</code></h3><p class="proposal-recipient-check ${matchesGoalRecipient ? "matches" : "differs"}">${matchesGoalRecipient ? "Matches the configured Community Goal recipient" : "Warning: this proposal names a different recipient than the configured Community Goal"}</p><p>${escapeHtml(allocation.reason)}</p><dl class="fund-proposal-details"><div><dt>Proposed by</dt><dd><code>${escapeHtml(allocation.proposer)}</code></dd></div><div><dt>Required approval</dt><dd>${required} of ${safety?.memberCount || 0} voting members</dd></div><div><dt>Votes</dt><dd>${counts.approve} approve · ${counts.reject} reject${counts.remove ? ` · ${counts.remove} remove` : ""}</dd></div><div><dt>Submitted</dt><dd>${escapeHtml(communityTime(allocation.submissionTime))}</dd></div></dl>${voters ? `<details class="fund-voters"><summary>See each recorded vote</summary><ul>${voters}</ul></details>` : ""}${payment || allocation.status === "Approved" ? `<div class="fund-payment-reference"><strong>${payment ? "Verified payment record" : "Payment is not yet verified"}</strong>${communityExplorerLink(payment?.transactionHash, "Open deciding vote and payment receipts")}</div>` : actions}</article>`;
+    return `<article class="fund-proposal-card"><div class="fund-proposal-top"><span class="status ${payment ? "status-funded" : allocation.status === "InProgress" || allocation.status === "Approved" ? "status-pending" : "status-failed"}"><span></span>${escapeHtml(statusCopy)}</span><span class="section-kicker">Request #${allocation.id}</span></div><h3>${communityFundTools.formatNear(allocation.amount)} Testnet NEAR to <code>${escapeHtml(allocation.receiverId)}</code></h3><p class="proposal-recipient-check ${matchesGoalRecipient ? "matches" : "differs"}">${matchesGoalRecipient ? "Matches this goal’s intended recipient" : "Warning: this request names a different recipient than the Community Goal"}</p><p>${escapeHtml(allocation.reason)}</p><dl class="fund-proposal-details"><div><dt>Requested by</dt><dd><code>${escapeHtml(allocation.proposer)}</code></dd></div><div><dt>Approvals needed</dt><dd>${required} of ${safety?.memberCount || 0} voting members</dd></div><div><dt>Votes</dt><dd>${counts.approve} approve · ${counts.reject} reject${counts.remove ? ` · ${counts.remove} remove` : ""}</dd></div><div><dt>Submitted</dt><dd>${escapeHtml(communityTime(allocation.submissionTime))}</dd></div></dl>${voters ? `<details class="fund-voters"><summary>See recorded votes</summary><ul>${voters}</ul></details>` : ""}${payment || allocation.status === "Approved" ? `<div class="fund-payment-reference"><strong>${payment ? "Payment confirmed" : "Payment confirmation pending"}</strong>${communityExplorerLink(payment?.transactionHash, "Open transaction and receipts")}</div>` : actions}</article>`;
   }
 
   function communityHistoryMarkup(fund, allocations, goal) {
     const activity = fund.activity;
     if (!activity || activity.error) {
-      return `<div class="fund-history-unavailable"><strong>Transaction history is unavailable</strong><p>${escapeHtml(activity?.error || "The indexer did not return authoritative activity.")} Balance and proposal actions still come directly from the DAO contract.</p><button class="button button-outline button-small" type="button" data-community-action="refresh">Retry history</button></div>`;
+      return `<div class="fund-history-unavailable"><strong>Money in and out is temporarily unavailable</strong><p>${escapeHtml(activity?.error || "The public transaction service did not return a complete record.")} The balance and requests still come directly from the DAO.</p><button class="button button-outline button-small" type="button" data-community-action="refresh-history">Retry activity</button></div>`;
     }
     const records = (activity.contributions || []).map((item) => ({
       type: "Contribution",
@@ -1906,14 +1907,37 @@
     records.sort((left, right) => {
       try { return BigInt(right.timestamp) > BigInt(left.timestamp) ? 1 : -1; } catch (_error) { return 0; }
     });
-    if (!records.length) return '<div class="dashboard-empty compact"><p>No direct contributions or approved payments are recorded yet.</p></div>';
-    return `<div class="fund-history-list">${records.map((record) => `<article class="fund-history-row"><div><span class="section-kicker">${escapeHtml(record.type)}</span><strong>${communityFundTools.formatNear(record.amount)} Testnet NEAR</strong><p>${escapeHtml(record.reason)}</p></div><dl><div><dt>${record.type === "Contribution" ? "From" : "To"}</dt><dd><code>${escapeHtml(record.account)}</code></dd></div>${record.proposer ? `<div><dt>Proposed by</dt><dd><code>${escapeHtml(record.proposer)}</code></dd></div><div><dt>Approved by</dt><dd>${record.approvers.map((account) => `<code>${escapeHtml(account)}</code>`).join(", ")}</dd></div>` : ""}<div><dt>Date</dt><dd>${escapeHtml(communityTime(record.timestamp))}</dd></div></dl>${communityExplorerLink(record.transactionHash)}</article>`).join("")}</div>`;
+    const verifiedAt = activity.verifiedAt
+      ? new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(activity.verifiedAt))
+      : "Time unavailable";
+    const freshness = `<div class="fund-history-freshness ${activity.stale ? "is-stale" : ""}" role="status"><span>${activity.stale ? "Showing the last confirmed record" : "Last checked"}: ${escapeHtml(verifiedAt)}</span><button class="button button-outline button-small" type="button" data-community-action="refresh-history">Retry activity</button></div>`;
+    if (!records.length) return `${freshness}<div class="dashboard-empty compact"><p>No contributions or confirmed payments are recorded yet.</p></div>`;
+    return `${freshness}<div class="fund-history-list">${records.map((record) => `<article class="fund-history-row"><div><span class="section-kicker">${escapeHtml(record.type)}</span><strong>${communityFundTools.formatNear(record.amount)} Testnet NEAR</strong><p>${escapeHtml(record.reason)}</p></div><dl><div><dt>${record.type === "Contribution" ? "From" : "To"}</dt><dd><code>${escapeHtml(record.account)}</code></dd></div>${record.proposer ? `<div><dt>Requested by</dt><dd><code>${escapeHtml(record.proposer)}</code></dd></div><div><dt>Approved by</dt><dd>${record.approvers.map((account) => `<code>${escapeHtml(account)}</code>`).join(", ")}</dd></div>` : ""}<div><dt>Date</dt><dd>${escapeHtml(communityTime(record.timestamp))}</dd></div></dl>${communityExplorerLink(record.transactionHash)}</article>`).join("")}</div>`;
+  }
+
+  const COMMUNITY_TABS = new Set(["overview", "needs-vote", "open", "completed", "activity"]);
+
+  function requestedCommunityTab() {
+    const requested = new URL(window.location.href).searchParams.get("view");
+    return COMMUNITY_TABS.has(requested) ? requested : "overview";
+  }
+
+  function activateCommunityTab(tab, { focus = false } = {}) {
+    const nextTab = COMMUNITY_TABS.has(tab) ? tab : "overview";
+    state.communityFund.activeTab = nextTab;
+    const url = new URL(window.location.href);
+    if (nextTab === "overview") url.searchParams.delete("view");
+    else url.searchParams.set("view", nextTab);
+    window.history.replaceState({}, "", url);
+    renderCommunityFundPage();
+    if (focus) $(`[data-community-tab="${nextTab}"]`)?.focus();
   }
 
   function renderCommunityFundPage() {
     const root = $("#community-fund-root");
     if (!root) return;
     const fund = state.communityFund;
+    if (!fund.activeTab) fund.activeTab = requestedCommunityTab();
     const goal = appConfig.communityGoal || {};
     if (!appConfig.communityDaoId || !goal.configured) {
       const configurationNote = goal.configurationError
@@ -1928,7 +1952,8 @@
       return;
     }
     const safety = fund.safety;
-    const allocations = fund.proposals.map(communityFundTools.allocationFromProposal).filter(Boolean);
+    const sections = communityFundTools.proposalSections(fund.proposals, fund.activity, safety, state.accountId);
+    const allocations = sections.allocations;
     const activityComplete = fund.activity && !fund.activity.error && fund.activity.complete;
     const contributed = activityComplete
       ? (fund.activity.contributions || []).reduce((total, item) => total + BigInt(item.amount), 0n).toString()
@@ -1946,28 +1971,57 @@
     const isMemberAccount = Boolean(state.accountId && safety.members.includes(state.accountId));
     const canPropose = Boolean(state.accountId && safety.proposerAccounts.has(state.accountId));
     const safetyMarkup = safety.ready
-      ? `<div class="fund-safety-ready"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4 7v5c0 4.5 3.4 7.9 8 9 4.6-1.1 8-4.5 8-9V7l-8-4Z"/><path d="m8.5 12 2.2 2.2 4.8-5"/></svg><div><strong>Contract protections verified</strong><span>No account access keys · factory auto-updates off · ${safety.requiredVotes} of ${safety.memberCount} member approvals required · no policy, upgrade, or arbitrary-call permission</span></div></div>`
+      ? `<details class="fund-protection-details"><summary>How your money is protected</summary><p>Everyone can see how much money the community has, where it goes, and how much remains. A payment needs ${safety.requiredVotes} of ${safety.memberCount} member approvals.</p><ul><li>No DAO account access keys</li><li>Factory auto-updates are off</li><li>No policy-change, upgrade, or arbitrary-call permission</li><li>The app fixes this goal’s intended recipient; the DAO contract itself relies on member approval of the recipient named in each request.</li></ul><p>Contributions and votes are public on Testnet. Contributions are not private and cannot be personally withdrawn or automatically refunded.</p></details>`
       : `<div class="fund-safety-blocked" role="alert"><strong>Financial actions are disabled</strong><p>HarvestPool cannot make the no-unilateral-withdrawal promise for this DAO:</p><ul>${safety.reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}</ul></div>`;
     const connectMarkup = !state.accountId
       ? '<button class="button button-dark" type="button" data-connect-wallet>Connect wallet to contribute or vote</button>'
-      : `<div class="fund-membership ${isMemberAccount ? "is-member" : ""}"><strong>${isMemberAccount ? "Voting member and contributor" : "Contributor · not a voting member"}</strong><span><code>${escapeHtml(state.accountId)}</code>${isMemberAccount ? " can contribute, propose the goal payment, and vote under the DAO policy." : " can contribute, but is not in the fixed DAO voting group."}</span></div>`;
+      : `<div class="fund-membership ${isMemberAccount ? "is-member" : ""}"><strong>${isMemberAccount ? "You can contribute and vote" : "You can contribute · voting is for members"}</strong><span><code>${escapeHtml(state.accountId)}</code>${isMemberAccount ? " is one of the fixed DAO members." : " is not in the fixed voting group."}</span></div>`;
+    const goalCompleted = Boolean(goalSnapshot && BigInt(goalSnapshot.spent) > 0n);
     const contributionForm = safety.ready && state.accountId && goalSnapshot
-      && BigInt(goalSnapshot.contributed) < BigInt(goal.targetYocto)
-      ? `<form class="fund-action-card" data-community-contribution novalidate><span class="section-kicker">Contribute to this goal</span><h2>Help fund ${escapeHtml(goal.title)}</h2><p>This sends native Testnet NEAR directly from your wallet to the dedicated DAO treasury. Any connected Testnet wallet may contribute; only configured DAO members can propose or vote. Contributions are public and the contract does not provide personal withdrawals or automatic refunds.</p><label for="fund-contribution-amount">Amount in Testnet NEAR</label><input id="fund-contribution-amount" name="amount" type="number" inputmode="decimal" min="0.000001" step="0.000001" required><div class="form-error-summary" tabindex="-1" role="alert" hidden></div><button class="button button-primary" type="submit">Review goal contribution</button></form>`
+      && !goalCompleted && BigInt(goalSnapshot.contributed) < BigInt(goal.targetYocto)
+      ? `<form class="fund-action-card" data-community-contribution novalidate><span class="section-kicker">Contribute</span><h2>Help fund this goal</h2><p>Send Testnet NEAR from your wallet to the community’s separate DAO treasury. The transfer is public and cannot be personally withdrawn or automatically refunded.</p><label for="fund-contribution-amount">Amount in Testnet NEAR</label><input id="fund-contribution-amount" name="amount" type="number" inputmode="decimal" min="0.000001" step="0.000001" required><div class="form-error-summary" tabindex="-1" role="alert" hidden></div><button class="button button-primary" type="submit">Review contribution</button></form>`
       : "";
-    const proposalForm = safety.ready && canPropose && activityComplete && goalSnapshot
-      && BigInt(goalSnapshot.spent) < BigInt(goal.targetYocto)
-      ? `<form class="fund-action-card" data-community-proposal novalidate><span class="section-kicker">Propose the goal payment</span><h2>Ask members to approve payment</h2><div class="goal-fixed-recipient"><span>Configured goal recipient</span><code>${escapeHtml(goal.recipient)}</code><small>The HarvestPool journey fixes this recipient, but SputnikDAO itself relies on member review and does not enforce a recipient allowlist.</small></div><div class="field"><label for="fund-allocation-amount">Amount in Testnet NEAR</label><input id="fund-allocation-amount" name="amount" type="number" inputmode="decimal" min="0.000001" step="0.000001" required></div><div class="field"><label for="fund-allocation-reason">Why should members approve this payment?</label><textarea id="fund-allocation-reason" name="reason" maxlength="500" rows="3" required></textarea></div><p class="field-help">Creating a proposal attaches exactly ${communityFundTools.formatNear(fund.policy.proposal_bond)} Testnet NEAR as the DAO’s on-chain proposal bond. The recipient and amount become part of the public proposal; payment occurs only after the required approvals.</p><div class="form-error-summary" tabindex="-1" role="alert" hidden></div><button class="button button-primary" type="submit">Review goal payment proposal</button></form>`
+    const proposalForm = safety.ready && canPropose && activityComplete && goalSnapshot && !goalCompleted
+      && sections.open.length === 0
+      ? `<form class="fund-action-card" data-community-proposal novalidate><span class="section-kicker">Request a payment</span><h2>Ask members to approve</h2><div class="goal-fixed-recipient"><span>Intended recipient</span><code>${escapeHtml(goal.recipient)}</code><small>HarvestPool fixes this recipient in its request form. SputnikDAO itself relies on members checking and approving the recipient written into the request.</small></div><div class="field"><label for="fund-allocation-amount">Amount in Testnet NEAR</label><input id="fund-allocation-amount" name="amount" type="number" inputmode="decimal" min="0.000001" step="0.000001" required></div><div class="field"><label for="fund-allocation-reason">Why is this payment needed?</label><textarea id="fund-allocation-reason" name="reason" maxlength="500" rows="3" required></textarea></div><p class="field-help">This public request uses a ${communityFundTools.formatNear(fund.policy.proposal_bond)} Testnet NEAR proposal bond. The payment is sent only after the required approvals.</p><div class="form-error-summary" tabindex="-1" role="alert" hidden></div><button class="button button-primary" type="submit">Review payment request</button></form>`
       : "";
-    const proposalCards = fund.proposals.map((proposal) => communityProposalCard(proposal, safety, fund.activity, goal)).filter(Boolean).join("");
+    const proposalCards = (items) => items.map((proposal) => communityProposalCard(proposal, safety, fund.activity, goal)).filter(Boolean).join("");
     const goalProgress = goalSnapshot
       ? `<div class="goal-progress" role="progressbar" aria-label="Verified contributions toward ${escapeHtml(goal.title)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.floor(goalSnapshot.progressBasisPoints / 100)}" aria-valuetext="${escapeHtml(`${communityFundTools.formatNear(goalSnapshot.contributed)} of ${communityFundTools.formatNear(goalSnapshot.target)} Testnet NEAR contributed`)}"><span style="width:${goalSnapshot.progressBasisPoints / 100}%"></span></div><div class="goal-progress-label"><strong>${communityFundTools.formatNear(goalSnapshot.contributed)} Testnet NEAR verified</strong><span>of ${communityFundTools.formatNear(goalSnapshot.target)} target</span></div>`
       : '<div class="goal-progress-unavailable">Verified contribution progress is unavailable until complete indexed history is available.</div>';
-    const voteRuleCopy = safety.ready
-      ? `Only the fixed DAO members shown by the policy can propose or vote, and ${safety.requiredVotes} approvals are required.`
-      : "Voting and payment actions remain disabled because the DAO policy did not pass verification.";
-    const goalCard = `<section class="community-goal-card" aria-labelledby="community-goal-heading"><div class="goal-card-top"><div><span class="section-kicker">One dedicated Community Goal</span><h2 id="community-goal-heading">${escapeHtml(goal.title)}</h2></div><span class="status ${goalSnapshot?.status === "Approved payment recorded" ? "status-funded" : "status-pending"}"><span></span>${escapeHtml(goalSnapshot?.status || "Verification unavailable")}</span></div><p class="goal-purpose">${escapeHtml(goal.purpose)}</p>${goalProgress}<dl class="goal-details"><div><dt>Target</dt><dd>${communityFundTools.formatNear(goal.targetYocto)} Testnet NEAR</dd></div><div><dt>Recipient</dt><dd><code>${escapeHtml(goal.recipient)}</code></dd></div><div><dt>Approved and paid</dt><dd>${goalSnapshot ? `${communityFundTools.formatNear(goalSnapshot.spent)} Testnet NEAR` : "Unavailable"}</dd></div><div><dt>Who decides</dt><dd>${safety.ready ? `${safety.requiredVotes} of ${safety.memberCount} fixed DAO members` : "DAO policy verification failed"}</dd></div></dl><p class="goal-boundary-note">The target and purpose explain this demonstration goal; they do not create goal-specific escrow, automatic release, or refunds. Verified contributions are direct transfers to this one DAO treasury. Members must approve a separate on-chain payment proposal before money leaves.</p></section>`;
-    root.innerHTML = `${goalCard}${safetyMarkup}<section class="fund-overview" aria-labelledby="fund-overview-heading"><div class="fund-overview-heading"><div><span class="section-kicker">Authoritative treasury overview</span><h2 id="fund-overview-heading">Goal treasury</h2><p><code>${escapeHtml(appConfig.communityDaoId)}</code> · SputnikDAO ${escapeHtml(fund.version)}</p></div>${connectMarkup}</div><div class="fund-stat-grid"><div><span>Verified contributions</span><strong>${contributed === null ? "Unavailable" : `${communityFundTools.formatNear(contributed)} Ⓝ`}</strong><small>${activityComplete ? "Successful direct transfers indexed on Testnet; deployment reserves are separate" : "Hidden until complete indexed history is available"}</small></div><div><span>Available balance</span><strong>${communityFundTools.formatNear(fund.availableAmount)} Ⓝ</strong><small>DAO contract balance after storage and locked proposal bonds</small></div><div><span>Total spent</span><strong>${spent === null ? "Unavailable" : `${communityFundTools.formatNear(spent)} Ⓝ`}</strong><small>All proposals with an exact successful DAO transfer receipt</small></div><div><span>Awaiting member approval</span><strong>${pending === null ? "Unavailable" : `${communityFundTools.formatNear(pending)} Ⓝ`}</strong><small>Proposed payments still awaiting votes</small></div><div><span>Approved, receipt unverified</span><strong>${approvedUnverified === null ? "Unavailable" : `${communityFundTools.formatNear(approvedUnverified)} Ⓝ`}</strong><small>Not counted as spent until a matching receipt is indexed</small></div></div><p class="fund-public-note">Any connected Testnet wallet can contribute. ${escapeHtml(voteRuleCopy)} All goal activity is public on NEAR Testnet; it is not private or anonymous.</p></section>${contributionForm || proposalForm ? `<section class="fund-action-grid">${contributionForm}${proposalForm}</section>` : ""}<section class="fund-proposals" aria-labelledby="fund-proposals-heading"><div class="section-heading-inline"><div><span class="section-kicker">Recorded member decisions</span><h2 id="fund-proposals-heading">Goal payment proposals</h2></div><span class="meta-label">${allocations.length} proposals</span></div>${proposalCards || '<div class="dashboard-empty compact"><p>No native-NEAR goal payment proposals are recorded yet.</p></div>'}</section><section class="fund-history" aria-labelledby="fund-history-heading"><div class="section-heading-inline"><div><span class="section-kicker">Public transaction record</span><h2 id="fund-history-heading">Verified money in and payments out</h2></div><a class="text-link" href="${escapeHtml(fund.activity?.sourceUrl || `https://testnet.nearblocks.io/address/${appConfig.communityDaoId}`)}" target="_blank" rel="noopener noreferrer">Powered by NearBlocks <span aria-hidden="true">↗</span></a></div>${communityHistoryMarkup(fund, allocations, goal)}</section>`;
+    const goalCard = `<section class="community-goal-card" aria-labelledby="community-goal-heading"><div class="goal-card-top"><div><span class="section-kicker">Community Goal</span><h2 id="community-goal-heading">${escapeHtml(goal.title)}</h2></div><span class="status ${goalCompleted ? "status-funded" : "status-pending"}"><span></span>${escapeHtml(goalSnapshot?.status || "Verification unavailable")}</span></div><p class="goal-purpose">${escapeHtml(goal.purpose)}</p>${goalProgress}<dl class="goal-details"><div><dt>Target</dt><dd>${communityFundTools.formatNear(goal.targetYocto)} Testnet NEAR</dd></div><div><dt>Recipient</dt><dd><code>${escapeHtml(goal.recipient)}</code></dd></div><div><dt>Paid</dt><dd>${goalSnapshot ? `${communityFundTools.formatNear(goalSnapshot.spent)} Testnet NEAR` : "Unavailable"}</dd></div><div><dt>Approval rule</dt><dd>${safety.ready ? `${safety.requiredVotes} of ${safety.memberCount} members` : "Verification failed"}</dd></div></dl></section>`;
+    const activeTab = state.communityFund.activeTab || requestedCommunityTab();
+    state.communityFund.activeTab = activeTab;
+    const countLabel = (count) => count === null ? "" : ` <span>(${count})</span>`;
+    const needsVoteCount = state.accountId && fund.proposalsComplete ? sections.needsVote.length : null;
+    const openCount = fund.proposalsComplete ? sections.open.length : null;
+    const completedCount = fund.proposalsComplete && activityComplete ? sections.completed.length : null;
+    const tabs = [
+      ["overview", "Overview", null],
+      ["needs-vote", "Needs your vote", needsVoteCount],
+      ["open", "Open requests", openCount],
+      ["completed", "Completed", completedCount],
+      ["activity", "Activity", null],
+    ];
+    const tabMarkup = `<div class="fund-tabs" role="tablist" aria-label="Community Goal sections">${tabs.map(([id, label, count]) => `<button class="fund-tab" id="community-tab-${id}" type="button" role="tab" aria-selected="${activeTab === id}" aria-controls="community-panel-${id}" tabindex="${activeTab === id ? "0" : "-1"}" data-community-tab="${id}">${label}${countLabel(count)}</button>`).join("")}</div>`;
+    let panelMarkup = "";
+    if (activeTab === "overview") {
+      panelMarkup = `<section class="fund-overview" id="community-panel-overview" role="tabpanel" aria-labelledby="community-tab-overview"><div class="fund-overview-heading"><div><span class="section-kicker">Community funds</span><h2>What the community has</h2><p><code>${escapeHtml(appConfig.communityDaoId)}</code></p></div>${connectMarkup}</div><div class="fund-stat-grid"><div><span>Amount raised</span><strong>${contributed === null ? "Unavailable" : `${communityFundTools.formatNear(contributed)} Ⓝ`}</strong><small>${activityComplete ? "Confirmed direct contributions" : "Hidden until complete history is available"}</small></div><div><span>Available now</span><strong>${communityFundTools.formatNear(fund.availableAmount)} Ⓝ</strong><small>DAO balance after storage and locked bonds</small></div><div><span>Total paid</span><strong>${spent === null ? "Unavailable" : `${communityFundTools.formatNear(spent)} Ⓝ`}</strong><small>Only payments with a successful transfer receipt</small></div><div><span>Needs approval</span><strong>${pending === null ? "Unavailable" : `${communityFundTools.formatNear(pending)} Ⓝ`}</strong><small>Open payment requests</small></div>${approvedUnverified !== "0" ? `<div><span>Confirmation pending</span><strong>${approvedUnverified === null ? "Unavailable" : `${communityFundTools.formatNear(approvedUnverified)} Ⓝ`}</strong><small>Not counted as paid</small></div>` : ""}</div><p class="fund-public-note">Any Testnet wallet can contribute. Only the fixed DAO members can request or approve payments.</p>${safetyMarkup}${contributionForm ? `<div class="fund-action-grid single">${contributionForm}</div>` : ""}</section>`;
+    } else if (activeTab === "needs-vote") {
+      const content = !state.accountId
+        ? '<div class="dashboard-empty compact"><p>Connect your wallet to see requests you can vote on.</p><button class="button button-dark" type="button" data-connect-wallet>Connect wallet</button></div>'
+        : sections.needsVote.length
+          ? proposalCards(sections.needsVote)
+          : `<div class="dashboard-empty compact"><p>${isMemberAccount ? "You have no payment requests waiting for your vote." : "This wallet is not one of the fixed voting members."}</p></div>`;
+      panelMarkup = `<section class="fund-proposals" id="community-panel-needs-vote" role="tabpanel" aria-labelledby="community-tab-needs-vote"><div class="section-heading-inline"><div><span class="section-kicker">Your actions</span><h2>Needs your vote</h2></div></div>${content}</section>`;
+    } else if (activeTab === "open") {
+      panelMarkup = `<section class="fund-proposals" id="community-panel-open" role="tabpanel" aria-labelledby="community-tab-open"><div class="section-heading-inline"><div><span class="section-kicker">Requests for approval</span><h2>Open payment requests</h2></div></div>${proposalForm ? `<div class="fund-action-grid single">${proposalForm}</div>` : ""}${proposalCards(sections.open) || '<div class="dashboard-empty compact"><p>No payment requests are waiting for member approval.</p></div>'}</section>`;
+    } else if (activeTab === "completed") {
+      panelMarkup = `<section class="fund-proposals" id="community-panel-completed" role="tabpanel" aria-labelledby="community-tab-completed"><div class="section-heading-inline"><div><span class="section-kicker">Recorded decisions</span><h2>Completed requests</h2></div></div>${proposalCards(sections.completed) || '<div class="dashboard-empty compact"><p>No completed payment requests are recorded yet.</p></div>'}</section>`;
+    } else {
+      panelMarkup = `<section class="fund-history" id="community-panel-activity" role="tabpanel" aria-labelledby="community-tab-activity"><div class="section-heading-inline"><div><span class="section-kicker">Public transaction record</span><h2>Money in and out</h2></div><a class="text-link" href="${escapeHtml(fund.activity?.sourceUrl || `https://testnet.nearblocks.io/address/${appConfig.communityDaoId}`)}" target="_blank" rel="noopener noreferrer">Open NearBlocks <span aria-hidden="true">↗</span></a></div>${communityHistoryMarkup(fund, allocations, goal)}</section>`;
+    }
+    root.innerHTML = `${goalCard}${tabMarkup}${panelMarkup}`;
   }
 
   function renderCurrentPage() {
@@ -4143,9 +4197,12 @@
       { confirmOnReturn: false },
     );
     if (!outcome) return;
+    let verificationAttempt = 0;
     const confirmed = await confirmationTools.waitForState(
       async () => {
-        await loadCommunityFundData();
+        verificationAttempt += 1;
+        const refreshActivity = decidingApproval && [1, 5, 9].includes(verificationAttempt);
+        await loadCommunityFundData({ refreshActivity });
         const updatedProposal = state.communityFund.proposals.find((item) => Number(item.id) === proposalId);
         return {
           allocation: communityFundTools.allocationFromProposal(updatedProposal),
@@ -4167,7 +4224,7 @@
         }
         return null;
       },
-      { attempts: 8, delayMs: 1000 },
+      { attempts: 12, delayMs: 1500 },
     );
     renderCurrentPage();
     if (confirmed?.state === "paid") {
@@ -4236,7 +4293,18 @@
         event.preventDefault();
         const action = communityButton.dataset.communityAction;
         if (action === "refresh") await refreshLiveData({ force: true });
+        if (action === "refresh-history") {
+          await loadCommunityFundData({ refreshActivity: true });
+          state.lastLiveRefreshAt = Date.now();
+          renderCurrentPage();
+        }
         if (action === "vote") await runGuardedSubmission(communityButton, () => handleCommunityVote(communityButton));
+        return;
+      }
+      const communityTab = event.target.closest("[data-community-tab]");
+      if (communityTab) {
+        event.preventDefault();
+        activateCommunityTab(communityTab.dataset.communityTab, { focus: true });
         return;
       }
       const connectButton = event.target.closest("[data-connect-wallet]");
@@ -4350,6 +4418,17 @@
       focusCreateErrorLink(link);
     });
     document.addEventListener("keydown", (event) => {
+      const communityCurrent = event.target.closest?.('[role="tab"][data-community-tab]');
+      if (communityCurrent && ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+        event.preventDefault();
+        const tabs = $$('[role="tab"][data-community-tab]', communityCurrent.closest('[role="tablist"]'));
+        const index = tabs.indexOf(communityCurrent);
+        const nextIndex = event.key === "Home" ? 0
+          : event.key === "End" ? tabs.length - 1
+            : (index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+        activateCommunityTab(tabs[nextIndex].dataset.communityTab, { focus: true });
+        return;
+      }
       const current = event.target.closest?.('[role="tab"][data-action-center-tab]');
       if (!current || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
       event.preventDefault();
