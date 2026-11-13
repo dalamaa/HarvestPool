@@ -316,6 +316,17 @@ test("USDC goal progress uses targetUnits without a NEAR target", () => {
   assert.equal(snapshot.progressBasisPoints, 2500);
 });
 
+test("a 0.01 USDC contribution is exactly ten percent of the Community Garden target", () => {
+  const snapshot = fund.goalSnapshot(
+    { configured: true, recipient: "recipient.testnet", targetUnits: "100000" },
+    "10000",
+    [],
+    {},
+  );
+  assert.equal(snapshot.progressBasisPoints, 1000);
+  assert.equal(Math.floor(snapshot.progressBasisPoints / 100), 10);
+});
+
 test("goal progress caps only the bar and keeps actual over-target totals", () => {
   const snapshot = fund.goalSnapshot({ configured: true, recipient: "recipient.testnet", targetUnits: "1000000" }, "1250000", [], {});
   assert.equal(snapshot.contributed, "1250000");

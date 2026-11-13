@@ -13,6 +13,11 @@ test("Community Garden closes its contribution action at the application target"
   assert.match(appSource, /application-level restriction/);
 });
 
+test("Community Fund progress rendering never passes a BigInt to Math.floor", () => {
+  assert.doesNotMatch(appSource, /Math\.floor\(\(BigInt\(/);
+  assert.match(appSource, /Math\.floor\(goalSnapshot\.progressBasisPoints \/ 100\)/);
+});
+
 test("contribution review names the exact asset, network, recipient, and no-refund boundary", () => {
   assert.match(appSource, /Review Community Goal contribution/);
   assert.match(appSource, /USDC on NEAR Testnet/);
