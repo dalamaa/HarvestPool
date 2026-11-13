@@ -129,7 +129,7 @@
   const YOCTO_PER_NEAR = 10n ** 24n;
   const PRICE_SCALE = 1_000_000n;
   const RECONCILIATION_MAX_AGE_MS = 5 * 60_000;
-  const TRANSACTION_BUNDLE_VERSION = "2026-11-13.2";
+  const TRANSACTION_BUNDLE_VERSION = "2026-11-13.3";
   const WALLET_RESULT_TIMEOUT_MS = 15_000;
   const EXPLORE_REFRESH_INTERVAL_MS = 15_000;
   const CREATE_SUBMITTED_KEY = "harvestpool:create-submitted:v1";
@@ -1376,7 +1376,9 @@
   async function readActionConfirmation(action) {
     const { methodName, args = {}, signerId, receiverId } = action;
     if (methodName === "community_contribute_usdc") {
-      if (!action.transactionHash) return { state: "uncertain" };
+      if (!action.transactionHash) {
+        return { state: "uncertain", reason: "The saved action has no transaction hash, so it cannot be matched to one finalized transfer automatically." };
+      }
       const configuredFund = communityFundTools.configuredContributionFund(appConfig.communityFunds, {
         daoId: action.context?.daoId,
         tokenId: receiverId,
@@ -1390,6 +1392,7 @@
         amount: args.amount,
       };
       let verified = { state: "uncertain" };
+      let verificationFailure = null;
       try {
         const outcome = await rpcRequest("tx", {
           tx_hash: action.transactionHash,
@@ -1397,7 +1400,8 @@
           wait_until: "FINAL",
         });
         verified = communityFundTools.verifyTokenContributionOutcome(outcome, expected);
-      } catch (_error) {
+      } catch (error) {
+        verificationFailure = error;
         // A finalized, exact indexer record may reconcile a temporary transaction-RPC failure.
       }
       if (verified.state === "failed") return verified;
@@ -1420,9 +1424,14 @@
           indexedActivity = activity;
           indexedRecord = communityFundTools.verifiedContributionRecord(activity, expected);
           if (onMatchingFundPage) applyCommunityActivity(activity);
+        } else {
+          verificationFailure = verificationFailure || new Error(activity.error || "The verified activity service is unavailable.");
         }
       }
-      if (verified.state !== "confirmed" && !indexedRecord) return { state: "uncertain" };
+      if (verified.state !== "confirmed" && !indexedRecord) {
+        const detail = String(verificationFailure?.message || "No exact finalized contribution record was available.");
+        return { state: "uncertain", reason: `${detail} The saved action was preserved and no transfer was resubmitted.` };
+      }
       const balance = await viewOnContract(receiverId, "ft_balance_of", { account_id: action.context?.daoId });
       const expectedMinimum = BigInt(String(action.context?.previousTreasuryBalance || "0")) + BigInt(String(args.amount));
       if (BigInt(String(balance || "0")) < expectedMinimum) return { state: "uncertain" };
@@ -1544,6 +1553,9 @@
   }
 
   async function waitForActionConfirmation(action, options = {}) {
+    if (action.methodName === "community_contribute_usdc" && !action.transactionHash) {
+      return readActionConfirmation(action);
+    }
     const callbackMethods = new Set([
       "commit_usdc", "raise_issue", "request_group_vote", "reconcile_token_balance",
       "release_payment", "claim_refund", "community_contribute_usdc",
@@ -1579,7 +1591,9 @@
     const message = phase === "wallet"
       ? "Review the request in your wallet. No action is complete until the deal record confirms it."
       : phase === "unresolved"
-        ? "We haven't confirmed the result yet. Please don't submit again while we check."
+        ? current.methodName === "community_contribute_usdc" && !current.transactionHash
+          ? "This saved contribution has no transaction hash, so automatic confirmation cannot finish. Open Action Center for the exact details; do not submit again."
+          : "We haven't confirmed the result yet. Please don't submit again while we check."
         : "Your request was submitted. We’re checking the result now…";
     notice.innerHTML = `<div><strong>${escapeHtml(title)}</strong><span>${escapeHtml(message)}</span></div>`;
   }
@@ -1628,6 +1642,35 @@
     } finally {
       state.reconcilingPending = false;
     }
+  }
+
+  async function checkPendingAction(actionId) {
+    const action = pendingActionStore.list(state.accountId).find((item) => String(item.id) === String(actionId));
+    if (!action) return { state: "missing", message: "This saved action is no longer pending." };
+    if (action.methodName === "community_contribute_usdc" && !action.transactionHash) {
+      return {
+        state: "unverifiable",
+        message: "This saved contribution has no transaction hash because Meteor returned after the wallet-response timeout. It was preserved and no transfer was resubmitted. Reopen this page with the finalized transactionHash parameter, then check again.",
+      };
+    }
+    const result = await readActionConfirmation(action);
+    if (result?.state === "confirmed") {
+      pendingActionStore.remove(action.id);
+      clearDraftReference(action.context?.draft);
+      renderCurrentPage();
+      renderPendingConfirmationNotice();
+      return { state: "confirmed", message: actionSuccessCopy(action.methodName) };
+    }
+    if (result?.state === "failed") {
+      return {
+        state: "failed",
+        message: "The finalized transaction does not exactly match this saved action. The action was preserved; do not resubmit it.",
+      };
+    }
+    return {
+      state: "uncertain",
+      message: result?.reason || "Finalized state is not available yet. The saved action was preserved and no transaction was resubmitted.",
+    };
   }
 
   async function recoverIfTransactionBundleChanged() {
@@ -3038,7 +3081,16 @@
         return purchase && commitment ? `<article class="decision-card action-card-priority" id="action-${escapeHtml(task.id)}"><div class="purchase-card-top">${statusPill(presentationState(purchase))}<span class="section-kicker">Deal #${escapeHtml(purchase.id)}</span></div><h3>Refund ready</h3><p>${escapeHtml(customerPaymentLabel(purchase, commitment.amount))} is available to the original buyer account.</p><div class="vote-actions"><button class="button button-primary" type="button" data-action="claim-refund" data-purchase-id="${escapeHtml(purchase.id)}">Claim refund</button><a class="button button-outline" href="/purchases/${encodeURIComponent(purchase.id)}">Review deal</a></div></article>` : "";
       }
       if (task.kind === "pending-transaction") {
-        return `<article class="decision-card" id="action-${escapeHtml(task.id)}"><span class="status status-pending"><span></span>Confirmation unresolved</span><h3>Check the submitted action</h3><p>HarvestPool has not confirmed ${escapeHtml(actionProgressCopy(task.methodName).toLowerCase())}. No automatic retry will be submitted.</p><div class="vote-actions"><button class="button button-primary" type="button" data-action="check-pending-actions">Check on-chain state</button></div></article>`;
+        const amount = task.methodName === "community_contribute_usdc" && /^\d+$/.test(String(task.amount || ""))
+          ? `${usdFromTokenUnits(task.amount, 6)} (${escapeHtml(task.amount)} base units)`
+          : escapeHtml(String(task.amount || "Not applicable"));
+        const hash = task.transactionHash
+          ? communityExplorerLink(task.transactionHash, task.transactionHash)
+          : "Not saved — Meteor returned after the wallet-response timeout";
+        const missingHash = task.methodName === "community_contribute_usdc" && !task.transactionHash
+          ? "This record cannot be matched to one finalized transfer until its transaction hash is restored. Do not contribute again."
+          : "HarvestPool will verify the exact signer, receiver, method, arguments, amount, and finalized receipts.";
+        return `<article class="decision-card" id="action-${escapeHtml(task.id)}"><span class="status status-pending"><span></span>Confirmation unresolved</span><h3>Check the submitted action</h3><p>${escapeHtml(missingHash)}</p><details class="technical-details"><summary>Saved action details</summary><dl class="checkout-status-facts"><div><dt>Signer</dt><dd><code>${escapeHtml(task.signerId)}</code></dd></div><div><dt>Token contract</dt><dd><code>${escapeHtml(task.receiverId)}</code></dd></div><div><dt>DAO</dt><dd><code>${escapeHtml(task.daoId || "Not applicable")}</code></dd></div><div><dt>Amount</dt><dd>${amount}</dd></div><div><dt>Transaction</dt><dd>${hash}</dd></div></dl></details><div class="vote-actions"><button class="button button-primary" type="button" data-action="check-pending-actions" data-pending-action-id="${escapeHtml(task.actionId)}">Check on-chain state</button></div><p class="field-help" role="status" aria-live="polite" data-pending-check-result></p></article>`;
       }
       return "";
     }).filter(Boolean);
@@ -4739,10 +4791,30 @@
         return;
       }
       if (action === "check-pending-actions") {
+        const pendingActionId = actionButton.dataset.pendingActionId;
+        const resultNode = actionButton.closest(".decision-card")?.querySelector("[data-pending-check-result]");
         setBusy(actionButton, true, "Checking state…");
-        const remaining = await reconcilePendingActions({ poll: true });
-        setBusy(actionButton, false);
-        if (remaining.length) showToast("Still confirming your transaction. No retry was submitted.");
+        if (resultNode) resultNode.textContent = "Checking finalized Testnet state…";
+        try {
+          if (pendingActionId) {
+            const result = await checkPendingAction(pendingActionId);
+            if (resultNode?.isConnected) resultNode.textContent = result.message;
+            showToast(result.message, result.state === "confirmed" ? "success" : result.state === "failed" ? "error" : "");
+          } else {
+            const remaining = await reconcilePendingActions({ poll: true });
+            const message = remaining.length
+              ? "Finalized state is still unavailable. The saved action remains protected and no retry was submitted."
+              : "The submitted action is no longer pending.";
+            if (resultNode?.isConnected) resultNode.textContent = message;
+            showToast(message, remaining.length ? "" : "success");
+          }
+        } catch (error) {
+          const message = `On-chain verification could not finish: ${String(error?.message || error)} The saved action was preserved and no transaction was submitted.`;
+          if (resultNode?.isConnected) resultNode.textContent = message;
+          showToast(message, "error");
+        } finally {
+          if (actionButton.isConnected) setBusy(actionButton, false);
+        }
         return;
       }
       if (action === "discard-draft") {

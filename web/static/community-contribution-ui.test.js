@@ -47,6 +47,16 @@ test("finalized contribution recovery requires exact indexed evidence and treasu
   assert.match(appSource, /onMatchingFundPage/);
 });
 
+test("manual pending checks always explain hashless, unavailable, or confirmed state", () => {
+  assert.match(appSource, /async function checkPendingAction/);
+  assert.match(appSource, /saved contribution has no transaction hash because Meteor returned after the wallet-response timeout/);
+  assert.match(appSource, /data-pending-check-result/);
+  assert.match(appSource, /On-chain verification could not finish:/);
+  assert.match(appSource, /pendingActionStore\.remove\(action\.id\)/);
+  assert.match(appSource, /data-pending-action-id/);
+  assert.match(appSource, /waitForActionConfirmation[\s\S]*community_contribute_usdc[\s\S]*!action\.transactionHash[\s\S]*return readActionConfirmation\(action\)/);
+});
+
 test("Community Fund progress rendering never passes a BigInt to Math.floor", () => {
   assert.doesNotMatch(appSource, /Math\.floor\(\(BigInt\(/);
   assert.match(appSource, /Math\.floor\(goalSnapshot\.progressBasisPoints \/ 100\)/);

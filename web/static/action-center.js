@@ -63,8 +63,14 @@
       tasks.push({
         id: `pending-${action.id}`,
         kind: "pending-transaction",
+        actionId: action.id,
         purchaseId,
         methodName: action.methodName,
+        transactionHash: action.transactionHash || null,
+        signerId: action.signerId,
+        receiverId: action.receiverId,
+        daoId: action.context?.daoId || "",
+        amount: action.args?.amount || "",
       });
     });
     return tasks;

@@ -48,6 +48,25 @@ test("an unresolved submission replaces rather than duplicates its eligible task
   assert.deepEqual(tasks.map((task) => task.kind), ["pending-transaction"]);
 });
 
+test("an unresolved contribution exposes the exact saved verification fields", () => {
+  const action = {
+    id: "garden-contribution",
+    signerId: "dalamaa.testnet",
+    receiverId: "usdc.testnet",
+    methodName: "community_contribute_usdc",
+    args: { receiver_id: "garden.sputnikv2.testnet", amount: "100000" },
+    context: { daoId: "garden.sputnikv2.testnet" },
+    transactionHash: null,
+  };
+  const [task] = eligibleTasks({ accountId: "dalamaa.testnet", pending: [action] });
+  assert.equal(task.actionId, action.id);
+  assert.equal(task.signerId, action.signerId);
+  assert.equal(task.receiverId, action.receiverId);
+  assert.equal(task.daoId, action.context.daoId);
+  assert.equal(task.amount, action.args.amount);
+  assert.equal(task.transactionHash, null);
+});
+
 test("supplier invitations are eligible only for the named supplier", () => {
   const purchase = { id: 8, state: "AwaitingSupplier", supplier_id: "supplier.testnet", proposer: "organizer.testnet" };
   assert.deepEqual(eligibleTasks({ accountId: "supplier.testnet", purchases: [purchase] }).map((task) => task.kind), ["supplier-invitation"]);
