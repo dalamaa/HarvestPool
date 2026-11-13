@@ -163,6 +163,48 @@ test("USDC registration and direct contribution payloads are exact", () => {
   });
 });
 
+test("authoritative contribution total is treasury balance plus verified payments", () => {
+  assert.equal(fund.totalContributions("200000", "800000"), "1000000");
+  assert.equal(fund.totalContributions("250000", "800000"), "1050000");
+  assert.equal(fund.totalContributions("unknown", "800000"), null);
+});
+
+test("finalized USDC contribution proof requires the exact signer, token, DAO, amount, and event", () => {
+  const tokenId = "usdc.testnet";
+  const daoId = "community.sputnikv2.testnet";
+  const signerId = "donor.testnet";
+  const transactionHash = "tx-hash";
+  const amount = "25000";
+  const args = Buffer.from(JSON.stringify({ receiver_id: daoId, amount, memo: "Contribution" })).toString("base64");
+  const outcome = {
+    final_execution_status: "FINAL",
+    status: { SuccessValue: "" },
+    transaction: {
+      hash: transactionHash,
+      signer_id: signerId,
+      receiver_id: tokenId,
+      actions: [{ FunctionCall: { method_name: "ft_transfer", args, deposit: "1" } }],
+    },
+    receipts_outcome: [{
+      id: "receipt-id",
+      outcome: {
+        executor_id: tokenId,
+        status: { SuccessValue: "" },
+        logs: [`EVENT_JSON:${JSON.stringify({
+          standard: "nep141",
+          event: "ft_transfer",
+          data: [{ old_owner_id: signerId, new_owner_id: daoId, amount }],
+        })}`],
+      },
+    }],
+  };
+  const expected = { tokenId, daoId, signerId, transactionHash, amount };
+  assert.equal(fund.verifyTokenContributionOutcome(outcome, expected).state, "confirmed");
+  assert.equal(fund.verifyTokenContributionOutcome(outcome, { ...expected, amount: "25001" }).state, "failed");
+  assert.equal(fund.verifyTokenContributionOutcome({ ...outcome, receipts_outcome: [] }, expected).state, "uncertain");
+  assert.equal(fund.verifyTokenContributionOutcome({ ...outcome, status: { Failure: {} } }, expected).state, "failed");
+});
+
 test("USDC payment proof requires the configured token receipt", () => {
   const allocation = { id: 8, receiverId: "recipient.testnet", amount: "200000", tokenId: "usdc.testnet" };
   const activity = { proposalTransactions: { 8: [{
@@ -263,7 +305,7 @@ test("one-goal progress uses verified direct contributions and matching recipien
   assert.equal(snapshot.contributed, "1250");
   assert.equal(snapshot.progressBasisPoints, 10000);
   assert.equal(snapshot.spent, "600");
-  assert.equal(snapshot.status, "In Progress");
+  assert.equal(snapshot.status, "Goal Reached");
   assert.equal(fund.goalSnapshot(goal, null, allocations, activity), null);
 });
 
@@ -272,4 +314,11 @@ test("USDC goal progress uses targetUnits without a NEAR target", () => {
   assert.equal(snapshot.target, "1000000");
   assert.equal(snapshot.contributed, "250000");
   assert.equal(snapshot.progressBasisPoints, 2500);
+});
+
+test("goal progress caps only the bar and keeps actual over-target totals", () => {
+  const snapshot = fund.goalSnapshot({ configured: true, recipient: "recipient.testnet", targetUnits: "1000000" }, "1250000", [], {});
+  assert.equal(snapshot.contributed, "1250000");
+  assert.equal(snapshot.progressBasisPoints, 10000);
+  assert.equal(snapshot.status, "Goal Reached");
 });

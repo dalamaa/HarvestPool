@@ -187,6 +187,75 @@
     };
   }
 
+  function totalContributions(treasuryBalance, verifiedPayments) {
+    if (!/^\d+$/.test(String(treasuryBalance ?? "")) || !/^\d+$/.test(String(verifiedPayments ?? ""))) {
+      return null;
+    }
+    return (BigInt(treasuryBalance) + BigInt(verifiedPayments)).toString();
+  }
+
+  function decodeBase64Json(value) {
+    try {
+      const decoded = typeof atob === "function"
+        ? atob(String(value || ""))
+        : Buffer.from(String(value || ""), "base64").toString("utf8");
+      return JSON.parse(decoded);
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  function verifyTokenContributionOutcome(outcome, expected = {}) {
+    const transaction = outcome?.transaction || {};
+    const status = outcome?.status;
+    if (status?.Failure || status === "Failure") return { state: "failed" };
+    if (outcome?.final_execution_status !== "FINAL"
+      || (!status || (status.SuccessValue === undefined && status.SuccessReceiptId === undefined))) {
+      return { state: "uncertain" };
+    }
+    const actions = transaction.actions || [];
+    const call = actions.length === 1 ? actions[0]?.FunctionCall : null;
+    const args = call ? decodeBase64Json(call.args) : null;
+    if (transaction.hash !== expected.transactionHash
+      || transaction.signer_id !== expected.signerId
+      || transaction.receiver_id !== expected.tokenId
+      || call?.method_name !== "ft_transfer"
+      || String(call?.deposit || "") !== "1"
+      || args?.receiver_id !== expected.daoId
+      || String(args?.amount || "") !== String(expected.amount || "")) {
+      return { state: "failed" };
+    }
+    let receiptId = null;
+    for (const receipt of outcome.receipts_outcome || []) {
+      if (receipt?.outcome?.executor_id !== expected.tokenId) continue;
+      const receiptStatus = receipt?.outcome?.status || {};
+      if (!Object.keys(receiptStatus).some((key) => key.startsWith("Success"))) continue;
+      for (const log of receipt?.outcome?.logs || []) {
+        if (typeof log !== "string" || !log.startsWith("EVENT_JSON:")) continue;
+        try {
+          const event = JSON.parse(log.slice("EVENT_JSON:".length));
+          const transfer = (event?.data || []).find((item) => event.standard === "nep141"
+            && event.event === "ft_transfer"
+            && item?.old_owner_id === expected.signerId
+            && item?.new_owner_id === expected.daoId
+            && String(item?.amount || "") === String(expected.amount || ""));
+          if (transfer) receiptId = String(receipt.id || "");
+        } catch (_error) { /* Ignore unrelated token logs. */ }
+      }
+    }
+    if (!receiptId) return { state: "uncertain" };
+    return {
+      state: "confirmed",
+      record: {
+        amount: String(expected.amount),
+        contributor: expected.signerId,
+        transactionHash: expected.transactionHash,
+        receiptId,
+        tokenId: expected.tokenId,
+      },
+    };
+  }
+
   function allocationFromProposal(proposal, tokenId = "") {
     const transfer = proposal?.kind?.Transfer;
     if (!transfer || String(transfer.token_id || "") !== String(tokenId || "")) return null;
@@ -252,21 +321,13 @@
     const goalAllocations = (allocations || []).filter((allocation) =>
       allocation && allocation.receiverId === goal.recipient
     );
-    const payments = goalAllocations.map((allocation) => verifiedPayment(allocation, activity)).filter(Boolean);
     const spent = goalAllocations.reduce((total, allocation) =>
       verifiedPayment(allocation, activity) ? total + BigInt(allocation.amount) : total, 0n
     );
     const progressBasisPoints = Number((contributed * 10_000n) / target > 10_000n
       ? 10_000n
       : (contributed * 10_000n) / target);
-    let status = contributed >= target ? "Fully Funded" : "Open for Contributions";
-    if (goalAllocations.some((allocation) => allocation.status === "InProgress" && !verifiedPayment(allocation, activity))) {
-      status = "In Progress";
-    }
-    if (goalAllocations.some((allocation) => allocation.status === "Approved" && !verifiedPayment(allocation, activity))) {
-      status = "In Progress";
-    }
-    if (payments.length) status = "In Progress";
+    const status = contributed >= target ? "Goal Reached" : "Open for Contributions";
     return {
       contributed: contributed.toString(),
       target: target.toString(),
@@ -293,7 +354,9 @@
     storageRegistration,
     thresholdFor,
     tokenContribution,
+    totalContributions,
     transferProposal,
+    verifyTokenContributionOutcome,
     verifiedPayment,
   };
 }));

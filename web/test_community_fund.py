@@ -449,6 +449,35 @@ class CommunityFundActivityTests(unittest.TestCase):
                 "expected-receipt",
             )
 
+    def test_finalized_evidence_merges_new_indexed_contributions_without_duplicates(self):
+        evidence = {
+            "complete": True,
+            "boundedEvidence": True,
+            "contributions": [{"transactionHash": "baseline", "amount": "1000000"}],
+            "proposalTransactions": {"2": [{"transactionHash": "payment", "action": "VoteApprove"}]},
+            "sourceUrl": "https://testnet.nearblocks.io/address/community.testnet",
+        }
+        indexed = {
+            "complete": True,
+            "contributions": [
+                {"transactionHash": "baseline", "amount": "1000000"},
+                {"transactionHash": "new-contribution", "amount": "10000"},
+            ],
+            "proposalTransactions": {"2": [{"transactionHash": "payment", "action": "VoteApprove"}]},
+            "verifiedAt": "2026-11-12T12:00:00+00:00",
+            "stale": False,
+        }
+
+        merged = web_app._merge_community_activity(evidence, indexed)
+
+        self.assertTrue(merged["complete"])
+        self.assertFalse(merged["boundedEvidence"])
+        self.assertEqual(
+            {item["transactionHash"] for item in merged["contributions"]},
+            {"baseline", "new-contribution"},
+        )
+        self.assertEqual(len(merged["proposalTransactions"]["2"]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

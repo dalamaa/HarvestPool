@@ -684,6 +684,42 @@ def _activity_coverage(payload):
     return contributions, actions, transfers
 
 
+def _merge_community_activity(evidence, indexed):
+    """Keep finalized baseline evidence while adding newly indexed public transactions."""
+    contributions = {}
+    for item in [*(evidence.get("contributions") or []), *(indexed.get("contributions") or [])]:
+        transaction_hash = str(item.get("transactionHash") or "")
+        if transaction_hash:
+            contributions[transaction_hash] = item
+
+    proposal_transactions = {}
+    proposal_ids = set(evidence.get("proposalTransactions") or {}) | set(
+        indexed.get("proposalTransactions") or {}
+    )
+    for proposal_id in proposal_ids:
+        actions = {}
+        for item in [
+            *(evidence.get("proposalTransactions", {}).get(proposal_id) or []),
+            *(indexed.get("proposalTransactions", {}).get(proposal_id) or []),
+        ]:
+            key = (str(item.get("transactionHash") or ""), str(item.get("action") or ""))
+            if key[0]:
+                actions[key] = item
+        proposal_transactions[proposal_id] = list(actions.values())
+
+    indexed_complete = bool(indexed.get("complete"))
+    return {
+        **indexed,
+        "complete": indexed_complete,
+        "boundedEvidence": not indexed_complete,
+        "contributions": list(contributions.values()),
+        "proposalTransactions": proposal_transactions,
+        "source": "Finalized NEAR RPC evidence + NearBlocks Testnet API",
+        "sourceUrl": indexed.get("sourceUrl") or evidence.get("sourceUrl"),
+        "stale": not indexed_complete,
+    }
+
+
 def _cached_community_activity(dao_id, token_id="", *, force=False):
     cache_key = (dao_id, token_id)
     now = time.monotonic()
@@ -692,11 +728,18 @@ def _cached_community_activity(dao_id, token_id="", *, force=False):
         if cached and not force and now - cached["cached_at"] < COMMUNITY_ACTIVITY_CACHE_SECONDS:
             return dict(cached["payload"])
     try:
-        payload = (
-            _known_community_activity(dao_id, token_id, COMMUNITY_GOAL, COMMUNITY_EVIDENCE)
-            if COMMUNITY_EVIDENCE
-            else _community_activity(dao_id, token_id)
-        )
+        if COMMUNITY_EVIDENCE:
+            evidence = _known_community_activity(
+                dao_id, token_id, COMMUNITY_GOAL, COMMUNITY_EVIDENCE
+            )
+            try:
+                indexed = _community_activity(dao_id, token_id)
+            except (OSError, URLError, RuntimeError, ValueError, TypeError, json.JSONDecodeError):
+                payload = evidence
+            else:
+                payload = _merge_community_activity(evidence, indexed)
+        else:
+            payload = _community_activity(dao_id, token_id)
     except (OSError, URLError, RuntimeError, ValueError, TypeError, json.JSONDecodeError):
         with _community_activity_cache_lock:
             cached = _community_activity_cache.get(cache_key)
