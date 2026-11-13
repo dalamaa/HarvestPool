@@ -159,8 +159,9 @@
   }
 
   async function hydrateVerifiedFunds(funds, render) {
-    await Promise.allSettled(funds.filter((fund) => fund.isVerifiedFund && fund.activityUrl)
-      .map((fund) => hydrateVerifiedFund(fund, render)));
+    for (const fund of funds.filter((item) => item.isVerifiedFund && item.activityUrl)) {
+      await hydrateVerifiedFund(fund, render, { force: true }).catch(() => null);
+    }
   }
 
   function bindImageFallbacks(root) {
@@ -225,7 +226,7 @@
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error || "Community funds could not be loaded.");
       funds = payload.funds || [];
-      funds.filter((fund) => fund.isVerifiedFund).forEach(applyCachedActivity);
+      funds.filter((fund) => fund.isVerifiedFund && ["pending", undefined].includes(fund.verificationState)).forEach(applyCachedActivity);
       render();
       hydrateVerifiedFunds(funds, render).catch(() => null);
     } catch (error) {

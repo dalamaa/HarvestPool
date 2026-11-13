@@ -91,6 +91,7 @@
       codeHash: null,
       activity: null,
       activityPromise: null,
+      activityRefreshPromise: null,
       recentContributions: [],
       safety: null,
       activeTab: null,
@@ -843,14 +844,16 @@
   }
 
   function actionCenterTasks() {
+    const showEverySavedAction = appConfig.page === "decisions";
     return actionCenterTools.eligibleTasks({
       accountId: state.accountId,
       purchases: state.purchases,
       issues: state.issues,
       decisions: state.decisions,
       votes: state.recordedVotes,
-      pending: state.accountId ? pendingActionStore.list(state.accountId) : [],
+      pending: showEverySavedAction ? pendingActionStore.list() : (state.accountId ? pendingActionStore.list(state.accountId) : []),
       isMember: isMember(),
+      includeSavedPending: showEverySavedAction,
     });
   }
 
@@ -1079,6 +1082,10 @@
 
   function applyCommunityActivity(activityResult) {
     const fund = state.communityFund;
+    if (activityResult.error && (fund.activity?.contributions || []).length) {
+      fund.activity = { ...fund.activity, refreshError: activityResult.error, stale: true };
+      return fund.activity;
+    }
     const indexedContributions = activityResult.contributions || [];
     const recentContributions = fund.recentContributions.filter((recent) =>
       !indexedContributions.some((item) => item.transactionHash === recent.transactionHash)
@@ -1088,6 +1095,27 @@
       contributions: [...indexedContributions, ...recentContributions],
     };
     return fund.activity;
+  }
+
+  async function loadPersistedCommunityActivity() {
+    const activity = await fetchCommunityActivity(false);
+    applyCommunityActivity(activity);
+    renderCurrentPage();
+    document.documentElement.dataset.harvestpoolUsefulContentMs = performance.now().toFixed(1);
+    return activity;
+  }
+
+  function refreshCommunityActivityInBackground() {
+    const fund = state.communityFund;
+    if (fund.activityRefreshPromise) return fund.activityRefreshPromise;
+    fund.activityRefreshPromise = fetchCommunityActivity(true)
+      .then((activity) => {
+        applyCommunityActivity(activity);
+        renderCurrentPage();
+        return activity;
+      })
+      .finally(() => { fund.activityRefreshPromise = null; });
+    return fund.activityRefreshPromise;
   }
 
   async function loadCommunityAccountAsset() {
@@ -1103,7 +1131,7 @@
     fund.asset.accountBalance = String(accountBalance || "0");
   }
 
-  async function loadCommunityFundData({ refreshActivity = false, deferActivity = false } = {}) {
+  async function loadCommunityFundData({ refreshActivity = false, deferActivity = false, loadActivity = true } = {}) {
     const fund = state.communityFund;
     if (!appConfig.communityDaoId) {
       fund.loaded = true;
@@ -1112,7 +1140,7 @@
     }
     try {
       const daoId = appConfig.communityDaoId;
-      const activityPromise = fetchCommunityActivity(refreshActivity);
+      const activityPromise = loadActivity ? fetchCommunityActivity(refreshActivity) : Promise.resolve(fund.activity || {});
       fund.activityPromise = activityPromise;
       const [config, policy, factoryInfo, version, availableAmount, lastProposalId, accessKeyResult, accountResult] = await Promise.all([
         viewOnContract(daoId, "get_config"),
@@ -1176,7 +1204,9 @@
         version,
       });
       fund.error = null;
-      if (deferActivity) {
+      if (!loadActivity) {
+        // Persisted activity is loaded independently so this RPC fan-out cannot delay it.
+      } else if (deferActivity) {
         activityPromise.then((activityResult) => {
           if (fund.activityPromise !== activityPromise) return;
           applyCommunityActivity(activityResult);
@@ -2037,6 +2067,14 @@
     }
   }
 
+  function communityVerificationTime(activity) {
+    const value = activity?.historyVerifiedAt
+      || (activity?.contributions || []).map((item) => item.verifiedAt).filter(Boolean).sort().at(-1)
+      || activity?.treasuryBalanceVerifiedAt;
+    if (!value) return "Time unavailable";
+    return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
+  }
+
   function communityExplorerLink(transactionHash, label = "View transaction") {
     if (!transactionHash) return '<span class="fund-reference-missing">Transaction reference is still being indexed</span>';
     return `<a class="text-link" href="https://testnet.nearblocks.io/txns/${encodeURIComponent(transactionHash)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)} <span aria-hidden="true">↗</span></a>`;
@@ -2063,6 +2101,16 @@
     return goal.currency === "USDC"
       ? usdFromTokenUnits(value, Number(goal.decimals || 6))
       : `${communityFundTools.formatNear(value)} Testnet NEAR`;
+  }
+
+  function communityProgressPercent(value, target) {
+    try {
+      const basisPoints = (BigInt(String(value)) * 10_000n) / BigInt(String(target));
+      const bounded = basisPoints > 10_000n ? 10_000n : basisPoints;
+      return (Number(bounded) / 100).toFixed(2).replace(/\.00$/, "").replace(/(\.\d)0$/, "$1");
+    } catch (_error) {
+      return null;
+    }
   }
 
   function parseCommunityAmount(value, goal = appConfig.communityGoal || {}) {
@@ -2134,9 +2182,7 @@
     records.sort((left, right) => {
       try { return BigInt(right.timestamp) > BigInt(left.timestamp) ? 1 : -1; } catch (_error) { return 0; }
     });
-    const verifiedAt = activity.verifiedAt
-      ? new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(activity.verifiedAt))
-      : "Time unavailable";
+    const verifiedAt = communityVerificationTime(activity);
     const freshness = `<div class="fund-history-freshness ${activity.stale ? "is-stale" : ""}" role="status"><span>${activity.stale ? "Showing the last confirmed record" : "Last checked"}: ${escapeHtml(verifiedAt)}</span><button class="button button-outline button-small" type="button" data-community-action="refresh-history">Retry activity</button></div>`;
     const coverage = activity.contributionHistoryComplete
       ? ""
@@ -2163,6 +2209,33 @@
     if (focus) $(`[data-community-tab="${nextTab}"]`)?.focus();
   }
 
+  function persistedCommunityFundMarkup(fund, goal) {
+    const activity = fund.activity;
+    if (!activity) return "";
+    const contributions = activity.contributions || [];
+    const hasReceipts = contributions.length > 0;
+    const subtotal = String(activity.verifiedContributionSubtotal || "0");
+    const complete = activity.contributionHistoryComplete === true;
+    const target = String(goal.targetUnits || goal.targetYocto || "0");
+    const treasury = activity.treasuryBalance;
+    const remaining = complete && /^\d+$/.test(target)
+      ? (BigInt(target) > BigInt(subtotal) ? BigInt(target) - BigInt(subtotal) : 0n).toString()
+      : null;
+    const percentage = hasReceipts ? communityProgressPercent(subtotal, target) : null;
+    const checked = communityVerificationTime(activity);
+    const raised = !hasReceipts ? "Checking…" : complete
+      ? communityAmount(subtotal, goal)
+      : `At least ${communityAmount(subtotal, goal)} verified`;
+    const progress = percentage === null
+      ? '<div class="goal-progress-neutral" role="status">Checking the durable receipt ledger…</div>'
+      : `<div class="goal-progress" role="progressbar" aria-label="Verified contributions toward ${escapeHtml(goal.title)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percentage}"><span style="width:${percentage}%"></span></div><div class="goal-progress-label"><strong>${complete ? `${percentage}% funded` : `At least ${percentage}% verified`}</strong><span>${complete ? "Complete history at the time shown" : "History discovery is incomplete"}</span></div>`;
+    const status = complete ? "Last verified" : hasReceipts ? "Verified subtotal" : "Checking receipts";
+    const error = fund.error
+      ? '<p class="fund-inline-retry" role="status">Live treasury and governance checks are temporarily unavailable. Saved verified figures remain visible. <button class="button button-outline button-small" type="button" data-community-action="refresh">Retry live checks</button></p>'
+      : '<p class="fund-inline-retry" role="status">Live treasury, governance, and contribution controls are loading independently.</p>';
+    return `<div class="community-fund-primary"><section class="community-goal-card" aria-labelledby="community-goal-heading"><div class="goal-card-top"><div><span class="section-kicker">Fundraising progress</span><h2 id="community-goal-heading">${escapeHtml(goal.title)}</h2></div><span class="status status-pending"><span></span>${escapeHtml(status)}</span></div><p class="goal-purpose">${escapeHtml(goal.purpose)}</p><dl class="goal-summary-figures"><div><dt>Goal</dt><dd>${escapeHtml(communityAmount(target, goal))}</dd></div><div><dt>Raised</dt><dd>${escapeHtml(raised)}</dd></div><div><dt>In the fund</dt><dd>${treasury === undefined ? "Checking…" : escapeHtml(communityAmount(treasury, goal))}</dd></div><div><dt>Remaining</dt><dd>${remaining === null ? "Needs full history" : escapeHtml(communityAmount(remaining, goal))}</dd></div></dl>${progress}<p class="goal-testnet-note">Last exact receipt verification: ${escapeHtml(checked)} · Testnet only. Raised and current treasury are separate figures.</p></section><aside class="fund-action-card fund-contribution-card"><span class="section-kicker">Support this fund</span><h2>Contribute</h2><p>Contribution controls will appear after the independent token and DAO safety checks finish.</p></aside></div>${error}`;
+  }
+
   function renderCommunityFundPage() {
     const root = $("#community-fund-root");
     if (!root) return;
@@ -2176,8 +2249,17 @@
       root.innerHTML = `<div class="fund-setup-state"><span class="section-kicker">Configuration required</span><h2>Community Goals is not live yet.</h2><p>The SputnikDAO integration is prepared, but one dedicated goal and its hardened DAO treasury must be authorized and configured together. No goal balance, progress, vote, or payment is presented as real.</p>${configurationNote}<p class="fund-account-line">Expected factory: <code>${escapeHtml(appConfig.communityDaoFactoryId || "sputnikv2.testnet")}</code></p></div>`;
       return;
     }
-    if (!fund.loaded) return;
+    if (!fund.loaded) {
+      const persistedMarkup = persistedCommunityFundMarkup(fund, goal);
+      if (persistedMarkup) root.innerHTML = persistedMarkup;
+      return;
+    }
     if (fund.error) {
+      const persistedMarkup = persistedCommunityFundMarkup(fund, goal);
+      if (persistedMarkup) {
+        root.innerHTML = persistedMarkup;
+        return;
+      }
       showError(root, "Community Goal reads are unavailable", "HarvestPool could not verify the goal treasury contract, policy, balance, proposals, factory permissions, and access keys. Financial actions stay disabled.", '<button class="button button-outline" type="button" data-community-action="refresh">Retry authoritative reads</button>');
       return;
     }
@@ -2255,7 +2337,7 @@
       : "";
     const proposalCards = (items) => items.map((proposal) => communityProposalCard(proposal, safety, fund.activity, goal)).filter(Boolean).join("");
     const goalProgress = goalSnapshot
-      ? `<div class="goal-progress" role="progressbar" aria-label="Verified contributions toward ${escapeHtml(goal.title)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.floor(goalSnapshot.progressBasisPoints / 100)}" aria-valuetext="${escapeHtml(`${communityAmount(goalSnapshot.contributed, goal)} of ${communityAmount(goalSnapshot.target, goal)} contributed`)}"><span style="width:${goalSnapshot.progressBasisPoints / 100}%"></span></div><div class="goal-progress-label"><strong>${Math.floor(goalSnapshot.progressBasisPoints / 100)}% funded</strong><span>Verified on-chain contributions</span></div>`
+      ? `<div class="goal-progress" role="progressbar" aria-label="Verified contributions toward ${escapeHtml(goal.title)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${communityProgressPercent(goalSnapshot.contributed, goalSnapshot.target)}" aria-valuetext="${escapeHtml(`${communityAmount(goalSnapshot.contributed, goal)} of ${communityAmount(goalSnapshot.target, goal)} contributed`)}"><span style="width:${communityProgressPercent(goalSnapshot.contributed, goalSnapshot.target)}%"></span></div><div class="goal-progress-label"><strong>${communityProgressPercent(goalSnapshot.contributed, goalSnapshot.target)}% funded</strong><span>Verified on-chain contributions</span></div>`
       : `<div class="goal-progress-unavailable">${verifiedSubtotal === null ? "Verified contribution progress is unavailable until complete indexed history is available." : `At least ${escapeHtml(communityAmount(verifiedSubtotal, goal))} has exact finalized receipt evidence. This is a verified subtotal, not the complete lifetime total.`}</div>`;
     const remaining = goalSnapshot
       ? (BigInt(goalSnapshot.target) > BigInt(goalSnapshot.contributed)
@@ -2266,7 +2348,7 @@
     const raisedDisplay = goalSnapshot
       ? communityAmount(goalSnapshot.contributed, goal)
       : verifiedSubtotal === null ? "Unavailable" : `At least ${communityAmount(verifiedSubtotal, goal)} verified`;
-    const goalCard = `<section class="community-goal-card" aria-labelledby="community-goal-heading"><div class="goal-card-top"><div><span class="section-kicker">Fundraising progress</span><h2 id="community-goal-heading">${escapeHtml(goal.title)}</h2></div><span class="status ${goalStatusClass}"><span></span>${escapeHtml(goalSnapshot?.status || "Verification incomplete")}</span></div><p class="goal-purpose">${escapeHtml(goal.purpose)}</p><dl class="goal-summary-figures"><div><dt>Goal</dt><dd>${escapeHtml(communityAmount(targetUnits, goal))}</dd></div><div><dt>Lifetime raised</dt><dd>${escapeHtml(raisedDisplay)}</dd></div><div><dt>Current treasury</dt><dd>${assetReady ? escapeHtml(communityAmount(availableBalance, goal)) : "Unavailable"}</dd></div><div><dt>Remaining to goal</dt><dd>${remaining === null ? "Unavailable" : escapeHtml(communityAmount(remaining, goal))}</dd></div></dl>${goalProgress}${goalSnapshot && !contributionLimit.reached ? '<button class="button button-primary goal-summary-action" type="button" data-community-action="support">Support this fund</button>' : ""}<p class="goal-testnet-note">Testnet only · Lifetime raised uses durable verified receipts; current treasury is a separate finalized balance and may be lower after payouts.</p></section>`;
+    const goalCard = `<section class="community-goal-card" aria-labelledby="community-goal-heading"><div class="goal-card-top"><div><span class="section-kicker">Fundraising progress</span><h2 id="community-goal-heading">${escapeHtml(goal.title)}</h2></div><span class="status ${goalStatusClass}"><span></span>${escapeHtml(goalSnapshot?.status || "Verification incomplete")}</span></div><p class="goal-purpose">${escapeHtml(goal.purpose)}</p><dl class="goal-summary-figures"><div><dt>Goal</dt><dd>${escapeHtml(communityAmount(targetUnits, goal))}</dd></div><div><dt>Raised</dt><dd>${escapeHtml(raisedDisplay)}</dd></div><div><dt>In the fund</dt><dd>${assetReady ? escapeHtml(communityAmount(availableBalance, goal)) : "Checking…"}</dd></div><div><dt>Remaining</dt><dd>${remaining === null ? "Needs full history" : escapeHtml(communityAmount(remaining, goal))}</dd></div></dl>${goalProgress}${goalSnapshot && !contributionLimit.reached ? '<button class="button button-primary goal-summary-action" type="button" data-community-action="support">Support this fund</button>' : ""}<p class="goal-testnet-note">Last exact receipt verification: ${escapeHtml(communityVerificationTime(fund.activity))} · Testnet only. Raised uses durable verified receipts; money currently in the fund is a separate finalized balance and may be lower after payouts.</p></section>`;
     const activeTab = state.communityFund.activeTab || requestedCommunityTab();
     state.communityFund.activeTab = activeTab;
     const countLabel = (count) => count === null ? "" : ` <span>(${count})</span>`;
@@ -4978,14 +5060,23 @@
     updateCreatePricePreview();
     try {
       const walletPromise = setupNear();
+      if (appConfig.page === "decisions") {
+        document.body.classList.remove("wallet-session-loading");
+        renderDecisions();
+        document.documentElement.dataset.harvestpoolUsefulContentMs = performance.now().toFixed(1);
+      }
       if (appConfig.page === "community_fund") {
-        await Promise.allSettled([
-          loadCommunityFundData({ deferActivity: true }),
-          loadNearPrice(),
-        ]);
+        const persistedActivityPromise = loadPersistedCommunityActivity();
+        const liveFundPromise = loadCommunityFundData({ loadActivity: false });
+        await Promise.allSettled([persistedActivityPromise]);
         document.body.classList.remove("wallet-session-loading");
         renderCurrentPage();
+        await Promise.allSettled([liveFundPromise, loadNearPrice()]);
+        renderCurrentPage();
+        window.setTimeout(() => refreshCommunityActivityInBackground().catch(() => null), 500);
         await walletPromise;
+      } else if (appConfig.page === "decisions") {
+        await Promise.allSettled([loadBaseData(), loadNearPrice(), walletPromise]);
       } else {
         await walletPromise;
         await Promise.allSettled([loadBaseData(), loadNearPrice()]);

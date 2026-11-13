@@ -8,7 +8,7 @@
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M5 22C8 13 15 7 26 6c-1 10-7 18-16 19' fill='none' stroke='%23143b32' stroke-width='3' stroke-linecap='round'/%3E%3Cpath d='M6 27c4-7 10-11 17-14' fill='none' stroke='%23143b32' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
     <title>{% if page == "home" %}HarvestPool · Buy together, save more{% elif page == "explore" %}Explore Group Deals · HarvestPool{% elif page == "create" %}Post a Group Deal · HarvestPool{% elif page == "supplier_invitation" %}Supplier invitation · HarvestPool{% elif page == "dashboard" %}My Group Buys · HarvestPool{% elif page == "decisions" %}Action Center · HarvestPool{% elif page == "community_directory" %}Community Funds · HarvestPool{% elif page == "community_create" %}Start a Community Fund · HarvestPool{% elif page in ["community_fund", "community_request"] %}Community Fund · HarvestPool{% elif page == "community_not_found" %}Fund not found · HarvestPool{% elif page == "guide" %}Wallet guide · HarvestPool{% elif page == "farmer" %}My Sales · HarvestPool{% elif page == "agreement" %}Deal Terms · HarvestPool{% elif page == "issue_form" %}Raise an Issue · HarvestPool{% else %}Group Deal details · HarvestPool{% endif %}</title>
     <link rel="preload" href="{{ url_for('static', filename='fonts/Geist-Variable.woff2') }}" as="font" type="font/woff2" crossorigin>
-    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css', v='2026-11-13.5') }}">
     <script type="application/json" id="app-config">{{ {"page": page, "purchaseId": purchase_id, "shareMode": share_mode, "network": network, "contractId": contract_id, "contractVersion": contract_version, "v3ContractId": v3_contract_id, "publicBaseUrl": public_base_url, "communityDaoId": community_dao_id, "communityDaoFactoryId": community_dao_factory_id, "communityDaoCodeHash": community_dao_code_hash, "communityGoal": community_goal, "communityActivityUrl": community_activity_url, "communityFunds": community_funds, "fundSlug": fund_slug}|tojson }}</script>
   </head>
   <body class="page-{{ page }} wallet-session-loading">
@@ -203,14 +203,14 @@
     <script src="{{ url_for('static', filename='deal-form.js') }}" defer></script>
     <script src="{{ url_for('static', filename='deal-creation.js') }}" defer></script>
     <script src="{{ url_for('static', filename='form-drafts.js') }}" defer></script>
-    <script src="{{ url_for('static', filename='action-center.js') }}" defer></script>
+    <script src="{{ url_for('static', filename='action-center.js', v='2026-11-13.5') }}" defer></script>
     <script src="{{ url_for('static', filename='v3-confirmation.js') }}" defer></script>
     <script src="{{ url_for('static', filename='voting-format.js') }}" defer></script>
     <script src="{{ url_for('static', filename='community-fund.js') }}" defer></script>
     <script src="{{ url_for('static', filename='wallet-initialization.js') }}" defer></script>
     <script src="{{ url_for('static', filename='rpc-reads.js') }}" defer></script>
     <script src="{{ url_for('static', filename='community-directory-logic.js') }}" defer></script>
-    <script src="{{ url_for('static', filename='community-directory.js') }}" defer></script>
-    <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+    <script src="{{ url_for('static', filename='community-directory.js', v='2026-11-13.5') }}" defer></script>
+    <script src="{{ url_for('static', filename='app.js', v='2026-11-13.5') }}" defer></script>
   </body>
 </html>

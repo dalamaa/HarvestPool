@@ -1034,6 +1034,32 @@ def _peek_community_activity_cache(dao_id, token_id=""):
     return None
 
 
+def _persisted_community_activity(fund):
+    """Return verified local evidence without making any provider or RPC request."""
+    slug = fund["slug"]
+    contributions = _verified_contribution_ledger(slug)
+    subtotal = str(sum(int(record["amount"]) for record in contributions))
+    history = _history_snapshot(slug)
+    history_complete = bool(history) and history.get("contributionTotal") == subtotal
+    treasury = _treasury_snapshot(slug)
+    return {
+        **treasury,
+        "complete": False,
+        "contributionHistoryComplete": history_complete,
+        "boundedEvidence": bool(contributions) and not history_complete,
+        "contributions": contributions,
+        "proposalTransactions": {},
+        "verifiedContributionSubtotal": subtotal,
+        "lifetimeRaised": subtotal if history_complete else None,
+        "historyVerifiedAt": history.get("verifiedAt") if history_complete else None,
+        "historyStale": True,
+        "stale": True,
+        "source": "Durable finalized receipt ledger",
+        "sourceUrl": f"https://testnet.nearblocks.io/address/{fund['daoId']}",
+        "tokenId": fund["goal"].get("tokenId", ""),
+    }
+
+
 def _durable_community_activity(fund, *, force=False):
     """Merge durable receipts with optional discovery and live financial snapshots."""
     slug = fund["slug"]
@@ -1097,18 +1123,22 @@ def _durable_community_activity(fund, *, force=False):
     if not contributions and not treasury and payload.get("error"):
         raise RuntimeError(payload["error"])
     subtotal = str(sum(int(record["amount"]) for record in contributions))
-    verified_at = datetime.now(timezone.utc).isoformat()
+    if discovery_complete:
+        history = _store_history_snapshot(slug, subtotal)
+    else:
+        history = _history_snapshot(slug)
+    history_complete = bool(history) and history.get("contributionTotal") == subtotal
     complete_activity = bool(payload.get("complete")) and discovery_complete
     result = {
         **payload,
         **treasury,
         "complete": complete_activity,
-        "contributionHistoryComplete": discovery_complete,
-        "boundedEvidence": bool(contributions) and not discovery_complete,
+        "contributionHistoryComplete": history_complete,
+        "boundedEvidence": bool(contributions) and not history_complete,
         "contributions": contributions,
         "verifiedContributionSubtotal": subtotal,
-        "lifetimeRaised": subtotal if discovery_complete else None,
-        "historyVerifiedAt": verified_at if discovery_complete else None,
+        "lifetimeRaised": subtotal if history_complete else None,
+        "historyVerifiedAt": history.get("verifiedAt") if history_complete else None,
         "historyStale": not discovery_complete,
         "stale": bool(payload.get("stale")) or not discovery_complete,
         "source": "Durable finalized receipt ledger + public Testnet providers",
@@ -1143,7 +1173,8 @@ def configured_community_fund_activity(slug):
         return jsonify({"error": "Verified Community Fund is not configured."}), 404
     try:
         force = request.args.get("refresh") == "1"
-        return jsonify(_durable_community_activity(fund, force=force))
+        activity = _durable_community_activity(fund, force=True) if force else _persisted_community_activity(fund)
+        return jsonify(activity)
     except (OSError, URLError, RuntimeError, ValueError, TypeError, json.JSONDecodeError) as error:
         return jsonify({"error": f"Community Fund transaction history unavailable: {error}"}), 503
 
@@ -1296,6 +1327,11 @@ def _ensure_community_fund_schema(db):
             treasury_balance TEXT NOT NULL,
             verified_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS community_fund_history_snapshots (
+            fund_slug TEXT PRIMARY KEY,
+            contribution_total TEXT NOT NULL,
+            verified_at TEXT NOT NULL
+        );
         """
     )
     db.commit()
@@ -1400,6 +1436,43 @@ def _treasury_snapshot(fund_slug):
         "treasuryBalance": row["treasury_balance"],
         "treasuryBalanceVerifiedAt": row["verified_at"],
         "treasuryBalanceStale": True,
+    }
+
+
+def _store_history_snapshot(fund_slug, contribution_total):
+    """Remember the last point at which provider discovery covered all contributions."""
+    if not str(contribution_total).isdigit():
+        raise ValueError("Contribution history snapshot was invalid")
+    verified_at = datetime.now(timezone.utc).isoformat()
+    with _financial_db() as db:
+        db.execute(
+            """
+            INSERT INTO community_fund_history_snapshots (
+                fund_slug, contribution_total, verified_at
+            ) VALUES (?, ?, ?)
+            ON CONFLICT(fund_slug) DO UPDATE SET
+                contribution_total = excluded.contribution_total,
+                verified_at = excluded.verified_at
+            """,
+            (fund_slug, str(contribution_total), verified_at),
+        )
+    return {"contributionTotal": str(contribution_total), "verifiedAt": verified_at}
+
+
+def _history_snapshot(fund_slug):
+    with _financial_db() as db:
+        row = db.execute(
+            """
+            SELECT contribution_total, verified_at
+            FROM community_fund_history_snapshots WHERE fund_slug = ?
+            """,
+            (fund_slug,),
+        ).fetchone()
+    if not row:
+        return {}
+    return {
+        "contributionTotal": row["contribution_total"],
+        "verifiedAt": row["verified_at"],
     }
 
 
@@ -1523,7 +1596,7 @@ def _verified_fund_directory_item(fund, *, cached_only=False):
     verification_state = "pending"
     try:
         activity = (
-            _peek_community_activity_cache(dao_id, goal.get("tokenId", ""))
+            _persisted_community_activity(fund)
             if cached_only
             else _durable_community_activity(fund)
         )

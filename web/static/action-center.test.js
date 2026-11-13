@@ -39,6 +39,19 @@ test("unresolved transactions are scoped to the connected signer", () => {
   assert.equal(tasks[0].purchaseId, "2");
 });
 
+test("saved unresolved actions can render before wallet restoration", () => {
+  const tasks = eligibleTasks({
+    accountId: null,
+    includeSavedPending: true,
+    pending: [
+      { id: "a", signerId: "buyer.testnet", methodName: "claim_refund", args: { purchase_id: "2" } },
+      { id: "b", signerId: "other.testnet", methodName: "community_contribute_usdc", args: { amount: "100000" } },
+    ],
+  });
+  assert.deepEqual(tasks.map((task) => task.kind), ["pending-transaction", "pending-transaction"]);
+  assert.deepEqual(tasks.map((task) => task.signerId), ["buyer.testnet", "other.testnet"]);
+});
+
 test("an unresolved submission replaces rather than duplicates its eligible task", () => {
   const tasks = eligibleTasks({
     accountId: "buyer.testnet",

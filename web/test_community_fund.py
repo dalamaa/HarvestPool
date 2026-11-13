@@ -234,9 +234,13 @@ class CommunityFundActivityTests(unittest.TestCase):
 
     def test_verified_fund_activity_selects_evidence_by_dao(self):
         payload = {"complete": True, "contributions": [], "proposalTransactions": {}}
-        with patch.object(web_app, "_cached_community_activity", return_value=payload) as read:
+        with (
+            patch.object(web_app, "_discover_contribution_candidates", return_value=([], True)),
+            patch.object(web_app, "_cached_community_activity", return_value=payload) as read,
+            patch.object(web_app, "_finalized_ft_balance", return_value="0"),
+        ):
             response = web_app.app.test_client().get(
-                "/api/community-funds/community-garden/activity"
+                "/api/community-funds/community-garden/activity?refresh=1"
             )
         self.assertEqual(response.status_code, 200)
         args, kwargs = read.call_args
@@ -305,16 +309,51 @@ class CommunityFundActivityTests(unittest.TestCase):
         self.assertEqual(result["treasuryBalance"], "100000")
         self.assertEqual(result["contributions"][0]["transactionHash"], evidence["contributionHash"])
 
-    def test_garden_activity_returns_503_when_rpc_and_indexer_both_fail(self):
+    def test_garden_cold_activity_does_not_call_failed_providers(self):
         with (
-            patch.object(web_app, "_known_community_activity", side_effect=URLError("rpc unavailable")),
-            patch.object(web_app, "_community_activity", side_effect=HTTPError("nearblocks", 429, "rate limited", {}, None)),
+            patch.object(web_app, "_discover_contribution_candidates") as discovery,
+            patch.object(web_app, "_cached_community_activity") as activity,
+            patch.object(web_app, "_finalized_ft_balance") as balance,
         ):
             response = web_app.app.test_client().get(
                 "/api/community-funds/community-garden/activity"
             )
-        self.assertEqual(response.status_code, 503)
-        self.assertIn("rpc unavailable", response.get_json()["error"])
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["verifiedContributionSubtotal"], "0")
+        discovery.assert_not_called()
+        activity.assert_not_called()
+        balance.assert_not_called()
+
+    def test_cold_activity_serves_partial_then_complete_persisted_history(self):
+        record = {
+            "transactionHash": "A" * 44,
+            "receiptId": "B" * 44,
+            "contributor": "alice.testnet",
+            "amount": "100000",
+            "timestamp": "1794566734681505711",
+            "tokenId": web_app.CANONICAL_USDC_TOKEN_ID,
+        }
+        web_app._store_verified_contribution(
+            "community-garden", web_app.COMMUNITY_GARDEN_DAO_ID,
+            web_app.CANONICAL_USDC_TOKEN_ID, record,
+        )
+        web_app._store_treasury_snapshot(
+            "community-garden", web_app.COMMUNITY_GARDEN_DAO_ID,
+            web_app.CANONICAL_USDC_TOKEN_ID, "100000",
+        )
+        client = web_app.app.test_client()
+
+        partial = client.get("/api/community-funds/community-garden/activity").get_json()
+        self.assertFalse(partial["contributionHistoryComplete"])
+        self.assertEqual(partial["verifiedContributionSubtotal"], "100000")
+        self.assertIsNone(partial["lifetimeRaised"])
+        self.assertEqual(partial["treasuryBalance"], "100000")
+
+        checkpoint = web_app._store_history_snapshot("community-garden", "100000")
+        complete = client.get("/api/community-funds/community-garden/activity").get_json()
+        self.assertTrue(complete["contributionHistoryComplete"])
+        self.assertEqual(complete["lifetimeRaised"], "100000")
+        self.assertEqual(complete["historyVerifiedAt"], checkpoint["verifiedAt"])
 
     def test_garden_activity_recovers_after_a_total_upstream_failure(self):
         bounded = {
@@ -349,11 +388,11 @@ class CommunityFundActivityTests(unittest.TestCase):
         payload = {"complete": True, "contributions": [], "proposalTransactions": {}}
         seen = []
 
-        def activity(dao_id, _token_id=""):
-            seen.append(dao_id)
+        def activity(fund):
+            seen.append(fund["daoId"])
             return payload
 
-        with patch.object(web_app, "_peek_community_activity_cache", side_effect=activity):
+        with patch.object(web_app, "_persisted_community_activity", side_effect=activity):
             directory = web_app.app.test_client().get("/api/community-funds").get_json()["funds"]
         verified = {item["slug"]: item for item in directory if item["isVerifiedFund"]}
         self.assertEqual(verified["community-garden"]["targetAmount"], "100.00")
@@ -705,8 +744,9 @@ class CommunityFundActivityTests(unittest.TestCase):
         ):
             preserved = web_app._durable_community_activity(fund)
 
-        self.assertFalse(preserved["contributionHistoryComplete"])
-        self.assertEqual(preserved["lifetimeRaised"], None)
+        self.assertTrue(preserved["contributionHistoryComplete"])
+        self.assertEqual(preserved["lifetimeRaised"], "2100000")
+        self.assertTrue(preserved["historyStale"])
         self.assertEqual(preserved["verifiedContributionSubtotal"], "2100000")
         self.assertEqual(preserved["treasuryBalance"], "2100000")
         self.assertTrue(preserved["treasuryBalanceStale"])

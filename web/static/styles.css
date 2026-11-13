@@ -58,8 +58,8 @@ body::before {
   mask-image: linear-gradient(to bottom, black 0, transparent 82%);
 }
 .wallet-session-loading [data-connect-wallet] { pointer-events: none; opacity: .62; }
-.wallet-session-loading #dashboard-root > *, .wallet-session-loading #decisions-root > *, .wallet-session-loading #farmer-root > * { visibility: hidden; }
-.wallet-session-loading #dashboard-root, .wallet-session-loading #decisions-root, .wallet-session-loading #farmer-root { min-height: 92px; border-radius: 10px; background: linear-gradient(90deg, var(--mist) 25%, var(--white) 50%, var(--mist) 75%) 0 0 / 200% 100%; animation: wallet-loading 1.2s linear infinite; }
+.wallet-session-loading #dashboard-root > *, .wallet-session-loading #farmer-root > * { visibility: hidden; }
+.wallet-session-loading #dashboard-root, .wallet-session-loading #farmer-root { min-height: 92px; border-radius: 10px; background: linear-gradient(90deg, var(--mist) 25%, var(--white) 50%, var(--mist) 75%) 0 0 / 200% 100%; animation: wallet-loading 1.2s linear infinite; }
 @keyframes wallet-loading { to { background-position: -200% 0; } }
 
 a { color: inherit; }
@@ -1098,12 +1098,15 @@ h3 { margin-bottom: 10px; font-size: 21px; line-height: 1.1; }
 .goal-progress-label { display: flex; justify-content: space-between; gap: 16px; margin-top: 9px; color: var(--muted); font-size: 13px; }
 .goal-progress-label strong { color: var(--pine); }
 .goal-progress-unavailable { padding: 14px 16px; border: 1px dashed var(--line); border-radius: 8px; background: var(--mist); color: var(--muted); font-size: 13px; }
-.goal-summary-figures { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 24px 0 20px; padding: 18px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
-.goal-summary-figures > div { min-width: 0; padding: 0 20px; }
+.goal-summary-figures { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 24px 0 20px; padding: 18px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.goal-summary-figures > div { min-width: 0; padding: 0 14px; }
 .goal-summary-figures > div:first-child { padding-left: 0; }
+.goal-summary-figures > div:last-child { padding-right: 0; }
 .goal-summary-figures > div + div { border-left: 1px solid var(--line); }
 .goal-summary-figures dt { color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
-.goal-summary-figures dd { margin: 6px 0 0; color: var(--pine); font-family: "Geist", ui-sans-serif, system-ui, sans-serif; font-size: clamp(20px, 3vw, 28px); font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.1; overflow-wrap: anywhere; }
+.goal-summary-figures dd { margin: 6px 0 0; color: var(--pine); font-family: "Geist", ui-sans-serif, system-ui, sans-serif; font-size: clamp(17px, 2vw, 26px); font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.15; overflow-wrap: anywhere; }
+.goal-progress-neutral { padding: 10px 0; color: var(--muted); font-size: 13px; }
+.fund-inline-retry { margin: 12px 0 20px; color: var(--muted); font-size: 13px; }
 .goal-boundary-note { max-width: 75ch; margin: 8px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
 .goal-summary-action { margin-top: 18px; }
 .goal-testnet-note { margin: 18px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
@@ -1202,9 +1205,12 @@ h3 { margin-bottom: 10px; font-size: 21px; line-height: 1.1; }
   .community-goal-card, .fund-overview, .fund-proposals, .fund-history, .fund-action-card, .fund-setup-state { padding: 18px; }
   .goal-card-top, .fund-overview-heading, .fund-proposal-top, .fund-payment-reference { align-items: flex-start; flex-direction: column; }
   .fund-stat-grid, .fund-action-grid, .fund-proposal-details, .fund-history-row { grid-template-columns: 1fr; }
+  .goal-summary-figures { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 16px; }
   .goal-summary-figures > div { padding: 0 10px; }
-  .goal-summary-figures > div:last-child { padding-right: 0; }
-  .goal-summary-figures dd { font-size: clamp(18px, 5vw, 22px); }
+  .goal-summary-figures > div:nth-child(odd) { padding-left: 0; border-left: 0; }
+  .goal-summary-figures > div:nth-child(even) { padding-right: 0; }
+  .goal-summary-figures > div:nth-child(n + 3) { padding-top: 16px; border-top: 1px solid var(--line); }
+  .goal-summary-figures dd { font-size: clamp(17px, 5vw, 21px); }
   .goal-progress-label { align-items: flex-start; flex-direction: column; gap: 3px; }
   .fund-stat-grid > div { min-height: 0; }
   .fund-proposal-actions .button, .fund-action-card > .button { width: 100%; }

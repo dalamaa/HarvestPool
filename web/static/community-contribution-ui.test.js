@@ -18,9 +18,9 @@ test("Community Garden closes its contribution action at the application target"
 test("Community Fund summary uses the customer-facing goal hierarchy", () => {
   assert.match(appSource, /goal-summary-figures/);
   assert.match(appSource, /<dt>Goal<\/dt>/);
-  assert.match(appSource, /<dt>Lifetime raised<\/dt>/);
-  assert.match(appSource, /<dt>Current treasury<\/dt>/);
-  assert.match(appSource, /<dt>Remaining to goal<\/dt>/);
+  assert.match(appSource, /<dt>Raised<\/dt>/);
+  assert.match(appSource, /<dt>In the fund<\/dt>/);
+  assert.match(appSource, /<dt>Remaining<\/dt>/);
   assert.match(appSource, /% funded/);
   assert.match(appSource, />Support this fund</);
   assert.doesNotMatch(appSource, /class="goal-details"/);
@@ -31,8 +31,9 @@ test("Community Fund summary uses the customer-facing goal hierarchy", () => {
   assert.match(appSource, /fund-contribution-amount/);
 });
 
-test("Community Fund public reads render before wallet restoration and history hydration", () => {
-  assert.match(appSource, /loadCommunityFundData\(\{ deferActivity: true \}\)/);
+test("Community Fund persisted receipts render before wallet restoration and live reads", () => {
+  assert.match(appSource, /loadPersistedCommunityActivity\(\)/);
+  assert.match(appSource, /loadCommunityFundData\(\{ loadActivity: false \}\)/);
   assert.match(appSource, /document\.body\.classList\.remove\("wallet-session-loading"\);[\s\S]*renderCurrentPage\(\);[\s\S]*await walletPromise/);
   assert.match(appSource, /activityPromise/);
 });
@@ -61,7 +62,7 @@ test("manual pending checks always explain hashless, unavailable, or confirmed s
 
 test("Community Fund progress rendering never passes a BigInt to Math.floor", () => {
   assert.doesNotMatch(appSource, /Math\.floor\(\(BigInt\(/);
-  assert.match(appSource, /Math\.floor\(goalSnapshot\.progressBasisPoints \/ 100\)/);
+  assert.match(appSource, /communityProgressPercent/);
 });
 
 test("contribution review names the exact asset, network, recipient, and no-refund boundary", () => {
@@ -83,8 +84,8 @@ test("Community Fund contribution uses persistent duplicate protection and autho
 });
 
 test("Community Fund separates lifetime receipts from the current treasury balance", () => {
-  assert.match(appSource, /Lifetime raised/);
-  assert.match(appSource, /Current treasury/);
+  assert.match(appSource, /Raised uses durable verified receipts/);
+  assert.match(appSource, /separate finalized balance/);
   assert.match(appSource, /lifetimeRaised/);
   assert.match(appSource, /verifiedContributionSubtotal/);
   assert.match(appSource, /verified subtotal, not the complete lifetime total/);

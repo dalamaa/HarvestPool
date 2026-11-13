@@ -16,7 +16,8 @@ test("failed external cover images become a designed placeholder", () => {
 
 test("verified fund cards render first and hydrate finalized activity independently", () => {
   assert.match(source, /hydrateVerifiedFunds/);
-  assert.match(source, /Promise\.allSettled/);
+  assert.match(source, /for \(const fund of funds\.filter/);
+  assert.match(source, /force: true/);
   assert.match(source, /contributionHistoryComplete/);
   assert.match(source, /last-verified/);
   assert.match(source, /fund\.activityUrl/);

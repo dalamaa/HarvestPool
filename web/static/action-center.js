@@ -14,10 +14,9 @@
     return issues.find((issue) => String(issue.id) === String(decision?.issue_id)) || null;
   }
 
-  function eligibleTasks({ accountId, purchases = [], issues = [], decisions = [], votes = new Map(), pending = [], isMember = false }) {
-    if (!accountId) return [];
+  function eligibleTasks({ accountId, purchases = [], issues = [], decisions = [], votes = new Map(), pending = [], isMember = false, includeSavedPending = false }) {
     const tasks = [];
-    purchases.forEach((purchase) => {
+    if (accountId) purchases.forEach((purchase) => {
       const commitment = commitmentFor(purchase, accountId);
       const funded = commitment?.state === "Active";
       const supplierId = purchase.supplier_id || purchase.farmer_id;
@@ -34,7 +33,7 @@
         tasks.push({ id: `refund-${purchase.id}`, kind: "refund", purchaseId: String(purchase.id), amount: commitment.amount });
       }
     });
-    decisions.forEach((decision) => {
+    if (accountId) decisions.forEach((decision) => {
       const recorded = (decision.votes || []).some((vote) => String(vote.voter) === String(accountId));
       const eligible = (decision.eligible_voters || []).some((voter) => String(voter) === String(accountId));
       const issue = issueForDecision(decision, issues);
@@ -47,7 +46,7 @@
         tasks.push({ id: `supplier-${decision.id}`, kind: "supplier-consent", purchaseId, decisionId: String(decision.id), issueId: String(decision.issue_id) });
       }
     });
-    pending.filter((action) => String(action.signerId) === String(accountId)).forEach((action) => {
+    pending.filter((action) => includeSavedPending || String(action.signerId) === String(accountId)).forEach((action) => {
       const purchaseId = String(action.context?.purchaseId ?? action.args?.purchase_id ?? "");
       const supersededId = action.methodName === "claim_refund" ? `refund-${purchaseId}`
         : ["accept_supplier_request", "decline_supplier_request"].includes(action.methodName) ? `invitation-${purchaseId}`
