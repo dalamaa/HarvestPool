@@ -49,7 +49,8 @@ test("finalized contribution recovery requires exact indexed evidence and treasu
 
 test("manual pending checks always explain hashless, unavailable, or confirmed state", () => {
   assert.match(appSource, /async function checkPendingAction/);
-  assert.match(appSource, /saved contribution has no transaction hash because Meteor returned after the wallet-response timeout/);
+  assert.match(appSource, /Meteor did not return a transaction hash to this page/);
+  assert.match(appSource, /\?transactionHash=YOUR_HASH/);
   assert.match(appSource, /data-pending-check-result/);
   assert.match(appSource, /On-chain verification could not finish:/);
   assert.match(appSource, /pendingActionStore\.remove\(action\.id\)/);

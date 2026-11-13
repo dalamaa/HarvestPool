@@ -54,6 +54,9 @@ test("a lost Meteor promise cannot prevent authoritative polling", () => {
   assert.match(appSource, /WALLET_RESULT_TIMEOUT_MS/);
   assert.match(appSource, /walletWait\.state === "pending"/);
   assert.match(appSource, /if \(!outcome && transactionError\?\.transactionState !== "pending"\)/);
+  assert.match(appSource, /onLateResult: captureLateWalletResult/);
+  assert.match(appSource, /persistTransactionHash\(pendingActionStore, saved, lateResult\.value\)/);
+  assert.match(appSource, /reconcilePendingActions\(\{ poll: true \}\)/);
 });
 
 test("a pending action reloads safely when a newer transaction bundle is served", () => {

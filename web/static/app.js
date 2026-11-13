@@ -129,7 +129,7 @@
   const YOCTO_PER_NEAR = 10n ** 24n;
   const PRICE_SCALE = 1_000_000n;
   const RECONCILIATION_MAX_AGE_MS = 5 * 60_000;
-  const TRANSACTION_BUNDLE_VERSION = "2026-11-13.3";
+  const TRANSACTION_BUNDLE_VERSION = "2026-11-13.4";
   const WALLET_RESULT_TIMEOUT_MS = 15_000;
   const EXPLORE_REFRESH_INTERVAL_MS = 15_000;
   const CREATE_SUBMITTED_KEY = "harvestpool:create-submitted:v1";
@@ -1349,7 +1349,8 @@
     const pending = pendingActionStore.list(state.accountId);
     const target = confirmationTools.pendingForWalletCallback(pending);
     if (hashes.length !== 1 || !target) return null;
-    const saved = pendingActionStore.save({ ...target, phase: "confirming", transactionHash: hashes[0] });
+    const saved = confirmationTools.persistTransactionHash(pendingActionStore, target, hashes[0]);
+    if (!saved) return null;
     const url = new URL(window.location.href);
     url.searchParams.delete("transactionHashes");
     url.searchParams.delete("transactionHash");
@@ -1650,7 +1651,7 @@
     if (action.methodName === "community_contribute_usdc" && !action.transactionHash) {
       return {
         state: "unverifiable",
-        message: "This saved contribution has no transaction hash because Meteor returned after the wallet-response timeout. It was preserved and no transfer was resubmitted. Reopen this page with the finalized transactionHash parameter, then check again.",
+        message: "Meteor did not return a transaction hash to this page. The saved contribution was preserved and no transfer was resubmitted. Copy the finalized hash from Meteor Activity, reopen HarvestPool with ?transactionHash=YOUR_HASH while this wallet is connected, then check again.",
       };
     }
     const result = await readActionConfirmation(action);
@@ -2022,7 +2023,7 @@
     try {
       const walletWait = await confirmationTools.waitForWalletResult(
         Promise.resolve().then(action),
-        { timeoutMs: WALLET_RESULT_TIMEOUT_MS },
+        { timeoutMs: WALLET_RESULT_TIMEOUT_MS, onLateResult: options.onLateResult },
       );
       if (walletWait.state === "pending") {
         const error = new Error("Meteor has not returned a final response yet.");
@@ -3086,9 +3087,9 @@
           : escapeHtml(String(task.amount || "Not applicable"));
         const hash = task.transactionHash
           ? communityExplorerLink(task.transactionHash, task.transactionHash)
-          : "Not saved — Meteor returned after the wallet-response timeout";
+          : "Not saved — Meteor did not return a hash to this page";
         const missingHash = task.methodName === "community_contribute_usdc" && !task.transactionHash
-          ? "This record cannot be matched to one finalized transfer until its transaction hash is restored. Do not contribute again."
+          ? "This record cannot be matched to one finalized transfer until its hash is restored. Copy the finalized hash from Meteor Activity and reopen HarvestPool with ?transactionHash=YOUR_HASH. Do not contribute again."
           : "HarvestPool will verify the exact signer, receiver, method, arguments, amount, and finalized receipts.";
         return `<article class="decision-card" id="action-${escapeHtml(task.id)}"><span class="status status-pending"><span></span>Confirmation unresolved</span><h3>Check the submitted action</h3><p>${escapeHtml(missingHash)}</p><details class="technical-details"><summary>Saved action details</summary><dl class="checkout-status-facts"><div><dt>Signer</dt><dd><code>${escapeHtml(task.signerId)}</code></dd></div><div><dt>Token contract</dt><dd><code>${escapeHtml(task.receiverId)}</code></dd></div><div><dt>DAO</dt><dd><code>${escapeHtml(task.daoId || "Not applicable")}</code></dd></div><div><dt>Amount</dt><dd>${amount}</dd></div><div><dt>Transaction</dt><dd>${hash}</dd></div></dl></details><div class="vote-actions"><button class="button button-primary" type="button" data-action="check-pending-actions" data-pending-action-id="${escapeHtml(task.actionId)}">Check on-chain state</button></div><p class="field-help" role="status" aria-live="polite" data-pending-check-result></p></article>`;
       }
@@ -3764,6 +3765,15 @@
     });
     renderPendingConfirmationNotice();
     let transactionError = null;
+    const captureLateWalletResult = (lateResult) => {
+      if (lateResult?.state !== "returned") return null;
+      const updated = confirmationTools.persistTransactionHash(pendingActionStore, saved, lateResult.value);
+      if (!updated) return null;
+      renderPendingConfirmationNotice();
+      showToast("Meteor returned the transaction. Checking finalized on-chain state.");
+      window.setTimeout(() => reconcilePendingActions({ poll: true }).catch(() => null), 0);
+      return updated;
+    };
     const outcome = await performTransaction(
       button,
       actionProgressCopy(methodName),
@@ -3777,6 +3787,7 @@
       successMessage,
       {
         confirmOnReturn: false,
+        onLateResult: captureLateWalletResult,
         failureMessage: options.failureMessage || "We couldn't complete this action. Your selection is safe. Please check its status before trying again.",
         onPhase: options.onPhase,
         onError: (message, error) => {
@@ -3798,10 +3809,11 @@
     state.pendingTransactions.add(button);
     setBusy(button, true, actionProgressCopy(methodName));
     const transactionHash = confirmationTools.transactionHash(outcome);
+    const latestSaved = pendingActionStore.list(saved.signerId).find((item) => item.id === saved.id) || saved;
     const submittedAction = pendingActionStore.save({
-      ...saved,
+      ...latestSaved,
       phase: "confirming",
-      transactionHash: transactionHash || saved.transactionHash || null,
+      transactionHash: transactionHash || latestSaved.transactionHash || null,
     });
     const result = await waitForActionConfirmation(submittedAction, {
       attempts: options.confirmationAttempts,
@@ -3823,7 +3835,13 @@
       showToast("The contract rejected this action. No retry was submitted.", "error");
       return result;
     }
-    pendingActionStore.save({ ...submittedAction, phase: "unresolved" });
+    const stillPending = pendingActionStore.list(submittedAction.signerId).find((item) => item.id === submittedAction.id);
+    if (stillPending) {
+      pendingActionStore.save({
+        ...stillPending,
+        phase: stillPending.transactionHash ? "confirming" : "unresolved",
+      });
+    }
     renderPendingConfirmationNotice();
     if (button) setBusy(button, true, actionProgressCopy(methodName));
     showToast(`${actionProgressCopy(methodName)} We’ll update this page automatically.`);

@@ -5,6 +5,7 @@ const {
   actionGate,
   classifyOutcome,
   pendingStore,
+  persistTransactionHash,
   transactionHash,
   waitForState,
   waitForWalletResult,
@@ -53,6 +54,9 @@ function createFeedbackHarness(options = {}) {
     const wallet = await waitForWalletResult(Promise.resolve().then(options.walletCall), {
       timeoutMs: options.walletTimeoutMs || 50,
       sleep: options.walletSleep,
+      onLateResult: (lateResult) => {
+        if (lateResult?.state === "returned") persistTransactionHash(store, saved, lateResult.value);
+      },
     });
     if (wallet.state === "pending") {
       saved = store.save({ ...saved, phase: "unresolved" });
@@ -142,6 +146,25 @@ test("a lost wallet response stays unresolved and blocks an automatic retry", as
   });
   assert.equal((await harness.run()).state, "unresolved");
   assert.equal(harness.store.list()[0].phase, "unresolved");
+  assert.equal((await harness.run()).state, "duplicate");
+  assert.equal(harness.walletCalls(), 1);
+});
+
+test("a wallet response after timeout persists its hash without resubmitting", async () => {
+  let resolveWallet;
+  const walletResult = new Promise((resolve) => { resolveWallet = resolve; });
+  const harness = createFeedbackHarness({
+    walletCall: () => walletResult,
+    walletTimeoutMs: 1,
+    walletSleep: async () => undefined,
+    readContract: async () => ({ state: "uncertain" }),
+  });
+  assert.equal((await harness.run()).state, "unresolved");
+  resolveWallet(success("tx-returned-after-timeout"));
+  await new Promise((resolve) => setImmediate(resolve));
+  const recovered = harness.store.list("buyer.testnet")[0];
+  assert.equal(recovered.transactionHash, "tx-returned-after-timeout");
+  assert.equal(recovered.phase, "confirming");
   assert.equal((await harness.run()).state, "duplicate");
   assert.equal(harness.walletCalls(), 1);
 });

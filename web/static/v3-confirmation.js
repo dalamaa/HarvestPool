@@ -40,7 +40,11 @@
       (value) => ({ state: "returned", value }),
       (error) => ({ state: "rejected", error }),
     );
-    return Promise.race([returned, timeout]);
+    const first = await Promise.race([returned, timeout]);
+    if (first.state === "pending" && typeof options.onLateResult === "function") {
+      returned.then((result) => Promise.resolve(options.onLateResult(result)).catch(() => null));
+    }
+    return first;
   }
 
   function finalOutcome(value) {
@@ -194,5 +198,14 @@
       .sort((left, right) => Number(right.savedAt || 0) - Number(left.savedAt || 0))[0] || null;
   }
 
-  return { actionGate, actionId, classifyOutcome, errorKind, friendlyError, issueMatches, pendingForWalletCallback, pendingStore, transactionHash, waitForState, waitForWalletResult, walletCallbackHashes };
+  function persistTransactionHash(store, action, value) {
+    if (!store || !action?.id) return null;
+    const hash = typeof value === "string" ? value.trim() : transactionHash(value);
+    if (!hash) return null;
+    const current = store.list(action.signerId).find((item) => item.id === action.id);
+    if (!current) return null;
+    return store.save({ ...current, phase: "confirming", transactionHash: hash });
+  }
+
+  return { actionGate, actionId, classifyOutcome, errorKind, friendlyError, issueMatches, pendingForWalletCallback, pendingStore, persistTransactionHash, transactionHash, waitForState, waitForWalletResult, walletCallbackHashes };
 }));

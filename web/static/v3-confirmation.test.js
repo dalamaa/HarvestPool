@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { actionGate, actionId, classifyOutcome, errorKind, friendlyError, issueMatches, pendingForWalletCallback, pendingStore, transactionHash, waitForState, waitForWalletResult, walletCallbackHashes } = require("./v3-confirmation.js");
+const { actionGate, actionId, classifyOutcome, errorKind, friendlyError, issueMatches, pendingForWalletCallback, pendingStore, persistTransactionHash, transactionHash, waitForState, waitForWalletResult, walletCallbackHashes } = require("./v3-confirmation.js");
 
 test("waitForState rereads until a callback-created record is visible", async () => {
   let reads = 0;
@@ -83,6 +83,22 @@ test("a successful delayed Meteor response remains available for authoritative v
   assert.equal(transactionHash(result.value), "tx");
 });
 
+test("a Meteor result arriving after the response timeout is still delivered for recovery", async () => {
+  let resolveWallet;
+  const walletResult = new Promise((resolve) => { resolveWallet = resolve; });
+  let lateResult = null;
+  const first = await waitForWalletResult(walletResult, {
+    timeoutMs: 1,
+    sleep: async () => undefined,
+    onLateResult: (result) => { lateResult = result; },
+  });
+  assert.equal(first.state, "pending");
+  resolveWallet({ finalExecutionOutcome: { transaction: { hash: "late-meteor-hash" } } });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(lateResult.state, "returned");
+  assert.equal(transactionHash(lateResult.value), "late-meteor-hash");
+});
+
 test("transaction feedback distinguishes wallet, permission, network, and unknown outcomes", () => {
   assert.equal(errorKind(new Error("User rejected request")), "wallet-rejected");
   assert.equal(errorKind(new Error("Access key does not allow this method")), "wallet-permission");
@@ -151,6 +167,36 @@ test("pending actions survive refresh and remain scoped to the signer", () => {
   assert.equal(pendingStore(storage).list("b.testnet").length, 0);
   pendingStore(storage).remove(action.id);
   assert.equal(pendingStore(storage).list().length, 0);
+});
+
+test("late and callback hashes update only the matching saved action and survive refresh", () => {
+  const values = new Map();
+  const storage = { getItem: (key) => values.get(key) || null, setItem: (key, value) => values.set(key, value) };
+  const store = pendingStore(storage);
+  const saved = store.save({
+    signerId: "buyer.testnet",
+    receiverId: "usdc.testnet",
+    methodName: "community_contribute_usdc",
+    args: { amount: "1000000" },
+  });
+  const updated = persistTransactionHash(store, saved, { transaction: { hash: "late-hash" } });
+  assert.equal(updated.transactionHash, "late-hash");
+  assert.equal(updated.phase, "confirming");
+  assert.equal(pendingStore(storage).list("buyer.testnet")[0].transactionHash, "late-hash");
+
+  store.remove(saved.id);
+  assert.equal(persistTransactionHash(store, saved, "must-not-resurrect"), null);
+  assert.equal(store.list().length, 0);
+});
+
+test("a late response without a transaction hash preserves the unresolved action", () => {
+  const values = new Map();
+  const storage = { getItem: (key) => values.get(key) || null, setItem: (key, value) => values.set(key, value) };
+  const store = pendingStore(storage);
+  const saved = store.save({ signerId: "buyer.testnet", receiverId: "usdc.testnet", methodName: "community_contribute_usdc", args: { amount: "1000000" }, phase: "unresolved" });
+  assert.equal(persistTransactionHash(store, saved, { status: "unknown" }), null);
+  assert.equal(store.list()[0].phase, "unresolved");
+  assert.equal(store.list()[0].transactionHash, undefined);
 });
 
 test("a pending vote cannot be saved twice while its outcome is uncertain", () => {
