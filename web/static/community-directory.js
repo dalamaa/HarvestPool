@@ -8,6 +8,8 @@
   const directoryTools = window.HarvestPoolCommunityDirectory;
   if (!directoryTools) throw new Error("HarvestPool Community Directory helpers did not load.");
   const ownerKey = "harvestpool:community-fund-owner:v1";
+  const verifiedCacheKey = "harvestpool:community-directory-verified:v1";
+  const verifiedCacheMaxAgeMs = 15 * 60 * 1000;
   const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (character) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;",
   })[character]);
@@ -35,7 +37,7 @@
   function statusClass(status) {
     if (status === "Completed") return "status-funded";
     if (status === "Goal reached" || status === "Fully Funded") return "status-funded";
-    if (["Open for contributions", "Open for Contributions", "In Progress"].includes(status)) return "status-open";
+    if (["Open for contributions", "Open for Contributions"].includes(status)) return "status-open";
     return "status-pending";
   }
 
@@ -46,35 +48,89 @@
   }
 
   function fundCard(fund) {
-    const raised = Number(fund.raisedAmount);
-    const target = Number(fund.targetAmount);
-    const progress = Number.isFinite(raised) && Number.isFinite(target) && target > 0 ? Math.min(100, Math.round((raised / target) * 100)) : 0;
-    const contributorCopy = fund.contributorsCount === null || fund.contributorsCount === undefined
+    const progress = fund.isVerifiedFund ? directoryTools.progressPercent(fund.raisedUnits, fund.targetUnits) : null;
+    const progressLabel = fund.isVerifiedFund ? directoryTools.progressLabel(progress) : "Awaiting fund setup";
+    const verificationCopy = !fund.isVerifiedFund
+      ? "No treasury or verified contribution history"
+      : fund.verificationState === "current"
+      ? "Verified finalized activity"
+      : fund.verificationState === "last-verified"
+        ? "Last verified finalized activity · refreshing"
+        : fund.verificationState === "error"
+          ? "Verification is temporarily unavailable"
+          : "Checking finalized activity…";
+    const raisedCopy = !fund.isVerifiedFund
+      ? "Contributions unavailable"
+      : fund.raisedAmount === null || fund.raisedAmount === undefined
+      ? "Raised amount pending verification"
+      : `${money(fund.raisedAmount)} raised`;
+    const contributorCopy = !fund.isVerifiedFund
+      ? "Contributions unavailable"
+      : fund.contributorsCount === null || fund.contributorsCount === undefined
       ? "Contributor count unavailable"
       : `${fund.contributorsCount} contributor${fund.contributorsCount === 1 ? "" : "s"}`;
     const image = fund.cover_image_url ? `<div class="community-card-media"><img class="community-card-image" src="${escapeHtml(fund.cover_image_url)}" alt="" loading="lazy"><div class="community-image-placeholder" role="img" aria-label="Cover image unavailable"><span aria-hidden="true">◇</span><strong>Image unavailable</strong></div></div>` : "";
-    return `<article class="community-directory-card">${image}<div class="community-card-body"><div class="community-card-top"><span class="status ${statusClass(fund.status)}"><span></span>${escapeHtml(displayStatus(fund.status))}</span>${fund.isVerifiedFund ? '<span class="verified-label">Verified Testnet fund</span>' : ""}</div><h3>${escapeHtml(fund.title)}</h3><p class="community-card-location">${escapeHtml(fund.location)}</p><p class="community-card-description">${escapeHtml(fund.description)}</p><div class="community-card-progress"><div class="goal-progress" role="progressbar" aria-label="Amount raised toward goal" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progress}"><span style="width:${progress}%"></span></div><div><strong>${progress}% funded</strong><span>${money(fund.raisedAmount)} raised · ${money(fund.targetAmount)} goal</span></div></div><dl class="community-card-meta"><div><dt>Contributors</dt><dd>${escapeHtml(contributorCopy)}</dd></div><div><dt>Deadline</dt><dd>${escapeHtml(readableDate(fund.contribution_deadline))}</dd></div></dl><a class="button button-outline" href="${escapeHtml(fund.detailUrl)}">View fund</a></div></article>`;
+    const progressAttributes = progress === null
+      ? 'aria-label="Funding progress is being verified" aria-busy="true"'
+      : `role="progressbar" aria-label="Amount raised toward goal" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progress}"`;
+    return `<article class="community-directory-card">${image}<div class="community-card-body"><div class="community-card-top"><span class="status ${statusClass(fund.status)}"><span></span>${escapeHtml(displayStatus(fund.status))}</span>${fund.isVerifiedFund ? '<span class="verified-label">Verified Testnet fund</span>' : ""}</div><h3>${escapeHtml(fund.title)}</h3><p class="community-card-location">${escapeHtml(fund.location)}</p><p class="community-card-description">${escapeHtml(fund.description)}</p><div class="community-card-progress"><div class="goal-progress" ${progressAttributes}><span style="width:${progress ?? 0}%"></span></div><div><strong>${escapeHtml(progressLabel)}</strong><span>${escapeHtml(raisedCopy)} · ${money(fund.targetAmount)} goal</span><small class="community-verification-copy">${escapeHtml(verificationCopy)}</small></div></div><dl class="community-card-meta"><div><dt>Contributors</dt><dd>${escapeHtml(contributorCopy)}</dd></div><div><dt>Deadline</dt><dd>${escapeHtml(readableDate(fund.contribution_deadline))}</dd></div></dl><a class="button button-outline" href="${escapeHtml(fund.detailUrl)}">View fund</a></div></article>`;
   }
 
-  function applyVerifiedActivity(fund, activity) {
-    if (!fund?.isVerifiedFund || !activity?.complete || activity.stale || activity.error) return false;
+  function applyVerifiedActivity(fund, activity, verificationState = null) {
+    if (!fund?.isVerifiedFund || activity?.error || (!activity?.complete && !activity?.boundedEvidence)) return false;
     const contributions = activity.contributions || [];
     const total = contributions.reduce((sum, item) => sum + BigInt(String(item.amount || "0")), 0n);
     const scale = 10n ** BigInt(Number(fund.decimals ?? 6));
     const whole = total / scale;
     const fraction = (total % scale).toString().padStart(Number(fund.decimals ?? 6), "0").slice(0, 2).padEnd(2, "0");
     fund.raisedAmount = `${whole}.${fraction}`;
-    fund.contributorsCount = new Set(contributions.map((item) => item.contributor || item.account).filter(Boolean)).size;
-    fund.status = Number(fund.raisedAmount) >= Number(fund.targetAmount) ? "Goal reached" : "Open for contributions";
+    fund.raisedUnits = total.toString();
+    fund.verifiedContributorIds = directoryTools.verifiedContributors(contributions);
+    fund.contributorsCount = fund.verifiedContributorIds.length;
+    fund.status = total >= BigInt(String(fund.targetUnits || "0")) ? "Goal reached" : "Open for contributions";
+    fund.verificationState = verificationState || (activity.stale ? "last-verified" : "current");
     return true;
+  }
+
+  function readVerifiedCache() {
+    try {
+      const cache = JSON.parse(window.sessionStorage.getItem(verifiedCacheKey) || "{}");
+      return cache && typeof cache === "object" ? cache : {};
+    } catch (_error) {
+      return {};
+    }
+  }
+
+  function writeVerifiedCache(slug, activity) {
+    if ((!activity?.complete && !activity?.boundedEvidence) || activity?.error) return;
+    try {
+      const cache = readVerifiedCache();
+      cache[slug] = { savedAt: Date.now(), activity };
+      window.sessionStorage.setItem(verifiedCacheKey, JSON.stringify(cache));
+    } catch (_error) {
+      // Directory verification still works when browser storage is unavailable.
+    }
+  }
+
+  function applyCachedActivity(fund) {
+    const cached = readVerifiedCache()[fund.slug];
+    if (!cached || Date.now() - Number(cached.savedAt || 0) > verifiedCacheMaxAgeMs) return false;
+    return applyVerifiedActivity(fund, cached.activity, "last-verified");
   }
 
   async function hydrateVerifiedFunds(funds, render) {
     await Promise.allSettled(funds.filter((fund) => fund.isVerifiedFund && fund.activityUrl).map(async (fund) => {
-      const response = await fetch(fund.activityUrl, { headers: { Accept: "application/json" } });
-      const activity = await response.json();
-      if (!response.ok) throw new Error(activity.error || "Verified activity is unavailable.");
-      if (applyVerifiedActivity(fund, activity)) render();
+      try {
+        const response = await fetch(fund.activityUrl, { headers: { Accept: "application/json" } });
+        const activity = await response.json();
+        if (!response.ok) throw new Error(activity.error || "Verified activity is unavailable.");
+        if (!applyVerifiedActivity(fund, activity)) throw new Error("Verified activity was incomplete.");
+        writeVerifiedCache(fund.slug, activity);
+        render();
+      } catch (_error) {
+        if (fund.raisedAmount === null || fund.raisedAmount === undefined) fund.verificationState = "error";
+        render();
+      }
     }));
   }
 
@@ -91,13 +147,32 @@
     if (!root) return;
     let funds = [];
     let active = "all";
+    let accountId = "";
+    const emptyCopy = () => {
+      const verificationPending = funds.some((fund) => fund.isVerifiedFund && ["pending", undefined].includes(fund.verificationState));
+      if (verificationPending && ["open", "mine"].includes(active)) return ["Verifying fund activity", "This view will update as finalized fund activity arrives."];
+      if (active === "vote") return accountId
+        ? ["No verified votes need your action", `No pending fund decision is verified for ${accountId}.`]
+        : ["Connect a wallet to check votes", "Vote eligibility comes from each configured fund’s verified governance policy."];
+      if (active === "mine") return accountId
+        ? ["No verified funds are associated with this wallet", "A verified contribution or supported fund membership will appear here."]
+        : ["Connect a wallet to find your funds", "Saved requests from this browser still appear here without a wallet."];
+      if (active === "completed") return ["No funds are completed", "Reaching a fundraising goal does not by itself mark a fund completed."];
+      if (active === "open") return ["No funds are open for contributions", "Try All Funds to see requests and goal-reached funds."];
+      return ["No Community Funds are available", "Start a fund request for your community."];
+    };
     const render = () => {
-      const visible = funds.filter((fund) => directoryTools.matchesFilter(fund, active));
+      const visible = funds.filter((fund) => directoryTools.matchesFilter(fund, active, { accountId }));
+      const [emptyTitle, emptyMessage] = emptyCopy();
       root.innerHTML = visible.length
         ? visible.map(fundCard).join("")
-        : `<div class="empty-state community-empty"><h2>No funds match this view.</h2><p>${active === "mine" ? "Fund requests started in this browser will appear here." : "Try another filter or start a fund request for your community."}</p><a class="button button-outline" href="/community-funds/start">Start a Community Fund</a></div>`;
+        : `<div class="empty-state community-empty"><h2>${escapeHtml(emptyTitle)}</h2><p>${escapeHtml(emptyMessage)}</p>${active === "all" ? '<a class="button button-outline" href="/community-funds/start">Start a Community Fund</a>' : ""}</div>`;
       bindImageFallbacks(root);
     };
+    window.addEventListener("harvestpool:wallet-account", (event) => {
+      accountId = String(event.detail?.accountId || "");
+      render();
+    });
     document.querySelectorAll("[data-community-filter]").forEach((button) => button.addEventListener("click", () => {
       active = button.dataset.communityFilter;
       document.querySelectorAll("[data-community-filter]").forEach((item) => {
@@ -112,6 +187,7 @@
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error || "Community funds could not be loaded.");
       funds = payload.funds || [];
+      funds.filter((fund) => fund.isVerifiedFund).forEach(applyCachedActivity);
       render();
       hydrateVerifiedFunds(funds, render).catch(() => null);
     } catch (error) {

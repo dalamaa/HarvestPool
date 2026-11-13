@@ -236,6 +236,15 @@ def render_page(
             if active_fund.get("slug") in _configured_community_funds()
             else "/api/community-fund/activity"
         ),
+        community_funds=[
+            {
+                "slug": fund["slug"],
+                "daoId": fund["daoId"],
+                "tokenId": fund["goal"].get("tokenId", ""),
+                "activityUrl": f"/api/community-funds/{fund['slug']}/activity",
+            }
+            for fund in _configured_community_funds().values()
+        ],
         fund_slug=fund_slug,
     )
 
@@ -1068,7 +1077,7 @@ def _verified_fund_directory_item(fund, *, cached_only=False):
         pass
     target = int(goal.get("targetUnits") or goal.get("targetYocto") or "0")
     if contributed is None:
-        status = "In Progress"
+        status = "Verification pending"
     elif contributed >= target:
         status = "Goal reached"
     else:
@@ -1085,6 +1094,8 @@ def _verified_fund_directory_item(fund, *, cached_only=False):
         "status": status,
         "targetAmount": target_amount,
         "raisedAmount": amount,
+        "targetUnits": str(target),
+        "raisedUnits": None if contributed is None else str(contributed),
         "contributorsCount": contributor_count,
         "contribution_deadline": "No deadline configured",
         "isVerifiedFund": True,
@@ -1092,6 +1103,7 @@ def _verified_fund_directory_item(fund, *, cached_only=False):
         "detailUrl": f"/community-funds/{fund['slug']}",
         "activityUrl": f"/api/community-funds/{fund['slug']}/activity",
         "decimals": decimals,
+        "verificationState": "pending" if contributed is None else "current",
     }
 
 

@@ -1003,8 +1003,9 @@ h3 { margin-bottom: 10px; font-size: 21px; line-height: 1.1; }
 .community-card-location { margin: 0 0 14px; color: var(--muted); font-size: 13px; font-weight: 600; }
 .community-card-description { min-height: 3.2em; color: var(--ink); line-height: 1.6; }
 .community-card-progress { margin: 20px 0; }
-.community-card-progress > div:last-child { display: flex; justify-content: space-between; gap: 12px; margin-top: 8px; color: var(--muted); font-size: 13px; }
+.community-card-progress > div:last-child { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; margin-top: 8px; color: var(--muted); font-size: 13px; }
 .community-card-progress strong { color: var(--pine); }
+.community-verification-copy { flex-basis: 100%; color: var(--muted); font-size: 11px; }
 .community-card-meta { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 0 0 20px; }
 .community-card-meta > div { padding: 12px; border-radius: 8px; background: var(--mist); }
 .community-card-meta dt { color: var(--muted); font-size: 11px; }

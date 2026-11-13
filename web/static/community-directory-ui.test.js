@@ -18,6 +18,22 @@ test("verified fund cards render first and hydrate finalized activity independen
   assert.match(source, /hydrateVerifiedFunds/);
   assert.match(source, /Promise\.allSettled/);
   assert.match(source, /activity\?\.complete/);
-  assert.match(source, /activity\.stale/);
+  assert.match(source, /last-verified/);
   assert.match(source, /fund\.activityUrl/);
+});
+
+test("directory never presents unavailable verification as a zero balance", () => {
+  assert.match(source, /Raised amount pending verification/);
+  assert.match(source, /progressPercent\(fund\.raisedUnits, fund\.targetUnits\)/);
+  assert.doesNotMatch(source, /Math\.round\(\(raised \/ target\) \* 100\)/);
+  assert.match(source, /verifiedContributorIds/);
+  assert.match(source, /sessionStorage/);
+});
+
+test("directory filters respond immediately and use wallet-aware verified associations", () => {
+  assert.match(source, /harvestpool:wallet-account/);
+  assert.match(source, /aria-pressed/);
+  assert.match(source, /No verified votes need your action/);
+  assert.match(source, /No verified funds are associated with this wallet/);
+  assert.match(source, /Reaching a fundraising goal does not by itself mark a fund completed/);
 });

@@ -42,6 +42,9 @@ test("finalized contribution recovery requires exact indexed evidence and treasu
   assert.match(appSource, /expectedMinimum/);
   assert.match(appSource, /pendingActionStore\.remove\(action\.id\)/);
   assert.match(appSource, /addEventListener\("pageshow",[\s\S]*reconcilePendingActions\(\)/);
+  assert.match(appSource, /configuredContributionFund\(appConfig\.communityFunds/);
+  assert.match(appSource, /refresh=1/);
+  assert.match(appSource, /onMatchingFundPage/);
 });
 
 test("Community Fund progress rendering never passes a BigInt to Math.floor", () => {

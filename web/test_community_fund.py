@@ -268,6 +268,10 @@ class CommunityFundActivityTests(unittest.TestCase):
         self.assertIsNone(garden["raisedAmount"])
         self.assertEqual(garden["activityUrl"], "/api/community-funds/community-garden/activity")
         self.assertEqual(garden["decimals"], 6)
+        self.assertEqual(garden["targetUnits"], "100000000")
+        self.assertIsNone(garden["raisedUnits"])
+        self.assertEqual(garden["status"], "Verification pending")
+        self.assertEqual(garden["verificationState"], "pending")
 
     def test_directory_does_not_treat_nonpayment_proposals_as_spending(self):
         fund = web_app._configured_community_funds()["community-garden"]

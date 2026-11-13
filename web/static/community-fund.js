@@ -266,6 +266,14 @@
     ) || null;
   }
 
+  function configuredContributionFund(funds, expected = {}) {
+    return (funds || []).find((fund) =>
+      String(fund?.daoId || "") === String(expected.daoId || "")
+      && String(fund?.tokenId || "") === String(expected.tokenId || "")
+      && Boolean(fund?.activityUrl)
+    ) || null;
+  }
+
   function allocationFromProposal(proposal, tokenId = "") {
     const transfer = proposal?.kind?.Transfer;
     if (!transfer || String(transfer.token_id || "") !== String(tokenId || "")) return null;
@@ -372,6 +380,7 @@
     allocationFromProposal,
     analyzePolicy,
     contributionLimit,
+    configuredContributionFund,
     decimalToYocto,
     decodeDescription,
     encodeDescription,

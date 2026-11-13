@@ -222,6 +222,25 @@ test("complete non-stale indexed activity safely reconciles only the exact final
   assert.equal(fund.verifiedContributionRecord(activity, { ...expected, transactionHash: "other-hash" }), null);
 });
 
+test("pending contribution recovery selects only the exact configured DAO and token", () => {
+  const funds = [
+    { daoId: "garden.sputnikv2.testnet", tokenId: "usdc.testnet", activityUrl: "/garden/activity" },
+    { daoId: "equipment.sputnikv2.testnet", tokenId: "usdc.testnet", activityUrl: "/equipment/activity" },
+  ];
+  assert.equal(fund.configuredContributionFund(funds, {
+    daoId: "garden.sputnikv2.testnet",
+    tokenId: "usdc.testnet",
+  }).activityUrl, "/garden/activity");
+  assert.equal(fund.configuredContributionFund(funds, {
+    daoId: "garden.sputnikv2.testnet",
+    tokenId: "wrong-token.testnet",
+  }), null);
+  assert.equal(fund.configuredContributionFund(funds, {
+    daoId: "unknown.sputnikv2.testnet",
+    tokenId: "usdc.testnet",
+  }), null);
+});
+
 test("USDC payment proof requires the configured token receipt", () => {
   const allocation = { id: 8, receiverId: "recipient.testnet", amount: "200000", tokenId: "usdc.testnet" };
   const activity = { proposalTransactions: { 8: [{

@@ -129,7 +129,7 @@
   const YOCTO_PER_NEAR = 10n ** 24n;
   const PRICE_SCALE = 1_000_000n;
   const RECONCILIATION_MAX_AGE_MS = 5 * 60_000;
-  const TRANSACTION_BUNDLE_VERSION = "2026-11-13.1";
+  const TRANSACTION_BUNDLE_VERSION = "2026-11-13.2";
   const WALLET_RESULT_TIMEOUT_MS = 15_000;
   const EXPLORE_REFRESH_INTERVAL_MS = 15_000;
   const CREATE_SUBMITTED_KEY = "harvestpool:create-submitted:v1";
@@ -999,6 +999,9 @@
     state.memberStatus = null;
     state.fundedMembership = new Map();
     updateWalletUi();
+    window.dispatchEvent(new CustomEvent("harvestpool:wallet-account", {
+      detail: { accountId: state.accountId },
+    }));
     if (state.dataLoaded) {
       await loadWalletState();
       updateWalletUi();
@@ -1374,7 +1377,11 @@
     const { methodName, args = {}, signerId, receiverId } = action;
     if (methodName === "community_contribute_usdc") {
       if (!action.transactionHash) return { state: "uncertain" };
-      if (String(action.context?.daoId || "") !== String(appConfig.communityDaoId || "")) return { state: "failed" };
+      const configuredFund = communityFundTools.configuredContributionFund(appConfig.communityFunds, {
+        daoId: action.context?.daoId,
+        tokenId: receiverId,
+      });
+      if (!configuredFund) return { state: "failed" };
       const expected = {
         transactionHash: action.transactionHash,
         signerId,
@@ -1394,10 +1401,27 @@
         // A finalized, exact indexer record may reconcile a temporary transaction-RPC failure.
       }
       if (verified.state === "failed") return verified;
-      if (verified.state !== "confirmed" && state.communityFund.activityPromise) {
-        applyCommunityActivity(await state.communityFund.activityPromise);
+      let indexedActivity = null;
+      const onMatchingFundPage = appConfig.page === "community_fund"
+        && String(appConfig.communityDaoId || "") === String(configuredFund.daoId);
+      if (verified.state !== "confirmed" && onMatchingFundPage && state.communityFund.activityPromise) {
+        indexedActivity = applyCommunityActivity(await state.communityFund.activityPromise);
+      } else if (verified.state !== "confirmed" && onMatchingFundPage) {
+        indexedActivity = state.communityFund.activity;
       }
-      const indexedRecord = communityFundTools.verifiedContributionRecord(state.communityFund.activity, expected);
+      let indexedRecord = communityFundTools.verifiedContributionRecord(indexedActivity, expected);
+      if (verified.state !== "confirmed" && !indexedRecord) {
+        const separator = configuredFund.activityUrl.includes("?") ? "&" : "?";
+        const response = await fetch(`${configuredFund.activityUrl}${separator}refresh=1`, {
+          headers: { Accept: "application/json" },
+        });
+        const activity = await response.json();
+        if (response.ok) {
+          indexedActivity = activity;
+          indexedRecord = communityFundTools.verifiedContributionRecord(activity, expected);
+          if (onMatchingFundPage) applyCommunityActivity(activity);
+        }
+      }
       if (verified.state !== "confirmed" && !indexedRecord) return { state: "uncertain" };
       const balance = await viewOnContract(receiverId, "ft_balance_of", { account_id: action.context?.daoId });
       const expectedMinimum = BigInt(String(action.context?.previousTreasuryBalance || "0")) + BigInt(String(args.amount));
@@ -1406,7 +1430,7 @@
         ...(verified.record || indexedRecord),
         timestamp: verified.record?.timestamp || indexedRecord?.timestamp || (BigInt(Date.now()) * 1_000_000n).toString(),
       };
-      if (!state.communityFund.recentContributions.some((item) => item.transactionHash === record.transactionHash)) {
+      if (onMatchingFundPage && !state.communityFund.recentContributions.some((item) => item.transactionHash === record.transactionHash)) {
         state.communityFund.recentContributions.push(record);
       }
       return { state: "confirmed", record };
@@ -4404,6 +4428,7 @@
         valueIsYocto: true,
         context: {
           daoId: appConfig.communityDaoId,
+          activityUrl: appConfig.communityActivityUrl,
           previousTreasuryBalance: String(state.communityFund.asset?.daoBalance || "0"),
         },
         confirmationAttempts: 30,
