@@ -1,8 +1,10 @@
 (function (root, factory) {
-  if (typeof module === "object" && module.exports) module.exports = factory();
-  else root.HarvestPoolCommunityDirectory = factory();
-}(typeof self !== "undefined" ? self : globalThis, function () {
+  if (typeof module === "object" && module.exports) module.exports = factory(require("./community-fundraising.js"));
+  else root.HarvestPoolCommunityDirectory = factory(root.HarvestPoolCommunityFundraising);
+}(typeof self !== "undefined" ? self : globalThis, function (fundraising) {
   "use strict";
+
+  if (!fundraising) throw new Error("HarvestPool Community Fundraising helpers did not load.");
 
   function accountSet(values) {
     return new Set((values || []).map((value) => String(value || "").trim()).filter(Boolean));
@@ -10,11 +12,11 @@
 
   function matchesFilter(fund, filter, context = {}) {
     const accountId = String(context.accountId || "").trim();
-    if (filter === "open") return ["Open for contributions", "Open for Contributions"].includes(fund?.status);
+    if (filter === "open") return fundraising.stage(fund?.raisedUnits, fund?.targetUnits) === "open";
     if (filter === "vote") return Boolean(accountId)
       && fund?.needsVote === true
       && accountSet(fund.voteEligibleAccountIds).has(accountId);
-    if (filter === "completed") return fund?.status === "Completed";
+    if (filter === "completed") return fundraising.stage(fund?.raisedUnits, fund?.targetUnits) === "completed";
     if (filter === "mine") return fund?.isMine === true || (Boolean(accountId) && (
       accountSet(fund?.verifiedContributorIds).has(accountId)
       || accountSet(fund?.verifiedMemberIds).has(accountId)
@@ -23,12 +25,7 @@
   }
 
   function progressPercent(raisedUnits, targetUnits) {
-    if (!/^\d+$/.test(String(raisedUnits ?? "")) || !/^\d+$/.test(String(targetUnits ?? ""))) return null;
-    const raised = BigInt(String(raisedUnits));
-    const target = BigInt(String(targetUnits));
-    if (target <= 0n) return null;
-    const hundredths = raised >= target ? 10_000n : (raised * 10_000n) / target;
-    return Number(hundredths) / 100;
+    return fundraising.progressPercent(raisedUnits, targetUnits);
   }
 
   function progressLabel(value) {
@@ -40,5 +37,12 @@
     return [...accountSet((contributions || []).map((item) => item?.contributor || item?.account))];
   }
 
-  return { matchesFilter, progressLabel, progressPercent, verifiedContributors };
+  return {
+    fundraisingStage: fundraising.stage,
+    fundraisingStatus: fundraising.status,
+    matchesFilter,
+    progressLabel,
+    progressPercent,
+    verifiedContributors,
+  };
 }));

@@ -1,6 +1,23 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { archivedAlertStore, eligibleTasks } = require("./action-center.js");
+const { archivedAlertStore, eligibleTasks, walletViewState } = require("./action-center.js");
+
+test("wallet restoration, connection, and disconnection have distinct views", () => {
+  assert.equal(walletViewState("initializing", null), "restoring");
+  assert.equal(walletViewState("connected", "buyer.testnet"), "connected");
+  assert.equal(walletViewState("connected", null), "disconnected");
+  assert.equal(walletViewState("disconnected", null), "disconnected");
+});
+
+test("pending actions remain isolated across account switches", () => {
+  const pending = [
+    { id: "buyer", signerId: "buyer.testnet", methodName: "claim_refund", args: { purchase_id: "2" } },
+    { id: "other", signerId: "other.testnet", methodName: "claim_refund", args: { purchase_id: "3" } },
+  ];
+  assert.deepEqual(eligibleTasks({ accountId: "buyer.testnet", pending }).map((task) => task.actionId), ["buyer"]);
+  assert.deepEqual(eligibleTasks({ accountId: "other.testnet", pending }).map((task) => task.actionId), ["other"]);
+  assert.deepEqual(eligibleTasks({ accountId: null, pending }).map((task) => task.actionId), []);
+});
 
 test("returns only account-eligible active actions", () => {
   const tasks = eligibleTasks({
@@ -39,17 +56,15 @@ test("unresolved transactions are scoped to the connected signer", () => {
   assert.equal(tasks[0].purchaseId, "2");
 });
 
-test("saved unresolved actions can render before wallet restoration", () => {
+test("saved unresolved actions remain hidden before wallet restoration", () => {
   const tasks = eligibleTasks({
     accountId: null,
-    includeSavedPending: true,
     pending: [
       { id: "a", signerId: "buyer.testnet", methodName: "claim_refund", args: { purchase_id: "2" } },
       { id: "b", signerId: "other.testnet", methodName: "community_contribute_usdc", args: { amount: "100000" } },
     ],
   });
-  assert.deepEqual(tasks.map((task) => task.kind), ["pending-transaction", "pending-transaction"]);
-  assert.deepEqual(tasks.map((task) => task.signerId), ["buyer.testnet", "other.testnet"]);
+  assert.deepEqual(tasks, []);
 });
 
 test("an unresolved submission replaces rather than duplicates its eligible task", () => {

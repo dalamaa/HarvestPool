@@ -47,5 +47,5 @@ test("directory filters respond immediately and use wallet-aware verified associ
   assert.match(source, /aria-pressed/);
   assert.match(source, /No verified votes need your action/);
   assert.match(source, /No verified funds are associated with this wallet/);
-  assert.match(source, /Reaching a fundraising goal does not by itself mark a fund completed/);
+  assert.match(source, /verified lifetime contributions reach its goal/);
 });

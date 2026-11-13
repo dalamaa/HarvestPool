@@ -5,10 +5,10 @@ const directory = require("./community-directory-logic.js");
 
 const funds = [
   { title: "Setup", status: "Awaiting Fund Setup", isMine: true, needsVote: false },
-  { title: "Open", status: "Open for Contributions", isMine: false, needsVote: false },
+  { title: "Open", status: "Open for Contributions", raisedUnits: "999999", targetUnits: "1000000", isMine: false, needsVote: false },
   { title: "Vote", status: "In Progress", isMine: false, needsVote: true, voteEligibleAccountIds: ["member.testnet"] },
-  { title: "Done", status: "Completed", isMine: false, needsVote: false },
-  { title: "Contributed", status: "Goal reached", verifiedContributorIds: ["member.testnet"] },
+  { title: "Done", status: "Completed", raisedUnits: "1000000", targetUnits: "1000000", isMine: false, needsVote: false },
+  { title: "Contributed", status: "Goal reached", raisedUnits: "1250000", targetUnits: "1000000", verifiedContributorIds: ["member.testnet"] },
 ];
 
 test("community directory filters represent distinct fund states", () => {
@@ -16,10 +16,19 @@ test("community directory filters represent distinct fund states", () => {
   assert.deepEqual(titles("all"), ["Setup", "Open", "Vote", "Done", "Contributed"]);
   assert.deepEqual(titles("open"), ["Open"]);
   assert.deepEqual(titles("vote"), ["Vote"]);
-  assert.deepEqual(titles("completed"), ["Done"]);
+  assert.deepEqual(titles("completed"), ["Done", "Contributed"]);
   assert.deepEqual(titles("mine"), ["Setup", "Contributed"]);
   assert.deepEqual(titles("vote", "other.testnet"), []);
   assert.deepEqual(titles("mine", "other.testnet"), ["Setup"]);
+});
+
+test("fundraising stage uses confirmed lifetime totals and ignores display status", () => {
+  assert.equal(directory.fundraisingStage("999999", "1000000"), "open");
+  assert.equal(directory.fundraisingStage("1000000", "1000000"), "completed");
+  assert.equal(directory.fundraisingStage("1250000", "1000000"), "completed");
+  assert.equal(directory.fundraisingStage(null, "1000000"), "unknown");
+  assert.equal(directory.matchesFilter({ status: "Goal reached", raisedUnits: "999999", targetUnits: "1000000" }, "completed"), false);
+  assert.equal(directory.matchesFilter({ status: "Open for contributions", raisedUnits: "1000000", targetUnits: "1000000" }, "completed"), true);
 });
 
 test("unknown filters fail closed instead of showing every fund", () => {

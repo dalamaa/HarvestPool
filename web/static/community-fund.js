@@ -1,12 +1,14 @@
 /* Pure SputnikDAO Community Fund helpers. No keys, RPC access, or signing authority lives here. */
 (function (root, factory) {
   if (typeof module === "object" && module.exports) {
-    module.exports = factory();
+    module.exports = factory(require("./community-fundraising.js"));
   } else {
-    root.HarvestPoolCommunityFund = factory();
+    root.HarvestPoolCommunityFund = factory(root.HarvestPoolCommunityFundraising);
   }
-}(typeof self !== "undefined" ? self : globalThis, function () {
+}(typeof self !== "undefined" ? self : globalThis, function (fundraising) {
   "use strict";
+
+  if (!fundraising) throw new Error("HarvestPool Community Fundraising helpers did not load.");
 
   const YOCTO_PER_NEAR = 10n ** 24n;
   const DESCRIPTION_PREFIX = "HARVESTPOOL_COMMUNITY_FUND_V1:";
@@ -345,7 +347,7 @@
     const progressBasisPoints = Number((contributed * 10_000n) / target > 10_000n
       ? 10_000n
       : (contributed * 10_000n) / target);
-    const status = contributed >= target ? "Goal reached" : "Open for contributions";
+    const status = fundraising.status(contributed.toString(), target.toString());
     return {
       contributed: contributed.toString(),
       target: target.toString(),

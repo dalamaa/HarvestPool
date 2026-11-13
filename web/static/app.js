@@ -898,16 +898,14 @@
   }
 
   function actionCenterTasks({ scope = "active" } = {}) {
-    const showEverySavedAction = appConfig.page === "decisions";
     const tasks = actionCenterTools.eligibleTasks({
       accountId: state.accountId,
       purchases: state.purchases,
       issues: state.issues,
       decisions: state.decisions,
       votes: state.recordedVotes,
-      pending: showEverySavedAction ? pendingActionStore.list() : (state.accountId ? pendingActionStore.list(state.accountId) : []),
+      pending: state.accountId ? pendingActionStore.list(state.accountId) : [],
       isMember: isMember(),
-      includeSavedPending: showEverySavedAction,
     });
     if (scope === "all") return tasks;
     return tasks.filter((task) => {
@@ -1070,6 +1068,7 @@
     window.dispatchEvent(new CustomEvent("harvestpool:wallet-account", {
       detail: { accountId: state.accountId },
     }));
+    if (appConfig.page === "decisions" && !state.dataLoaded) renderDecisions();
     if (state.dataLoaded) {
       await loadWalletState();
       updateWalletUi();
@@ -1085,7 +1084,7 @@
 
   async function syncWalletAccount() {
     if (!state.wallet || typeof state.wallet.getAccounts !== "function") {
-      state.walletStatus = "disconnected";
+      await applyWalletAccounts([]);
       return;
     }
     try {
@@ -1093,6 +1092,7 @@
     } catch (_error) {
       state.walletStatus = state.accountId ? "connected" : "disconnected";
       updateWalletUi();
+      if (appConfig.page === "decisions") renderDecisions();
     }
   }
 
@@ -3436,11 +3436,14 @@
     };
     const cards = tasks.map((task) => renderTask(task)).filter(Boolean);
     const archivedCards = archivedTasks.map((task) => renderTask(task, { archived: true })).filter(Boolean);
-    const active = cards.length
+    const walletView = actionCenterTools.walletViewState(state.walletStatus, state.accountId);
+    const active = walletView === "restoring"
+      ? `<section class="action-center-section"><div class="wallet-empty-state" role="status"><strong>Checking wallet connection...</strong></div></section>`
+      : cards.length
       ? `<section class="action-center-active" aria-labelledby="active-actions-heading"><div class="section-heading-inline"><div><span class="section-kicker">Active</span><h2 id="active-actions-heading">${cards.length} ${cards.length === 1 ? "action" : "actions"} need your attention</h2></div></div><div class="decision-grid">${cards.join("")}</div></section>`
-      : state.accountId
-        ? `<section class="action-center-section action-center-empty"><div class="empty-icon">${icon("shield")}</div><h2>Nothing needs attention</h2><p>No supplier proposal, vote, refund, or unresolved transaction is currently available to this account.</p></section>`
-        : `<section class="action-center-section">${disconnectedAccountMarkup("Eligible votes, supplier responses, and refunds will appear here.")}</section>`;
+      : walletView === "connected"
+        ? `<section class="action-center-section action-center-empty"><div class="empty-icon">${icon("shield")}</div><h2>You're all caught up.</h2><p>No actions need your attention right now.</p></section>`
+        : `<section class="action-center-section"><div class="wallet-empty-state"><strong>Wallet not connected.</strong><span>Connect your wallet to view your actions.</span></div></section>`;
     const archived = archivedCards.length
       ? `<section class="action-center-active" aria-labelledby="archived-actions-heading"><div class="section-heading-inline"><div><span class="section-kicker">Archived</span><h2 id="archived-actions-heading">${archivedCards.length} hidden ${archivedCards.length === 1 ? "alert" : "alerts"}</h2></div></div><div class="decision-grid">${archivedCards.join("")}</div></section>`
       : `<section class="action-center-section action-center-empty"><div class="empty-icon">${icon("shield")}</div><h2>No archived alerts</h2><p>Archived unresolved alerts remain here while automatic verification continues.</p></section>`;

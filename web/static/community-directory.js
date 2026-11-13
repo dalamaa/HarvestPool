@@ -95,9 +95,7 @@
     fund.verifiedSubtotalUnits = total.toString();
     fund.verifiedContributorIds = directoryTools.verifiedContributors(contributions);
     fund.contributorsCount = fund.verifiedContributorIds.length;
-    fund.status = total >= BigInt(String(fund.targetUnits || "0"))
-      ? "Goal reached"
-      : "Open for contributions";
+    fund.status = directoryTools.fundraisingStatus(total.toString(), fund.targetUnits);
     fund.verificationState = verificationState
       || (complete ? "current" : "partial");
     return true;
@@ -185,7 +183,7 @@
       if (active === "mine") return accountId
         ? ["No verified funds are associated with this wallet", "A verified contribution or supported fund membership will appear here."]
         : ["Connect a wallet to find your funds", "Saved requests from this browser still appear here without a wallet."];
-      if (active === "completed") return ["No funds are completed", "Reaching a fundraising goal does not by itself mark a fund completed."];
+      if (active === "completed") return ["No completed fundraisers", "A fund appears here once verified lifetime contributions reach its goal."];
       if (active === "open") return ["No funds are open for contributions", "Try All Funds to see requests and goal-reached funds."];
       return ["No Community Funds are available", "Start a fund request for your community."];
     };

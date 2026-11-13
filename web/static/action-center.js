@@ -10,6 +10,12 @@
     return (purchase?.commitments || []).find((item) => String(item.account_id) === String(accountId)) || null;
   }
 
+  function walletViewState(walletStatus, accountId) {
+    if (walletStatus === "initializing") return "restoring";
+    if (walletStatus === "connected" && String(accountId || "").trim()) return "connected";
+    return "disconnected";
+  }
+
   function issueForDecision(decision, issues = []) {
     return issues.find((issue) => String(issue.id) === String(decision?.issue_id)) || null;
   }
@@ -47,7 +53,7 @@
     };
   }
 
-  function eligibleTasks({ accountId, purchases = [], issues = [], decisions = [], votes = new Map(), pending = [], isMember = false, includeSavedPending = false }) {
+  function eligibleTasks({ accountId, purchases = [], issues = [], decisions = [], votes = new Map(), pending = [], isMember = false }) {
     const tasks = [];
     if (accountId) purchases.forEach((purchase) => {
       const commitment = commitmentFor(purchase, accountId);
@@ -79,7 +85,7 @@
         tasks.push({ id: `supplier-${decision.id}`, kind: "supplier-consent", purchaseId, decisionId: String(decision.id), issueId: String(decision.issue_id) });
       }
     });
-    pending.filter((action) => includeSavedPending || String(action.signerId) === String(accountId)).forEach((action) => {
+    pending.filter((action) => Boolean(accountId) && String(action.signerId) === String(accountId)).forEach((action) => {
       const purchaseId = String(action.context?.purchaseId ?? action.args?.purchase_id ?? "");
       const supersededId = action.methodName === "claim_refund" ? `refund-${purchaseId}`
         : ["accept_supplier_request", "decline_supplier_request"].includes(action.methodName) ? `invitation-${purchaseId}`
@@ -109,5 +115,5 @@
     return tasks;
   }
 
-  return { archivedAlertStore, commitmentFor, eligibleTasks, issueForDecision };
+  return { archivedAlertStore, commitmentFor, eligibleTasks, issueForDecision, walletViewState };
 }));
