@@ -65,10 +65,19 @@ test("Explore uses only the four customer-facing marketplace filters", () => {
   assert.match(templateSource, /data-filter="in-progress"[^>]*>In Progress/);
   assert.match(templateSource, /data-filter="closed"[^>]*>Closed/);
   assert.match(templateSource, /data-filter="all"[^>]*>All/);
-  assert.match(templateSource, /data-filter="available"[^>]*aria-pressed="true"/);
+  assert.match(templateSource, /data-filter="all"[^>]*aria-pressed="true"/);
   assert.doesNotMatch(templateSource, /data-filter="(?:live|open|funded|completed)"/);
   assert.doesNotMatch(appSource, /dataset\.filter = "live"/);
   assert.match(appSource, /Authoritative Testnet state/);
+});
+
+test("Explore renders public purchases before wallet and governance enrichment finishes", () => {
+  assert.match(templateSource, /id="purchase-grid"[^>]*aria-busy="true"[\s\S]*Loading Group Deals/);
+  assert.match(appSource, /async function loadPublicPurchaseData\(\)/);
+  assert.match(appSource, /state\.dataLoaded = true;[\s\S]*state\.purchaseDiscoveryStatus = "ready";[\s\S]*renderExplore\(\);/);
+  assert.match(appSource, /async function loadBaseData\(\) \{\s*await loadPublicPurchaseData\(\);\s*await Promise\.all\(\[loadWalletState\(\), loadV3Data\(\)\]\);/);
+  assert.match(appSource, /appConfig\.page === "decisions" \|\| appConfig\.page === "explore"/);
+  assert.match(appSource, /harvestpoolFirstPurchaseCardMs/);
 });
 
 test("Explore polls authoritative state so delayed finalization moves cards without a manual refresh", () => {

@@ -55,14 +55,14 @@
         <section class="explore-section section-shell">
           <div class="section-toolbar">
             <div class="filter-tabs" role="group" aria-label="Filter purchases">
-              <button class="filter-tab active" type="button" data-filter="available" aria-pressed="true">Available</button>
+              <button class="filter-tab active" type="button" data-filter="all" aria-pressed="true">All</button>
+              <button class="filter-tab" type="button" data-filter="available" aria-pressed="false">Available</button>
               <button class="filter-tab" type="button" data-filter="in-progress" aria-pressed="false">In Progress</button>
               <button class="filter-tab" type="button" data-filter="closed" aria-pressed="false">Closed</button>
-              <button class="filter-tab" type="button" data-filter="all" aria-pressed="false">All</button>
             </div>
             <span class="chain-read"><span class="live-pulse"></span>Authoritative Testnet status</span>
           </div>
-          <div id="purchase-grid"></div>
+          <div id="purchase-grid" aria-live="polite" aria-busy="true"><div class="loading-shell" role="status"><span class="sr-only">Loading Group Deals…</span><span class="loading-bar"></span><span class="loading-bar short"></span><span class="loading-block"></span></div></div>
           <div class="empty-state" id="explore-empty" hidden><div class="empty-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h12v18H6z"/><path d="M9 7h6M9 11h6M9 15h3"/></svg></div><h2>No Group Deals match that filter.</h2><p>Try another view or post a Group Deal for your community.</p><a class="button button-outline" href="/create">Post a Group Deal</a></div>
           <p class="contract-note" id="explore-disclaimer">Deal availability updates from the shared transaction record.</p>
         </section>
@@ -212,6 +212,6 @@
     <script src="{{ url_for('static', filename='rpc-reads.js') }}" defer></script>
     <script src="{{ url_for('static', filename='community-directory-logic.js', v='2026-11-13.1') }}" defer></script>
     <script src="{{ url_for('static', filename='community-directory.js', v='2026-11-13.7') }}" defer></script>
-    <script src="{{ url_for('static', filename='app.js', v='2026-11-13.10') }}" defer></script>
+    <script src="{{ url_for('static', filename='app.js', v='2026-11-13.11') }}" defer></script>
   </body>
 </html>

@@ -108,6 +108,7 @@
     memberStatus: null,
     fundedMembership: new Map(),
     dataLoaded: false,
+    purchaseDiscoveryStatus: "idle",
     liveDataError: null,
     walletError: null,
     currentPurchase: null,
@@ -1296,34 +1297,54 @@
     return viewOnContract(appConfig.v3ContractId, methodName, args);
   }
 
-  async function loadBaseData() {
-    const config = await view("get_config");
-    const isV4 = ["V4", "V5"].includes(String(config.version || "").toUpperCase());
-    const [members, suppliers, countValue] = await Promise.all([
-      isV4 ? Promise.resolve([]) : view("get_members"),
-      isV4 ? view("get_suppliers") : Promise.resolve([]),
-      view("get_purchase_count"),
-    ]);
-    state.config = config;
-    state.members = members || [];
-    state.suppliers = suppliers || [];
-    const supplierSelect = $("#farmer-account");
-    if (supplierSelect) {
-      const selected = supplierSelect.value;
-      supplierSelect.innerHTML = `<option value="">Choose a verified supplier</option>${state.suppliers.map((supplier) => `<option value="${escapeHtml(supplier.account_id)}">${escapeHtml(supplier.business_name)} · ${escapeHtml(supplier.location)} — ${escapeHtml(supplier.account_id)}</option>`).join("")}`;
-      if ([...supplierSelect.options].some((option) => option.value === selected)) supplierSelect.value = selected;
-      updateSupplierSelection();
+  async function loadPublicPurchaseData() {
+    const firstLoad = !state.dataLoaded;
+    if (firstLoad) {
+      state.purchaseDiscoveryStatus = "loading";
+      if (appConfig.page === "explore") renderExplore();
     }
-    const count = Math.min(Number(countValue || 0), 500);
-    const purchaseReads = await Promise.allSettled(Array.from({ length: count }, (_, id) => view("get_purchase", { purchase_id: String(id) })));
-    const purchases = purchaseReads.filter((result) => result.status === "fulfilled" && result.value).map((result) => result.value);
-    const failedReads = purchaseReads.filter((result) => result.status === "rejected").length;
-    if (count > 0 && purchases.length === 0) throw purchaseReads.find((result) => result.status === "rejected")?.reason || new Error("Purchase reads failed.");
-    state.purchases = purchases.reverse();
-    state.liveDataError = failedReads ? new Error(`${failedReads} deal ${failedReads === 1 ? "record is" : "records are"} temporarily unavailable.`) : null;
-    state.dataLoaded = true;
-    await loadWalletState();
-    await loadV3Data();
+    try {
+      const config = await view("get_config");
+      const isV4 = ["V4", "V5"].includes(String(config.version || "").toUpperCase());
+      const [members, suppliers, countValue] = await Promise.all([
+        isV4 ? Promise.resolve([]) : view("get_members"),
+        isV4 ? view("get_suppliers") : Promise.resolve([]),
+        view("get_purchase_count"),
+      ]);
+      state.config = config;
+      state.members = members || [];
+      state.suppliers = suppliers || [];
+      const supplierSelect = $("#farmer-account");
+      if (supplierSelect) {
+        const selected = supplierSelect.value;
+        supplierSelect.innerHTML = `<option value="">Choose a verified supplier</option>${state.suppliers.map((supplier) => `<option value="${escapeHtml(supplier.account_id)}">${escapeHtml(supplier.business_name)} · ${escapeHtml(supplier.location)} — ${escapeHtml(supplier.account_id)}</option>`).join("")}`;
+        if ([...supplierSelect.options].some((option) => option.value === selected)) supplierSelect.value = selected;
+        updateSupplierSelection();
+      }
+      const count = Math.min(Number(countValue || 0), 500);
+      const purchaseReads = await Promise.allSettled(Array.from({ length: count }, (_, id) => view("get_purchase", { purchase_id: String(id) })));
+      const purchases = purchaseReads.filter((result) => result.status === "fulfilled" && result.value).map((result) => result.value);
+      const failedReads = purchaseReads.filter((result) => result.status === "rejected").length;
+      if (count > 0 && purchases.length === 0) throw purchaseReads.find((result) => result.status === "rejected")?.reason || new Error("Purchase reads failed.");
+      state.purchases = purchases.reverse();
+      state.liveDataError = failedReads ? new Error(`${failedReads} deal ${failedReads === 1 ? "record is" : "records are"} temporarily unavailable.`) : null;
+      state.dataLoaded = true;
+      state.purchaseDiscoveryStatus = "ready";
+      if (appConfig.page === "explore") {
+        document.documentElement.dataset.harvestpoolPurchaseDataMs = performance.now().toFixed(1);
+        renderExplore();
+      }
+    } catch (error) {
+      state.liveDataError = error;
+      state.purchaseDiscoveryStatus = state.dataLoaded ? "ready" : "error";
+      if (appConfig.page === "explore") renderExplore();
+      throw error;
+    }
+  }
+
+  async function loadBaseData() {
+    await loadPublicPurchaseData();
+    await Promise.all([loadWalletState(), loadV3Data()]);
   }
 
   function pagePurchaseId() {
@@ -2797,6 +2818,12 @@
     const empty = $("#explore-empty");
     const disclaimer = $("#explore-disclaimer");
     if (!grid) return;
+    if (state.purchaseDiscoveryStatus === "idle" || state.purchaseDiscoveryStatus === "loading") {
+      grid.setAttribute("aria-busy", "true");
+      grid.innerHTML = `<div class="loading-shell" role="status"><span class="sr-only">Loading Group Deals…</span><span class="loading-bar"></span><span class="loading-bar short"></span><span class="loading-block"></span></div>`;
+      if (empty) empty.hidden = true;
+      return;
+    }
     const activeFilter = filterTools.normalizeFilter($(".filter-tab.active")?.dataset.filter || "all");
     const allPurchases = state.purchases;
     const visiblePurchases = filterTools.filterPurchases(allPurchases, activeFilter);
@@ -2811,6 +2838,10 @@
       ? `<div class="live-read-warning" role="status"><strong>Some live deal data could not be refreshed.</strong><span>${escapeHtml(state.liveDataError.message)} The deals below were confirmed in this read; unavailable records are not shown.</span><button class="button button-outline button-small" type="button" data-action="retry-live-data">Retry</button></div>`
       : "";
     grid.innerHTML = `<section class="purchase-source live-source">${degraded}<div class="source-heading source-heading-compact"><strong>${totalVisible} ${totalVisible === 1 ? "deal" : "deals"}</strong><span class="live-source-label"><span class="live-pulse"></span>Authoritative Testnet state</span></div><div class="purchase-grid purchase-grid-live">${liveContent}</div></section>`;
+    grid.setAttribute("aria-busy", "false");
+    if (liveVisible.length && !document.documentElement.dataset.harvestpoolFirstPurchaseCardMs) {
+      document.documentElement.dataset.harvestpoolFirstPurchaseCardMs = performance.now().toFixed(1);
+    }
     if (empty) {
       empty.hidden = !state.dataLoaded || totalVisible !== 0;
       const heading = $("h2", empty);
@@ -5416,6 +5447,9 @@
     updateSaleUnitFields();
     updateCreationModeCopy();
     updateCreatePricePreview();
+    if (appConfig.page === "explore") {
+      document.documentElement.dataset.harvestpoolExploreShellMs = performance.now().toFixed(1);
+    }
     try {
       const walletPromise = setupNear();
       if (appConfig.page === "decisions") {
@@ -5433,7 +5467,7 @@
         renderCurrentPage();
         window.setTimeout(() => refreshCommunityActivityInBackground().catch(() => null), 500);
         await walletPromise;
-      } else if (appConfig.page === "decisions") {
+      } else if (appConfig.page === "decisions" || appConfig.page === "explore") {
         await Promise.allSettled([loadBaseData(), loadNearPrice(), walletPromise]);
       } else {
         await walletPromise;
