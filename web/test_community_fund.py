@@ -1,6 +1,7 @@
 import base64
 import io
 import json
+import tempfile
 import unittest
 import time
 from urllib.error import HTTPError, URLError
@@ -11,7 +12,14 @@ from web import app as web_app
 
 class CommunityFundActivityTests(unittest.TestCase):
     def setUp(self):
+        self._database = web_app.DATABASE
+        self._tempdir = tempfile.TemporaryDirectory()
+        web_app.DATABASE = web_app.Path(self._tempdir.name) / "metadata.sqlite3"
         web_app._community_activity_cache.clear()
+
+    def tearDown(self):
+        web_app.DATABASE = self._database
+        self._tempdir.cleanup()
 
     def test_activity_counts_only_successful_direct_transfers_and_maps_votes(self):
         transaction_page = {
@@ -380,7 +388,7 @@ class CommunityFundActivityTests(unittest.TestCase):
             "contributions": [],
             "proposalTransactions": {"0": [{"action": "VoteApprove", "transfers": []}]},
         }
-        with patch.object(web_app, "_cached_community_activity", return_value=activity):
+        with patch.object(web_app, "_durable_community_activity", return_value=activity):
             item = web_app._verified_fund_directory_item(fund)
         self.assertEqual(item["status"], "Open for contributions")
         self.assertEqual(item["raisedAmount"], "0.00")
@@ -392,7 +400,7 @@ class CommunityFundActivityTests(unittest.TestCase):
             "contributions": [{"amount": "100000000", "contributor": "alice.testnet"}],
             "proposalTransactions": {"1": [{"transfers": [{"amount": "80000"}]}]},
         }
-        with patch.object(web_app, "_cached_community_activity", return_value=activity):
+        with patch.object(web_app, "_durable_community_activity", return_value=activity):
             item = web_app._verified_fund_directory_item(fund)
         self.assertEqual(item["status"], "Goal reached")
         self.assertEqual(item["raisedAmount"], "100.00")
@@ -660,6 +668,156 @@ class CommunityFundActivityTests(unittest.TestCase):
             {"baseline", "new-contribution"},
         )
         self.assertEqual(len(merged["proposalTransactions"]["2"]), 1)
+
+    def test_durable_receipts_survive_restart_and_provider_outage(self):
+        fund = web_app._configured_community_funds()["community-garden"]
+        records = [
+            {
+                "transactionHash": f"tx-{index}",
+                "receiptId": f"receipt-{index}",
+                "contributor": "alice.testnet",
+                "amount": amount,
+                "timestamp": str(1000 + index),
+                "tokenId": web_app.CANONICAL_USDC_TOKEN_ID,
+            }
+            for index, amount in enumerate(("100000", "1000000", "1000000"), 1)
+        ]
+        broad = {
+            "complete": True, "contributions": [], "proposalTransactions": {},
+            "stale": False,
+        }
+        with (
+            patch.object(web_app, "_discover_contribution_candidates", return_value=(records, True)),
+            patch.object(web_app, "_cached_community_activity", return_value=broad),
+            patch.object(web_app, "_finalized_ft_balance", return_value="2100000"),
+        ):
+            current = web_app._durable_community_activity(fund)
+
+        self.assertTrue(current["contributionHistoryComplete"])
+        self.assertEqual(current["lifetimeRaised"], "2100000")
+        self.assertEqual(current["treasuryBalance"], "2100000")
+
+        web_app._community_activity_cache.clear()
+        with (
+            patch.object(web_app, "_discover_contribution_candidates", side_effect=URLError("indexer down")),
+            patch.object(web_app, "_cached_community_activity", side_effect=URLError("nearblocks down")),
+            patch.object(web_app, "_finalized_ft_balance", side_effect=URLError("rpc down")),
+        ):
+            preserved = web_app._durable_community_activity(fund)
+
+        self.assertFalse(preserved["contributionHistoryComplete"])
+        self.assertEqual(preserved["lifetimeRaised"], None)
+        self.assertEqual(preserved["verifiedContributionSubtotal"], "2100000")
+        self.assertEqual(preserved["treasuryBalance"], "2100000")
+        self.assertTrue(preserved["treasuryBalanceStale"])
+        self.assertEqual(len(preserved["contributions"]), 3)
+
+    def test_exact_verification_endpoint_is_idempotent(self):
+        record = {
+            "transactionHash": "A" * 44,
+            "receiptId": "B" * 44,
+            "contributor": "alice.testnet",
+            "amount": "1000000",
+            "timestamp": "1794575420755944648",
+            "tokenId": web_app.CANONICAL_USDC_TOKEN_ID,
+        }
+        client = web_app.app.test_client()
+        body = {
+            "transactionHash": record["transactionHash"],
+            "signerId": record["contributor"],
+            "amount": record["amount"],
+            "memo": "Contribution toward Community Garden",
+        }
+        with patch.object(web_app, "_verify_contribution_transaction", return_value=record) as verify:
+            first = client.post(
+                "/api/community-funds/community-garden/contributions/verify", json=body
+            )
+            second = client.post(
+                "/api/community-funds/community-garden/contributions/verify", json=body
+            )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(verify.call_count, 2)
+        self.assertEqual(len(web_app._verified_contribution_ledger("community-garden")), 1)
+
+    def test_hashless_recovery_refuses_ambiguous_exact_candidates(self):
+        timestamp = 1794575420755944648
+        candidates = [
+            {
+                "transactionHash": character * 44,
+                "receiptId": receipt * 44,
+                "contributor": "alice.testnet",
+                "amount": "1000000",
+                "timestamp": str(timestamp + offset),
+                "tokenId": web_app.CANONICAL_USDC_TOKEN_ID,
+                "memo": "Contribution toward Community Garden",
+            }
+            for character, receipt, offset in (("A", "C", 1), ("B", "D", 2))
+        ]
+        with patch.object(
+            web_app, "_discover_contribution_candidates", return_value=(candidates, True)
+        ):
+            response = web_app.app.test_client().post(
+                "/api/community-funds/community-garden/contributions/verify",
+                json={
+                    "signerId": "alice.testnet",
+                    "amount": "1000000",
+                    "memo": "Contribution toward Community Garden",
+                    "startedAtNs": str(timestamp),
+                },
+            )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()["candidateCount"], 2)
+        self.assertEqual(web_app._verified_contribution_ledger("community-garden"), [])
+
+    def test_fastnear_discovery_verifies_only_new_exact_candidates(self):
+        dao_id = "garden.testnet"
+        token_id = "usdc.testnet"
+
+        def indexed_transaction(tx_hash, amount):
+            args = base64.b64encode(json.dumps({
+                "receiver_id": dao_id,
+                "amount": amount,
+                "memo": "Contribution toward Community Garden",
+            }).encode()).decode()
+            return {"transaction": {
+                "hash": tx_hash,
+                "signer_id": "alice.testnet",
+                "receiver_id": token_id,
+                "actions": [{"FunctionCall": {
+                    "method_name": "ft_transfer", "args": args, "deposit": "1",
+                }}],
+            }}
+
+        transactions = [indexed_transaction("known", "100000"), indexed_transaction("new", "1000000")]
+
+        def fastnear(path, _payload):
+            if path == "/v0/account":
+                return {"account_txs": [
+                    {"transaction_hash": "known", "is_success": True},
+                    {"transaction_hash": "new", "is_success": True},
+                ]}
+            if path == "/v0/transactions":
+                return {"transactions": transactions}
+            raise AssertionError(path)
+
+        verified = {
+            "transactionHash": "new", "receiptId": "receipt", "contributor": "alice.testnet",
+            "amount": "1000000", "timestamp": "123", "tokenId": token_id,
+            "memo": "Contribution toward Community Garden",
+        }
+        with (
+            patch.object(web_app, "_fastnear_json", side_effect=fastnear),
+            patch.object(web_app, "_verify_contribution_transaction", return_value=verified) as verify,
+        ):
+            records, complete = web_app._discover_contribution_candidates(
+                dao_id, token_id, {"known"}
+            )
+
+        self.assertTrue(complete)
+        self.assertEqual(records, [verified])
+        verify.assert_called_once_with("new", "alice.testnet", dao_id, token_id, "1000000")
 
 
 if __name__ == "__main__":

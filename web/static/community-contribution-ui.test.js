@@ -18,8 +18,9 @@ test("Community Garden closes its contribution action at the application target"
 test("Community Fund summary uses the customer-facing goal hierarchy", () => {
   assert.match(appSource, /goal-summary-figures/);
   assert.match(appSource, /<dt>Goal<\/dt>/);
-  assert.match(appSource, /<dt>Raised<\/dt>/);
-  assert.match(appSource, /<dt>Remaining<\/dt>/);
+  assert.match(appSource, /<dt>Lifetime raised<\/dt>/);
+  assert.match(appSource, /<dt>Current treasury<\/dt>/);
+  assert.match(appSource, /<dt>Remaining to goal<\/dt>/);
   assert.match(appSource, /% funded/);
   assert.match(appSource, />Support this fund</);
   assert.doesNotMatch(appSource, /class="goal-details"/);
@@ -36,21 +37,21 @@ test("Community Fund public reads render before wallet restoration and history h
   assert.match(appSource, /activityPromise/);
 });
 
-test("finalized contribution recovery requires exact indexed evidence and treasury balance", () => {
-  assert.match(appSource, /verifiedContributionRecord/);
+test("finalized contribution recovery uses durable exact receipt verification", () => {
+  assert.match(appSource, /contributions\/verify/);
   assert.match(appSource, /action\.context\?\.daoId/);
-  assert.match(appSource, /expectedMinimum/);
+  assert.match(appSource, /startedAtNs: action\.startedAtNs/);
   assert.match(appSource, /pendingActionStore\.remove\(action\.id\)/);
   assert.match(appSource, /addEventListener\("pageshow",[\s\S]*reconcilePendingActions\(\)/);
   assert.match(appSource, /configuredContributionFund\(appConfig\.communityFunds/);
-  assert.match(appSource, /refresh=1/);
   assert.match(appSource, /onMatchingFundPage/);
+  assert.doesNotMatch(appSource, /expectedMinimum/);
 });
 
 test("manual pending checks always explain hashless, unavailable, or confirmed state", () => {
   assert.match(appSource, /async function checkPendingAction/);
-  assert.match(appSource, /Meteor did not return a transaction hash to this page/);
-  assert.match(appSource, /\?transactionHash=YOUR_HASH/);
+  assert.match(appSource, /Meteor returned no hash/);
+  assert.match(appSource, /one unambiguous finalized transaction/);
   assert.match(appSource, /data-pending-check-result/);
   assert.match(appSource, /On-chain verification could not finish:/);
   assert.match(appSource, /pendingActionStore\.remove\(action\.id\)/);
@@ -76,9 +77,17 @@ test("contribution review names the exact asset, network, recipient, and no-refu
 
 test("Community Fund contribution uses persistent duplicate protection and authoritative confirmation", () => {
   assert.match(appSource, /performVerifiedAction\([\s\S]*community_contribute_usdc/);
-  assert.match(appSource, /verifyTokenContributionOutcome/);
-  assert.match(appSource, /previousTreasuryBalance/);
+  assert.match(appSource, /contributions\/verify/);
+  assert.match(appSource, /persistTransactionHash/);
   assert.match(appSource, /confirmationAttempts: 30/);
+});
+
+test("Community Fund separates lifetime receipts from the current treasury balance", () => {
+  assert.match(appSource, /Lifetime raised/);
+  assert.match(appSource, /Current treasury/);
+  assert.match(appSource, /lifetimeRaised/);
+  assert.match(appSource, /verifiedContributionSubtotal/);
+  assert.match(appSource, /verified subtotal, not the complete lifetime total/);
 });
 
 test("disconnected visitors get a wallet action and unsupported requests stay disabled", () => {

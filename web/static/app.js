@@ -1377,69 +1377,39 @@
   async function readActionConfirmation(action) {
     const { methodName, args = {}, signerId, receiverId } = action;
     if (methodName === "community_contribute_usdc") {
-      if (!action.transactionHash) {
-        return { state: "uncertain", reason: "The saved action has no transaction hash, so it cannot be matched to one finalized transfer automatically." };
-      }
       const configuredFund = communityFundTools.configuredContributionFund(appConfig.communityFunds, {
         daoId: action.context?.daoId,
         tokenId: receiverId,
       });
       if (!configuredFund) return { state: "failed" };
-      const expected = {
-        transactionHash: action.transactionHash,
-        signerId,
-        tokenId: receiverId,
-        daoId: action.context?.daoId,
-        amount: args.amount,
-      };
-      let verified = { state: "uncertain" };
-      let verificationFailure = null;
+      const verificationUrl = configuredFund.activityUrl.replace(/\/activity(?:\?.*)?$/, "/contributions/verify");
+      let payload;
+      let response;
       try {
-        const outcome = await rpcRequest("tx", {
-          tx_hash: action.transactionHash,
-          sender_account_id: signerId,
-          wait_until: "FINAL",
+        response = await fetch(verificationUrl, {
+          method: "POST",
+          headers: { Accept: "application/json", "Content-Type": "application/json" },
+          body: JSON.stringify({
+            signerId,
+            amount: String(args.amount || ""),
+            memo: String(args.memo || ""),
+            transactionHash: action.transactionHash || null,
+            startedAtNs: action.startedAtNs || null,
+          }),
         });
-        verified = communityFundTools.verifyTokenContributionOutcome(outcome, expected);
+        payload = await response.json();
       } catch (error) {
-        verificationFailure = error;
-        // A finalized, exact indexer record may reconcile a temporary transaction-RPC failure.
+        return { state: "uncertain", reason: `Durable receipt verification is unavailable: ${String(error?.message || error)}` };
       }
-      if (verified.state === "failed") return verified;
-      let indexedActivity = null;
+      if (!response.ok || !payload?.record) {
+        return { state: "uncertain", reason: payload?.error || "No exact finalized contribution record was available." };
+      }
+      const record = payload.record;
+      if (!action.transactionHash) {
+        confirmationTools.persistTransactionHash(pendingActionStore, action, record.transactionHash);
+      }
       const onMatchingFundPage = appConfig.page === "community_fund"
         && String(appConfig.communityDaoId || "") === String(configuredFund.daoId);
-      if (verified.state !== "confirmed" && onMatchingFundPage && state.communityFund.activityPromise) {
-        indexedActivity = applyCommunityActivity(await state.communityFund.activityPromise);
-      } else if (verified.state !== "confirmed" && onMatchingFundPage) {
-        indexedActivity = state.communityFund.activity;
-      }
-      let indexedRecord = communityFundTools.verifiedContributionRecord(indexedActivity, expected);
-      if (verified.state !== "confirmed" && !indexedRecord) {
-        const separator = configuredFund.activityUrl.includes("?") ? "&" : "?";
-        const response = await fetch(`${configuredFund.activityUrl}${separator}refresh=1`, {
-          headers: { Accept: "application/json" },
-        });
-        const activity = await response.json();
-        if (response.ok) {
-          indexedActivity = activity;
-          indexedRecord = communityFundTools.verifiedContributionRecord(activity, expected);
-          if (onMatchingFundPage) applyCommunityActivity(activity);
-        } else {
-          verificationFailure = verificationFailure || new Error(activity.error || "The verified activity service is unavailable.");
-        }
-      }
-      if (verified.state !== "confirmed" && !indexedRecord) {
-        const detail = String(verificationFailure?.message || "No exact finalized contribution record was available.");
-        return { state: "uncertain", reason: `${detail} The saved action was preserved and no transfer was resubmitted.` };
-      }
-      const balance = await viewOnContract(receiverId, "ft_balance_of", { account_id: action.context?.daoId });
-      const expectedMinimum = BigInt(String(action.context?.previousTreasuryBalance || "0")) + BigInt(String(args.amount));
-      if (BigInt(String(balance || "0")) < expectedMinimum) return { state: "uncertain" };
-      const record = {
-        ...(verified.record || indexedRecord),
-        timestamp: verified.record?.timestamp || indexedRecord?.timestamp || (BigInt(Date.now()) * 1_000_000n).toString(),
-      };
       if (onMatchingFundPage && !state.communityFund.recentContributions.some((item) => item.transactionHash === record.transactionHash)) {
         state.communityFund.recentContributions.push(record);
       }
@@ -1593,7 +1563,7 @@
       ? "Review the request in your wallet. No action is complete until the deal record confirms it."
       : phase === "unresolved"
         ? current.methodName === "community_contribute_usdc" && !current.transactionHash
-          ? "This saved contribution has no transaction hash, so automatic confirmation cannot finish. Open Action Center for the exact details; do not submit again."
+          ? "Meteor returned no hash. HarvestPool will accept only one independently discovered exact finalized transaction; do not submit again while it checks."
           : "We haven't confirmed the result yet. Please don't submit again while we check."
         : "Your request was submitted. We’re checking the result now…";
     notice.innerHTML = `<div><strong>${escapeHtml(title)}</strong><span>${escapeHtml(message)}</span></div>`;
@@ -1648,12 +1618,6 @@
   async function checkPendingAction(actionId) {
     const action = pendingActionStore.list(state.accountId).find((item) => String(item.id) === String(actionId));
     if (!action) return { state: "missing", message: "This saved action is no longer pending." };
-    if (action.methodName === "community_contribute_usdc" && !action.transactionHash) {
-      return {
-        state: "unverifiable",
-        message: "Meteor did not return a transaction hash to this page. The saved contribution was preserved and no transfer was resubmitted. Copy the finalized hash from Meteor Activity, reopen HarvestPool with ?transactionHash=YOUR_HASH while this wallet is connected, then check again.",
-      };
-    }
     const result = await readActionConfirmation(action);
     if (result?.state === "confirmed") {
       pendingActionStore.remove(action.id);
@@ -1670,7 +1634,7 @@
     }
     return {
       state: "uncertain",
-      message: result?.reason || "Finalized state is not available yet. The saved action was preserved and no transaction was resubmitted.",
+      message: result?.reason || "Finalized state is not available yet. The saved action remains protected and no transaction was resubmitted.",
     };
   }
 
@@ -2174,8 +2138,11 @@
       ? new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(activity.verifiedAt))
       : "Time unavailable";
     const freshness = `<div class="fund-history-freshness ${activity.stale ? "is-stale" : ""}" role="status"><span>${activity.stale ? "Showing the last confirmed record" : "Last checked"}: ${escapeHtml(verifiedAt)}</span><button class="button button-outline button-small" type="button" data-community-action="refresh-history">Retry activity</button></div>`;
+    const coverage = activity.contributionHistoryComplete
+      ? ""
+      : '<p class="fund-public-note"><strong>Partial verified history.</strong> These exact receipts are preserved, but the indexer did not prove that every contribution has been discovered. Their sum is a subtotal, not the current or lifetime total.</p>';
     if (!records.length) return `${freshness}<div class="dashboard-empty compact"><p>No contributions or confirmed payments are recorded yet.</p></div>`;
-    return `${freshness}<div class="fund-history-list">${records.map((record) => `<article class="fund-history-row"><div><span class="section-kicker">${escapeHtml(record.type)}</span><strong>${escapeHtml(communityAmount(record.amount, goal))}</strong><p>${escapeHtml(record.reason)}</p></div><dl><div><dt>${record.type === "Contribution" ? "From" : "To"}</dt><dd><code>${escapeHtml(record.account)}</code></dd></div>${record.proposer ? `<div><dt>Requested by</dt><dd><code>${escapeHtml(record.proposer)}</code></dd></div><div><dt>Approved by</dt><dd>${record.approvers.map((account) => `<code>${escapeHtml(account)}</code>`).join(", ")}</dd></div>` : ""}<div><dt>Date</dt><dd>${escapeHtml(communityTime(record.timestamp))}</dd></div></dl>${communityExplorerLink(record.transactionHash)}</article>`).join("")}</div>`;
+    return `${freshness}${coverage}<div class="fund-history-list">${records.map((record) => `<article class="fund-history-row"><div><span class="section-kicker">${escapeHtml(record.type)}</span><strong>${escapeHtml(communityAmount(record.amount, goal))}</strong><p>${escapeHtml(record.reason)}</p></div><dl><div><dt>${record.type === "Contribution" ? "From" : "To"}</dt><dd><code>${escapeHtml(record.account)}</code></dd></div>${record.proposer ? `<div><dt>Requested by</dt><dd><code>${escapeHtml(record.proposer)}</code></dd></div><div><dt>Approved by</dt><dd>${record.approvers.map((account) => `<code>${escapeHtml(account)}</code>`).join(", ")}</dd></div>` : ""}<div><dt>Date</dt><dd>${escapeHtml(communityTime(record.timestamp))}</dd></div></dl>${communityExplorerLink(record.transactionHash)}</article>`).join("")}</div>`;
   }
 
   const COMMUNITY_TABS = new Set(["overview", "contributions", "payment-requests", "votes", "activity"]);
@@ -2238,12 +2205,14 @@
     const spent = fund.proposalsComplete && (allocations.length === 0 || activityComplete)
       ? verifiedPayments.reduce((total, allocation) => total + BigInt(allocation.amount), 0n).toString()
       : null;
-    const historyContributed = activityComplete
-      ? (fund.activity.contributions || []).reduce((total, item) => total + BigInt(item.amount), 0n).toString()
+    const contributionHistoryComplete = Boolean(fund.activity?.contributionHistoryComplete);
+    const historyContributed = contributionHistoryComplete
+      ? String(fund.activity?.lifetimeRaised || "0")
       : null;
-    const contributed = isUsdc && assetReady && spent !== null
-      ? communityFundTools.totalContributions(availableBalance, spent)
-      : historyContributed;
+    const verifiedSubtotal = fund.activity?.verifiedContributionSubtotal === undefined
+      ? null
+      : String(fund.activity.verifiedContributionSubtotal);
+    const contributed = historyContributed;
     const goalSnapshot = communityFundTools.goalSnapshot(goal, contributed, allocations, fund.activity);
     const pending = fund.proposalsComplete ? communityFundTools.sumAllocations(fund.proposals, ["InProgress"], tokenId) : null;
     const approvedUnverified = fund.proposalsComplete
@@ -2287,14 +2256,17 @@
     const proposalCards = (items) => items.map((proposal) => communityProposalCard(proposal, safety, fund.activity, goal)).filter(Boolean).join("");
     const goalProgress = goalSnapshot
       ? `<div class="goal-progress" role="progressbar" aria-label="Verified contributions toward ${escapeHtml(goal.title)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.floor(goalSnapshot.progressBasisPoints / 100)}" aria-valuetext="${escapeHtml(`${communityAmount(goalSnapshot.contributed, goal)} of ${communityAmount(goalSnapshot.target, goal)} contributed`)}"><span style="width:${goalSnapshot.progressBasisPoints / 100}%"></span></div><div class="goal-progress-label"><strong>${Math.floor(goalSnapshot.progressBasisPoints / 100)}% funded</strong><span>Verified on-chain contributions</span></div>`
-      : '<div class="goal-progress-unavailable">Verified contribution progress is unavailable until complete indexed history is available.</div>';
+      : `<div class="goal-progress-unavailable">${verifiedSubtotal === null ? "Verified contribution progress is unavailable until complete indexed history is available." : `At least ${escapeHtml(communityAmount(verifiedSubtotal, goal))} has exact finalized receipt evidence. This is a verified subtotal, not the complete lifetime total.`}</div>`;
     const remaining = goalSnapshot
       ? (BigInt(goalSnapshot.target) > BigInt(goalSnapshot.contributed)
         ? (BigInt(goalSnapshot.target) - BigInt(goalSnapshot.contributed)).toString()
         : "0")
       : null;
     const goalStatusClass = goalSnapshot?.status === "Goal reached" ? "status-funded" : goalSnapshot ? "status-open" : "status-pending";
-    const goalCard = `<section class="community-goal-card" aria-labelledby="community-goal-heading"><div class="goal-card-top"><div><span class="section-kicker">Fundraising progress</span><h2 id="community-goal-heading">${escapeHtml(goal.title)}</h2></div><span class="status ${goalStatusClass}"><span></span>${escapeHtml(goalSnapshot?.status || "Verification unavailable")}</span></div><p class="goal-purpose">${escapeHtml(goal.purpose)}</p><dl class="goal-summary-figures"><div><dt>Goal</dt><dd>${escapeHtml(communityAmount(targetUnits, goal))}</dd></div><div><dt>Raised</dt><dd>${goalSnapshot ? escapeHtml(communityAmount(goalSnapshot.contributed, goal)) : "Unavailable"}</dd></div><div><dt>Remaining</dt><dd>${remaining === null ? "Unavailable" : escapeHtml(communityAmount(remaining, goal))}</dd></div></dl>${goalProgress}${goalSnapshot && !contributionLimit.reached ? '<button class="button button-primary goal-summary-action" type="button" data-community-action="support">Support this fund</button>' : ""}<p class="goal-testnet-note">Testnet only · Figures use verified public contributions and are not real-dollar balances.</p></section>`;
+    const raisedDisplay = goalSnapshot
+      ? communityAmount(goalSnapshot.contributed, goal)
+      : verifiedSubtotal === null ? "Unavailable" : `At least ${communityAmount(verifiedSubtotal, goal)} verified`;
+    const goalCard = `<section class="community-goal-card" aria-labelledby="community-goal-heading"><div class="goal-card-top"><div><span class="section-kicker">Fundraising progress</span><h2 id="community-goal-heading">${escapeHtml(goal.title)}</h2></div><span class="status ${goalStatusClass}"><span></span>${escapeHtml(goalSnapshot?.status || "Verification incomplete")}</span></div><p class="goal-purpose">${escapeHtml(goal.purpose)}</p><dl class="goal-summary-figures"><div><dt>Goal</dt><dd>${escapeHtml(communityAmount(targetUnits, goal))}</dd></div><div><dt>Lifetime raised</dt><dd>${escapeHtml(raisedDisplay)}</dd></div><div><dt>Current treasury</dt><dd>${assetReady ? escapeHtml(communityAmount(availableBalance, goal)) : "Unavailable"}</dd></div><div><dt>Remaining to goal</dt><dd>${remaining === null ? "Unavailable" : escapeHtml(communityAmount(remaining, goal))}</dd></div></dl>${goalProgress}${goalSnapshot && !contributionLimit.reached ? '<button class="button button-primary goal-summary-action" type="button" data-community-action="support">Support this fund</button>' : ""}<p class="goal-testnet-note">Testnet only · Lifetime raised uses durable verified receipts; current treasury is a separate finalized balance and may be lower after payouts.</p></section>`;
     const activeTab = state.communityFund.activeTab || requestedCommunityTab();
     state.communityFund.activeTab = activeTab;
     const countLabel = (count) => count === null ? "" : ` <span>(${count})</span>`;
@@ -2310,7 +2282,7 @@
     const tabMarkup = `<div class="fund-tabs" role="tablist" aria-label="Community Goal sections">${tabs.map(([id, label, count]) => `<button class="fund-tab" id="community-tab-${id}" type="button" role="tab" aria-selected="${activeTab === id}" aria-controls="community-panel-${id}" tabindex="${activeTab === id ? "0" : "-1"}" data-community-tab="${id}">${label}${countLabel(count)}</button>`).join("")}</div>`;
     let panelMarkup = "";
     if (activeTab === "overview") {
-      panelMarkup = `<section class="fund-overview" id="community-panel-overview" role="tabpanel" aria-labelledby="community-tab-overview"><div class="fund-overview-heading"><div><span class="section-kicker">Fund details</span><h2>Verified treasury and governance</h2><p><code>${escapeHtml(appConfig.communityDaoId)}</code></p></div>${connectMarkup}</div><div class="fund-stat-grid compact"><div><span>Paid</span><strong>${spent === null ? "Unavailable" : escapeHtml(communityAmount(spent, goal))}</strong><small>Only successful transfer receipts count</small></div><div><span>Needs approval</span><strong>${pending === null ? "Unavailable" : escapeHtml(communityAmount(pending, goal))}</strong><small>Open payment requests</small></div>${approvedUnverified !== "0" ? `<div><span>Confirmation pending</span><strong>${approvedUnverified === null ? "Unavailable" : escapeHtml(communityAmount(approvedUnverified, goal))}</strong><small>Not counted as paid</small></div>` : ""}</div><p class="fund-public-note">Any registered Testnet wallet can contribute. Only the fixed DAO members can request or approve payments.</p>${safetyMarkup}</section>`;
+      panelMarkup = `<section class="fund-overview" id="community-panel-overview" role="tabpanel" aria-labelledby="community-tab-overview"><div class="fund-overview-heading"><div><span class="section-kicker">Fund details</span><h2>Verified treasury and governance</h2><p><code>${escapeHtml(appConfig.communityDaoId)}</code></p></div>${connectMarkup}</div><div class="fund-stat-grid compact"><div><span>Current treasury</span><strong>${assetReady ? escapeHtml(communityAmount(availableBalance, goal)) : "Unavailable"}</strong><small>Finalized token balance; distinct from lifetime raised</small></div><div><span>Paid</span><strong>${spent === null ? "Unavailable" : escapeHtml(communityAmount(spent, goal))}</strong><small>Only successful transfer receipts count</small></div><div><span>Needs approval</span><strong>${pending === null ? "Unavailable" : escapeHtml(communityAmount(pending, goal))}</strong><small>Open payment requests</small></div>${approvedUnverified !== "0" ? `<div><span>Confirmation pending</span><strong>${approvedUnverified === null ? "Unavailable" : escapeHtml(communityAmount(approvedUnverified, goal))}</strong><small>Not counted as paid</small></div>` : ""}</div><p class="fund-public-note">Any registered Testnet wallet can contribute. Only the fixed DAO members can request or approve payments.</p>${safetyMarkup}</section>`;
     } else if (activeTab === "contributions") {
       panelMarkup = `<section class="fund-history" id="community-panel-contributions" role="tabpanel" aria-labelledby="community-tab-contributions"><div class="section-heading-inline"><div><span class="section-kicker">Verified transfers in</span><h2>Contributions</h2></div></div>${communityHistoryMarkup(fund, [], goal, "contributions")}</section>`;
     } else if (activeTab === "votes") {
@@ -3089,7 +3061,7 @@
           ? communityExplorerLink(task.transactionHash, task.transactionHash)
           : "Not saved — Meteor did not return a hash to this page";
         const missingHash = task.methodName === "community_contribute_usdc" && !task.transactionHash
-          ? "This record cannot be matched to one finalized transfer until its hash is restored. Copy the finalized hash from Meteor Activity and reopen HarvestPool with ?transactionHash=YOUR_HASH. Do not contribute again."
+          ? "Meteor returned no hash. Check on-chain state to search for one unambiguous finalized transaction matching this signer, fund, amount, and saved action time. Do not contribute again."
           : "HarvestPool will verify the exact signer, receiver, method, arguments, amount, and finalized receipts.";
         return `<article class="decision-card" id="action-${escapeHtml(task.id)}"><span class="status status-pending"><span></span>Confirmation unresolved</span><h3>Check the submitted action</h3><p>${escapeHtml(missingHash)}</p><details class="technical-details"><summary>Saved action details</summary><dl class="checkout-status-facts"><div><dt>Signer</dt><dd><code>${escapeHtml(task.signerId)}</code></dd></div><div><dt>Token contract</dt><dd><code>${escapeHtml(task.receiverId)}</code></dd></div><div><dt>DAO</dt><dd><code>${escapeHtml(task.daoId || "Not applicable")}</code></dd></div><div><dt>Amount</dt><dd>${amount}</dd></div><div><dt>Transaction</dt><dd>${hash}</dd></div></dl></details><div class="vote-actions"><button class="button button-primary" type="button" data-action="check-pending-actions" data-pending-action-id="${escapeHtml(task.actionId)}">Check on-chain state</button></div><p class="field-help" role="status" aria-live="polite" data-pending-check-result></p></article>`;
       }
@@ -4421,20 +4393,13 @@
       return;
     }
     if (goal.uiContributionCap) {
-      const tokenId = communityTokenId(goal);
-      const allocations = communityFundTools.proposalSections(
-        state.communityFund.proposals,
-        state.communityFund.activity,
-        state.communityFund.safety,
-        state.accountId,
-        tokenId,
-      ).allocations;
-      const spent = allocations
-        .filter((allocation) => verifiedCommunityPayment(allocation, state.communityFund.activity))
-        .reduce((total, allocation) => total + BigInt(allocation.amount), 0n).toString();
-      const contributed = communityFundTools.totalContributions(
-        String(state.communityFund.asset?.daoBalance || "0"), spent,
-      );
+      const contributed = state.communityFund.activity?.contributionHistoryComplete
+        ? String(state.communityFund.activity?.lifetimeRaised || "0")
+        : null;
+      if (contributed === null) {
+        setErrorSummary(summary, "Complete verified contribution history is required before another contribution can be reviewed.");
+        return;
+      }
       const limit = communityFundTools.contributionLimit(goal, contributed, amount);
       if (!limit.allowed) {
         const message = limit.reached
@@ -4499,7 +4464,6 @@
         context: {
           daoId: appConfig.communityDaoId,
           activityUrl: appConfig.communityActivityUrl,
-          previousTreasuryBalance: String(state.communityFund.asset?.daoBalance || "0"),
         },
         confirmationAttempts: 30,
         failureMessage: "We couldn't confirm this contribution. Do not submit it again until HarvestPool reconciles the transaction.",

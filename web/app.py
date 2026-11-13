@@ -54,6 +54,10 @@ NEARBLOCKS_API_KEY = os.environ.get("HARVESTPOOL_NEARBLOCKS_API_KEY", "").strip(
 COMMUNITY_RPC_URL = os.environ.get(
     "HARVESTPOOL_COMMUNITY_RPC_URL", "https://rpc.testnet.fastnear.com"
 ).strip()
+FASTNEAR_TX_API = os.environ.get(
+    "HARVESTPOOL_FASTNEAR_TX_API", "https://tx.test.fastnear.com"
+).rstrip("/")
+FASTNEAR_API_KEY = os.environ.get("HARVESTPOOL_FASTNEAR_API_KEY", "").strip()
 COMMUNITY_ACTIVITY_CACHE_SECONDS = max(
     15, int(os.environ.get("HARVESTPOOL_COMMUNITY_ACTIVITY_CACHE_SECONDS", "30"))
 )
@@ -457,6 +461,153 @@ def _finalized_ft_balance(token_id, account_id):
     if not str(balance).isdigit():
         raise ValueError("Finalized treasury balance was not an exact integer")
     return str(balance)
+
+
+def _verify_contribution_transaction(
+    transaction_hash, signer_id, dao_id, token_id, expected_amount=None,
+    expected_memo=None,
+):
+    """Return one exact finalized NEP-141 contribution, never a balance inference."""
+    result = _community_rpc(
+        "tx",
+        {
+            "tx_hash": transaction_hash,
+            "sender_account_id": signer_id,
+            "wait_until": "FINAL",
+        },
+    )
+    if not _successful_execution(result):
+        raise ValueError("Contribution transaction did not finalize successfully")
+    transaction = result.get("transaction") or {}
+    call, args = _function_call(transaction, "ft_transfer")
+    amount = str(args.get("amount") or "")
+    if (
+        transaction.get("hash") != transaction_hash
+        or transaction.get("signer_id") != signer_id
+        or transaction.get("receiver_id") != token_id
+        or str(call.get("deposit") or "") != "1"
+        or args.get("receiver_id") != dao_id
+        or not amount.isdigit()
+        or int(amount) <= 0
+        or (expected_amount is not None and amount != str(expected_amount))
+        or (expected_memo is not None and args.get("memo") != expected_memo)
+    ):
+        raise ValueError("Contribution transaction does not exactly match this fund")
+    receipt_id = _successful_nep141_transfer(
+        result, token_id, signer_id, dao_id, amount
+    )
+    return {
+        "amount": amount,
+        "contributor": signer_id,
+        "timestamp": _transaction_timestamp(result),
+        "transactionHash": transaction_hash,
+        "receiptId": receipt_id,
+        "tokenId": token_id,
+        "memo": str(args.get("memo") or ""),
+    }
+
+
+def _fastnear_json(path, payload):
+    """Read indexed Testnet history; this service is never used to submit a transaction."""
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "HarvestPool/1.0",
+    }
+    if FASTNEAR_API_KEY:
+        headers["Authorization"] = f"Bearer {FASTNEAR_API_KEY}"
+    request = Request(
+        f"{FASTNEAR_TX_API}{path}",
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    with urlopen(request, timeout=8) as response:
+        body = response.read(4_000_001)
+    if len(body) > 4_000_000:
+        raise ValueError("FastNEAR response exceeded the 4 MB safety limit")
+    result = json.loads(body.decode("utf-8"))
+    if not isinstance(result, dict):
+        raise ValueError("FastNEAR returned an invalid response")
+    return result
+
+
+def _discover_contribution_candidates(dao_id, token_id, known_hashes=None):
+    """Discover possible deposits, then canonically verify every returned candidate."""
+    known_hashes = set(known_hashes or ())
+    account_transactions = []
+    resume_token = None
+    complete = True
+    for _page in range(5):
+        query = {"account_id": dao_id, "limit": 200, "desc": False}
+        if resume_token:
+            query["resume_token"] = resume_token
+        page = _fastnear_json("/v0/account", query)
+        batch = page.get("account_txs")
+        if not isinstance(batch, list):
+            raise ValueError("FastNEAR returned an invalid account history")
+        account_transactions.extend(batch)
+        resume_token = page.get("resume_token")
+        if not resume_token:
+            break
+    else:
+        complete = not bool(resume_token)
+
+    hashes = list(dict.fromkeys(
+        str(item.get("transaction_hash") or "")
+        for item in account_transactions
+        if item.get("is_success") is True and item.get("transaction_hash")
+    ))
+    indexed_transactions = []
+    for offset in range(0, len(hashes), 20):
+        requested_hashes = hashes[offset:offset + 20]
+        response = _fastnear_json(
+            "/v0/transactions", {"tx_hashes": requested_hashes}
+        )
+        batch = response.get("transactions")
+        if not isinstance(batch, list):
+            raise ValueError("FastNEAR returned invalid transaction details")
+        returned_hashes = {
+            str((item.get("transaction") or {}).get("hash") or "")
+            for item in batch if isinstance(item, dict)
+        }
+        if not set(requested_hashes).issubset(returned_hashes):
+            complete = False
+        indexed_transactions.extend(batch)
+
+    records = []
+    for indexed in indexed_transactions:
+        transaction = indexed.get("transaction") or {}
+        actions = transaction.get("actions") or []
+        call = actions[0].get("FunctionCall") if len(actions) == 1 and isinstance(actions[0], dict) else None
+        if (
+            transaction.get("receiver_id") != token_id
+            or not isinstance(call, dict)
+            or call.get("method_name") != "ft_transfer"
+        ):
+            continue
+        try:
+            args = json.loads(base64.b64decode(
+                call.get("args") or "", validate=True
+            ).decode("utf-8"))
+        except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
+            complete = False
+            continue
+        if not isinstance(args, dict) or args.get("receiver_id") != dao_id:
+            continue
+        if str(transaction.get("hash") or "") in known_hashes:
+            continue
+        try:
+            records.append(_verify_contribution_transaction(
+                str(transaction.get("hash") or ""),
+                str(transaction.get("signer_id") or ""),
+                dao_id,
+                token_id,
+                str(args.get("amount") or ""),
+            ))
+        except (OSError, URLError, RuntimeError, ValueError, TypeError, json.JSONDecodeError):
+            complete = False
+    return records, complete
 
 
 def _known_community_activity(dao_id, token_id, goal, evidence):
@@ -883,6 +1034,96 @@ def _peek_community_activity_cache(dao_id, token_id=""):
     return None
 
 
+def _durable_community_activity(fund, *, force=False):
+    """Merge durable receipts with optional discovery and live financial snapshots."""
+    slug = fund["slug"]
+    dao_id = fund["daoId"]
+    goal = fund["goal"]
+    token_id = goal.get("tokenId", "")
+    if not force:
+        cached = _peek_community_activity_cache(dao_id, token_id)
+        if cached and "verifiedContributionSubtotal" in cached:
+            return cached
+    discovery_complete = False
+    discovery_error = None
+    if token_id:
+        try:
+            known_hashes = {
+                item["transactionHash"]
+                for item in _verified_contribution_ledger(slug)
+            }
+            discovered, discovery_complete = _discover_contribution_candidates(
+                dao_id, token_id, known_hashes
+            )
+            for record in discovered:
+                _store_verified_contribution(slug, dao_id, token_id, record)
+        except (OSError, URLError, RuntimeError, ValueError, TypeError, json.JSONDecodeError) as error:
+            discovery_error = str(error)
+
+    try:
+        payload = _cached_community_activity(
+            dao_id,
+            token_id,
+            force=force,
+            goal=goal,
+            evidence=fund.get("evidence"),
+        )
+    except (OSError, URLError, RuntimeError, ValueError, TypeError, json.JSONDecodeError) as error:
+        payload = {
+            "complete": False,
+            "proposalTransactions": {},
+            "error": f"DAO activity discovery unavailable: {error}",
+            "sourceUrl": f"https://testnet.nearblocks.io/address/{dao_id}",
+            "tokenId": token_id,
+            "stale": True,
+        }
+
+    # A configured baseline is independently RPC-verified. Persist it once, but never
+    # turn it into a complete history claim.
+    evidence_hash = str((fund.get("evidence") or {}).get("contributionHash") or "")
+    for record in payload.get("contributions") or []:
+        if evidence_hash and record.get("transactionHash") == evidence_hash and record.get("receiptId"):
+            _store_verified_contribution(slug, dao_id, token_id, record)
+
+    treasury = {}
+    try:
+        balance = _finalized_ft_balance(token_id, dao_id)
+        treasury = _store_treasury_snapshot(slug, dao_id, token_id, balance)
+        treasury["treasuryBalanceStale"] = False
+    except (OSError, URLError, RuntimeError, ValueError, TypeError, json.JSONDecodeError):
+        treasury = _treasury_snapshot(slug)
+
+    contributions = _verified_contribution_ledger(slug)
+    if not contributions and not treasury and payload.get("error"):
+        raise RuntimeError(payload["error"])
+    subtotal = str(sum(int(record["amount"]) for record in contributions))
+    verified_at = datetime.now(timezone.utc).isoformat()
+    complete_activity = bool(payload.get("complete")) and discovery_complete
+    result = {
+        **payload,
+        **treasury,
+        "complete": complete_activity,
+        "contributionHistoryComplete": discovery_complete,
+        "boundedEvidence": bool(contributions) and not discovery_complete,
+        "contributions": contributions,
+        "verifiedContributionSubtotal": subtotal,
+        "lifetimeRaised": subtotal if discovery_complete else None,
+        "historyVerifiedAt": verified_at if discovery_complete else None,
+        "historyStale": not discovery_complete,
+        "stale": bool(payload.get("stale")) or not discovery_complete,
+        "source": "Durable finalized receipt ledger + public Testnet providers",
+        **({"discoveryError": discovery_error} if discovery_error else {}),
+    }
+    if contributions and result.get("error"):
+        result["activityDiscoveryError"] = result.pop("error")
+    cache_key = (dao_id, token_id)
+    with _community_activity_cache_lock:
+        _community_activity_cache[cache_key] = {
+            "cached_at": time.monotonic(), "payload": result
+        }
+    return result
+
+
 @app.get("/api/community-fund/activity")
 def community_fund_activity():
     if not COMMUNITY_DAO_ID:
@@ -902,13 +1143,73 @@ def configured_community_fund_activity(slug):
         return jsonify({"error": "Verified Community Fund is not configured."}), 404
     try:
         force = request.args.get("refresh") == "1"
-        goal = fund["goal"]
-        token_id = goal.get("tokenId", "") if goal.get("configured") else ""
-        return jsonify(_cached_community_activity(
-            fund["daoId"], token_id, force=force, goal=goal, evidence=fund["evidence"]
-        ))
+        return jsonify(_durable_community_activity(fund, force=force))
     except (OSError, URLError, RuntimeError, ValueError, TypeError, json.JSONDecodeError) as error:
         return jsonify({"error": f"Community Fund transaction history unavailable: {error}"}), 503
+
+
+@app.post("/api/community-funds/<slug>/contributions/verify")
+def verify_community_fund_contribution(slug):
+    """Independently verify and durably record an existing wallet transaction."""
+    fund = _configured_community_funds().get(slug)
+    if not fund:
+        return jsonify({"error": "Verified Community Fund is not configured."}), 404
+    if not request.is_json:
+        return jsonify({"error": "Send contribution evidence as JSON."}), 415
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": "Contribution evidence is not valid JSON."}), 400
+    signer_id = str(body.get("signerId") or "").strip()
+    amount = str(body.get("amount") or "").strip()
+    memo = str(body.get("memo") or "").strip()
+    transaction_hash = str(body.get("transactionHash") or "").strip()
+    if not re.fullmatch(r"[a-z0-9]+(?:[._-][a-z0-9]+)*", signer_id):
+        return jsonify({"error": "A valid Testnet signer is required."}), 400
+    if not amount.isdigit() or int(amount) <= 0:
+        return jsonify({"error": "An exact positive contribution amount is required."}), 400
+    expected_memo = f"Contribution toward {fund['goal']['title']}"
+    if memo != expected_memo:
+        return jsonify({"error": "The contribution memo does not match this fund."}), 400
+    dao_id = fund["daoId"]
+    token_id = fund["goal"].get("tokenId", "")
+    try:
+        if transaction_hash:
+            if not re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{40,64}", transaction_hash):
+                return jsonify({"error": "The transaction hash is invalid."}), 400
+            record = _verify_contribution_transaction(
+                transaction_hash, signer_id, dao_id, token_id, amount, memo
+            )
+        else:
+            started_at = str(body.get("startedAtNs") or "")
+            if not started_at.isdigit() or int(started_at) <= 0:
+                return jsonify({
+                    "error": "Hashless recovery requires the saved action start time."
+                }), 400
+            discovered, _complete = _discover_contribution_candidates(dao_id, token_id)
+            lower = int(started_at) - 120 * 1_000_000_000
+            upper = int(started_at) + 2 * 60 * 60 * 1_000_000_000
+            matches = [
+                item for item in discovered
+                if item["contributor"] == signer_id
+                and item["amount"] == amount
+                and item.get("memo") == memo
+                and lower <= int(item["timestamp"]) <= upper
+            ]
+            if len(matches) != 1:
+                return jsonify({
+                    "error": (
+                        "No unambiguous finalized transaction matches this saved action. "
+                        "It remains protected from duplicate submission."
+                    ),
+                    "candidateCount": len(matches),
+                }), 409
+            record = matches[0]
+        stored = _store_verified_contribution(slug, dao_id, token_id, record)
+        with _community_activity_cache_lock:
+            _community_activity_cache.pop((dao_id, token_id), None)
+        return jsonify({"record": stored})
+    except (OSError, URLError, RuntimeError, ValueError, TypeError, json.JSONDecodeError) as error:
+        return jsonify({"error": f"Finalized contribution verification unavailable: {error}"}), 503
 
 
 def get_db():
@@ -972,9 +1273,134 @@ def _ensure_community_fund_schema(db):
         );
         CREATE INDEX IF NOT EXISTS community_fund_events_fund_id
             ON community_fund_events(fund_id, id);
+        CREATE TABLE IF NOT EXISTS community_verified_contributions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fund_slug TEXT NOT NULL,
+            dao_id TEXT NOT NULL,
+            token_id TEXT NOT NULL,
+            transaction_hash TEXT NOT NULL,
+            receipt_id TEXT NOT NULL,
+            contributor TEXT NOT NULL,
+            amount TEXT NOT NULL,
+            block_timestamp TEXT NOT NULL,
+            verified_at TEXT NOT NULL,
+            UNIQUE (transaction_hash, receipt_id),
+            UNIQUE (fund_slug, transaction_hash)
+        );
+        CREATE INDEX IF NOT EXISTS community_verified_contributions_fund
+            ON community_verified_contributions(fund_slug, block_timestamp, id);
+        CREATE TABLE IF NOT EXISTS community_fund_financial_snapshots (
+            fund_slug TEXT PRIMARY KEY,
+            dao_id TEXT NOT NULL,
+            token_id TEXT NOT NULL,
+            treasury_balance TEXT NOT NULL,
+            verified_at TEXT NOT NULL
+        );
         """
     )
     db.commit()
+
+
+def _financial_db():
+    db = sqlite3.connect(DATABASE)
+    db.row_factory = sqlite3.Row
+    _ensure_community_fund_schema(db)
+    return db
+
+
+def _store_verified_contribution(fund_slug, dao_id, token_id, record):
+    required = {
+        "transactionHash", "receiptId", "contributor", "amount", "timestamp"
+    }
+    if not required.issubset(record) or not str(record["amount"]).isdigit():
+        raise ValueError("Verified contribution record is incomplete")
+    verified_at = datetime.now(timezone.utc).isoformat()
+    with _financial_db() as db:
+        db.execute(
+            """
+            INSERT INTO community_verified_contributions (
+                fund_slug, dao_id, token_id, transaction_hash, receipt_id,
+                contributor, amount, block_timestamp, verified_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(fund_slug, transaction_hash) DO UPDATE SET
+                receipt_id = excluded.receipt_id,
+                contributor = excluded.contributor,
+                amount = excluded.amount,
+                block_timestamp = excluded.block_timestamp,
+                verified_at = excluded.verified_at
+            """,
+            (
+                fund_slug, dao_id, token_id, record["transactionHash"],
+                record["receiptId"], record["contributor"], str(record["amount"]),
+                str(record["timestamp"]), verified_at,
+            ),
+        )
+    return {**record, "verifiedAt": verified_at}
+
+
+def _verified_contribution_ledger(fund_slug):
+    with _financial_db() as db:
+        rows = db.execute(
+            """
+            SELECT transaction_hash, receipt_id, contributor, amount,
+                   block_timestamp, token_id, verified_at
+            FROM community_verified_contributions
+            WHERE fund_slug = ?
+            ORDER BY CAST(block_timestamp AS INTEGER), id
+            """,
+            (fund_slug,),
+        ).fetchall()
+    return [
+        {
+            "transactionHash": row["transaction_hash"],
+            "receiptId": row["receipt_id"],
+            "contributor": row["contributor"],
+            "amount": row["amount"],
+            "timestamp": row["block_timestamp"],
+            "tokenId": row["token_id"],
+            "verifiedAt": row["verified_at"],
+        }
+        for row in rows
+    ]
+
+
+def _store_treasury_snapshot(fund_slug, dao_id, token_id, balance):
+    if not str(balance).isdigit():
+        raise ValueError("Treasury balance snapshot was invalid")
+    verified_at = datetime.now(timezone.utc).isoformat()
+    with _financial_db() as db:
+        db.execute(
+            """
+            INSERT INTO community_fund_financial_snapshots (
+                fund_slug, dao_id, token_id, treasury_balance, verified_at
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(fund_slug) DO UPDATE SET
+                dao_id = excluded.dao_id,
+                token_id = excluded.token_id,
+                treasury_balance = excluded.treasury_balance,
+                verified_at = excluded.verified_at
+            """,
+            (fund_slug, dao_id, token_id, str(balance), verified_at),
+        )
+    return {"treasuryBalance": str(balance), "treasuryBalanceVerifiedAt": verified_at}
+
+
+def _treasury_snapshot(fund_slug):
+    with _financial_db() as db:
+        row = db.execute(
+            """
+            SELECT treasury_balance, verified_at
+            FROM community_fund_financial_snapshots WHERE fund_slug = ?
+            """,
+            (fund_slug,),
+        ).fetchone()
+    if not row:
+        return {}
+    return {
+        "treasuryBalance": row["treasury_balance"],
+        "treasuryBalanceVerifiedAt": row["verified_at"],
+        "treasuryBalanceStale": True,
+    }
 
 
 def _owner_token_hash(value):
@@ -1092,31 +1518,40 @@ def _verified_fund_directory_item(fund, *, cached_only=False):
     if not dao_id or not goal.get("configured"):
         return None
     contributed = None
+    verified_subtotal = None
     contributor_count = None
     verification_state = "pending"
     try:
         activity = (
             _peek_community_activity_cache(dao_id, goal.get("tokenId", ""))
             if cached_only
-            else _cached_community_activity(
-                dao_id, goal.get("tokenId", ""), goal=goal, evidence=fund["evidence"]
-            )
+            else _durable_community_activity(fund)
         )
         if activity is None:
             raise RuntimeError("Verified activity is not cached yet.")
-        if activity.get("complete") or activity.get("boundedEvidence"):
+        history_complete = activity.get(
+            "contributionHistoryComplete", activity.get("complete", False)
+        )
+        if history_complete:
             contributions = activity.get("contributions", [])
-            contributed = sum(int(item.get("amount", "0")) for item in contributions)
+            contributed = int(activity.get("lifetimeRaised") or sum(
+                int(item.get("amount", "0")) for item in contributions
+            ))
             contributor_count = len({
                 item.get("contributor") or item.get("account")
                 for item in contributions
                 if item.get("contributor") or item.get("account")
             })
-            verification_state = (
-                "last-verified"
-                if activity.get("stale") or (activity.get("boundedEvidence") and not activity.get("complete"))
-                else "current"
-            )
+            verification_state = "current"
+        elif activity.get("contributions"):
+            contributions = activity.get("contributions", [])
+            verified_subtotal = int(activity.get("verifiedContributionSubtotal") or "0")
+            contributor_count = len({
+                item.get("contributor") or item.get("account")
+                for item in contributions
+                if item.get("contributor") or item.get("account")
+            })
+            verification_state = "partial"
     except (OSError, URLError, RuntimeError, ValueError, TypeError, json.JSONDecodeError):
         pass
     target = int(goal.get("targetUnits") or goal.get("targetYocto") or "0")
@@ -1128,6 +1563,10 @@ def _verified_fund_directory_item(fund, *, cached_only=False):
         status = "Open for contributions"
     decimals = int(goal.get("decimals", 6))
     amount = None if contributed is None else f"{Decimal(contributed) / (Decimal(10) ** decimals):.2f}"
+    subtotal_amount = (
+        None if verified_subtotal is None
+        else f"{Decimal(verified_subtotal) / (Decimal(10) ** decimals):.2f}"
+    )
     target_amount = f"{Decimal(target) / (Decimal(10) ** decimals):.2f}"
     return {
         "slug": fund["slug"],
@@ -1140,6 +1579,8 @@ def _verified_fund_directory_item(fund, *, cached_only=False):
         "raisedAmount": amount,
         "targetUnits": str(target),
         "raisedUnits": None if contributed is None else str(contributed),
+        "verifiedSubtotalAmount": subtotal_amount,
+        "verifiedSubtotalUnits": None if verified_subtotal is None else str(verified_subtotal),
         "contributorsCount": contributor_count,
         "contribution_deadline": "No deadline configured",
         "isVerifiedFund": True,

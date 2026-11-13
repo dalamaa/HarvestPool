@@ -17,7 +17,7 @@ test("failed external cover images become a designed placeholder", () => {
 test("verified fund cards render first and hydrate finalized activity independently", () => {
   assert.match(source, /hydrateVerifiedFunds/);
   assert.match(source, /Promise\.allSettled/);
-  assert.match(source, /activity\?\.complete/);
+  assert.match(source, /contributionHistoryComplete/);
   assert.match(source, /last-verified/);
   assert.match(source, /fund\.activityUrl/);
   assert.match(source, /verificationPromise/);
@@ -36,6 +36,8 @@ test("directory never presents unavailable verification as a zero balance", () =
   assert.doesNotMatch(source, /Math\.round\(\(raised \/ target\) \* 100\)/);
   assert.match(source, /verifiedContributorIds/);
   assert.match(source, /sessionStorage/);
+  assert.match(source, /At least.*verified/);
+  assert.match(source, /history discovery incomplete/);
 });
 
 test("directory filters respond immediately and use wallet-aware verified associations", () => {

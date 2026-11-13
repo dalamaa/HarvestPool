@@ -34,14 +34,17 @@ SputnikDAO's threshold-crossing vote calls `ft_transfer` from the DAO to the pro
 USDC amounts use six-decimal integer units. Proposal bonds and transaction gas remain native NEAR.
 
 Contract balance, policy, proposal contents, votes, and status are read at finality directly from
-NEAR RPC. General history discovery uses the NearBlocks Testnet indexer with bounded pagination,
-retry/backoff, and a short cache. For the completed fixed goal, a public evidence manifest instead
-verifies the exact known contribution and deciding-approval hashes through finalized NEAR RPC. It
-checks the token contract, signer, DAO, proposal ID, action, recipient, exact amount, successful
-execution, NEP-141 event, and payment receipt. The browser also reconciles the verified contribution
-minus verified payment with the DAO's authoritative token balance before treating the manifest as
-complete. If neither fresh nor last-confirmed evidence is available, history-derived totals are
-hidden rather than guessed.
+NEAR RPC. FastNEAR account history discovers candidate contributions with bounded pagination;
+NearBlocks remains the bounded discovery source for broader DAO proposal activity. Every candidate
+contribution is independently reread through finalized RPC and must match the exact transaction
+hash, signer, canonical token, DAO receiver, amount, one-yocto deposit, successful execution, and
+NEP-141 transfer receipt before it is inserted idempotently into the local SQLite receipt ledger.
+Wallet-returned hashes use the same server verification boundary. A missing wallet hash is recovered
+only when discovery finds one exact finalized match within the saved action window. The durable
+ledger survives browser refreshes, Flask restarts, and indexer outages; indexers are not asked to
+rediscover stored receipts. The API reports current treasury balance separately from lifetime raised.
+When a complete discovery pass is unavailable, stored receipts are labeled as a verified subtotal
+and are never promoted to the complete current or lifetime total.
 
 ## One-goal accounting boundary
 
@@ -266,11 +269,12 @@ described as private or anonymous.
 - SputnikDAO has no durable “approved and waiting for an organizer to execute” phase. The threshold-
   crossing approval normally executes the transfer. The UI separately labels an approved proposal
   whose exact payment receipt has not yet been verified and never counts it as spent.
-- General history discovery indexes up to 500 account transactions. If that bound or the NearBlocks
-  pagination guarantee is exceeded, or more than 40 proposal-action transactions require receipt
-  expansion, history-derived totals are hidden until the adapter is extended. The completed fixed
-  goal uses its exact finalized-RPC evidence manifest and balance reconciliation instead; no partial
-  total is labeled as complete.
+- Contribution discovery indexes up to 1,000 FastNEAR account transactions. NearBlocks proposal
+  discovery remains bounded at 500 account transactions and 40 receipt expansions. If a bound is
+  exceeded or providers are unavailable, already verified receipts remain visible as a subtotal,
+  payment-derived controls fail closed, and no partial total is labeled as complete. Protocol RPC
+  cannot list an account's historical transactions, so a new missing hash cannot be discovered while
+  every indexer is unavailable.
 - The first minimal policy intentionally cannot change members or upgrade code. A later governance
   expansion requires a separate security review and must not be smuggled into this demonstration.
 

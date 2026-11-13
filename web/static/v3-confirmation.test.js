@@ -57,13 +57,17 @@ test("confirmed contract failures retain their exact reason and transaction hash
   assert.equal(transactionHash({ outcomes: [{ finalExecutionOutcome: { transaction: { hash: "array-hash" } } }] }), "array-hash");
 });
 
-test("a lost Meteor redirect hash attaches to the newest unresolved action", () => {
-  const chosen = pendingForWalletCallback([
+test("a Meteor redirect hash attaches only when one unresolved action exists", () => {
+  assert.equal(pendingForWalletCallback([
     { id: "old", savedAt: 10 },
     { id: "already-known", savedAt: 30, transactionHash: "known" },
     { id: "new", savedAt: 20 },
+  ]), null);
+  const chosen = pendingForWalletCallback([
+    { id: "already-known", transactionHash: "known" },
+    { id: "only-unresolved", savedAt: 20 },
   ]);
-  assert.equal(chosen.id, "new");
+  assert.equal(chosen.id, "only-unresolved");
 });
 
 test("an incomplete Meteor response becomes pending without waiting forever", async () => {

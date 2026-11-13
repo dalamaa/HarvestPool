@@ -193,9 +193,8 @@
   }
 
   function pendingForWalletCallback(actions = []) {
-    return actions
-      .filter((item) => !item.transactionHash)
-      .sort((left, right) => Number(right.savedAt || 0) - Number(left.savedAt || 0))[0] || null;
+    const candidates = actions.filter((item) => !item.transactionHash);
+    return candidates.length === 1 ? candidates[0] : null;
   }
 
   function persistTransactionHash(store, action, value) {

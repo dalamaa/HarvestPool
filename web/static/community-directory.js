@@ -56,11 +56,15 @@
       ? "Verified finalized activity"
       : fund.verificationState === "last-verified"
         ? "Last verified finalized activity · refreshing"
+        : fund.verificationState === "partial"
+          ? "Verified receipt subtotal · history discovery incomplete"
         : fund.verificationState === "error"
           ? "Verification is temporarily unavailable"
           : "Checking finalized activity…";
     const raisedCopy = !fund.isVerifiedFund
       ? "Contributions unavailable"
+      : fund.verificationState === "partial" && fund.verifiedSubtotalAmount !== null && fund.verifiedSubtotalAmount !== undefined
+      ? `At least ${money(fund.verifiedSubtotalAmount)} verified`
       : fund.raisedAmount === null || fund.raisedAmount === undefined
       ? "Raised amount pending verification"
       : `${money(fund.raisedAmount)} raised`;
@@ -80,19 +84,24 @@
   }
 
   function applyVerifiedActivity(fund, activity, verificationState = null) {
-    if (!fund?.isVerifiedFund || activity?.error || (!activity?.complete && !activity?.boundedEvidence)) return false;
+    if (!fund?.isVerifiedFund || (!activity?.contributionHistoryComplete && !(activity?.contributions || []).length)) return false;
     const contributions = activity.contributions || [];
     const total = contributions.reduce((sum, item) => sum + BigInt(String(item.amount || "0")), 0n);
     const scale = 10n ** BigInt(Number(fund.decimals ?? 6));
     const whole = total / scale;
     const fraction = (total % scale).toString().padStart(Number(fund.decimals ?? 6), "0").slice(0, 2).padEnd(2, "0");
-    fund.raisedAmount = `${whole}.${fraction}`;
-    fund.raisedUnits = total.toString();
+    const complete = activity.contributionHistoryComplete === true;
+    fund.raisedAmount = complete ? `${whole}.${fraction}` : null;
+    fund.raisedUnits = complete ? total.toString() : null;
+    fund.verifiedSubtotalAmount = `${whole}.${fraction}`;
+    fund.verifiedSubtotalUnits = total.toString();
     fund.verifiedContributorIds = directoryTools.verifiedContributors(contributions);
     fund.contributorsCount = fund.verifiedContributorIds.length;
-    fund.status = total >= BigInt(String(fund.targetUnits || "0")) ? "Goal reached" : "Open for contributions";
+    fund.status = complete
+      ? (total >= BigInt(String(fund.targetUnits || "0")) ? "Goal reached" : "Open for contributions")
+      : "Verification pending";
     fund.verificationState = verificationState
-      || (activity.stale || (activity.boundedEvidence && !activity.complete) ? "last-verified" : "current");
+      || (complete ? "current" : "partial");
     return true;
   }
 
@@ -106,7 +115,7 @@
   }
 
   function writeVerifiedCache(slug, activity) {
-    if ((!activity?.complete && !activity?.boundedEvidence) || activity?.error) return;
+    if (!activity?.contributionHistoryComplete && !(activity?.contributions || []).length) return;
     try {
       const cache = readVerifiedCache();
       cache[slug] = { savedAt: Date.now(), activity };
@@ -119,7 +128,11 @@
   function applyCachedActivity(fund) {
     const cached = readVerifiedCache()[fund.slug];
     if (!cached || Date.now() - Number(cached.savedAt || 0) > verifiedCacheMaxAgeMs) return false;
-    return applyVerifiedActivity(fund, cached.activity, "last-verified");
+    return applyVerifiedActivity(
+      fund,
+      cached.activity,
+      cached.activity?.contributionHistoryComplete ? "last-verified" : "partial",
+    );
   }
 
   async function hydrateVerifiedFund(fund, render, { force = false } = {}) {
