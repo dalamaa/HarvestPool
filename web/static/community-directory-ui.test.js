@@ -37,8 +37,9 @@ test("directory never presents unavailable verification as a zero balance", () =
   assert.doesNotMatch(source, /Math\.round\(\(raised \/ target\) \* 100\)/);
   assert.match(source, /verifiedContributorIds/);
   assert.match(source, /sessionStorage/);
-  assert.match(source, /At least.*verified/);
-  assert.match(source, /history discovery incomplete/);
+  assert.match(source, /confirmed/);
+  assert.match(source, /broader discovery may be incomplete/);
+  assert.doesNotMatch(source, /At least.*verified/);
 });
 
 test("directory filters respond immediately and use wallet-aware verified associations", () => {

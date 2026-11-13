@@ -18,10 +18,11 @@ test("Community Garden closes its contribution action at the application target"
 test("Community Fund summary uses the customer-facing goal hierarchy", () => {
   assert.match(appSource, /goal-summary-figures/);
   assert.match(appSource, /<dt>Goal<\/dt>/);
-  assert.match(appSource, /<dt>Raised<\/dt>/);
-  assert.match(appSource, /<dt>In the fund<\/dt>/);
-  assert.match(appSource, /<dt>Remaining<\/dt>/);
-  assert.match(appSource, /% funded/);
+  assert.match(appSource, /<dt>Confirmed<\/dt>/);
+  assert.match(appSource, /<dt>Awaiting confirmation<\/dt>/);
+  assert.doesNotMatch(appSource, /<dt>In the fund<\/dt>/);
+  assert.match(appSource, /% confirmed/);
+  assert.match(appSource, /left to reach the goal/);
   assert.match(appSource, />Support this fund</);
   assert.doesNotMatch(appSource, /class="goal-details"/);
   assert.match(appSource, /community-fund-primary/);
@@ -84,11 +85,28 @@ test("Community Fund contribution uses persistent duplicate protection and autho
 });
 
 test("Community Fund separates lifetime receipts from the current treasury balance", () => {
-  assert.match(appSource, /Raised uses durable verified receipts/);
-  assert.match(appSource, /separate finalized balance/);
-  assert.match(appSource, /lifetimeRaised/);
+  assert.match(appSource, /Confirmed is the durable finalized receipt sum/);
+  assert.match(appSource, /Current treasury and payments remain in the financial details/);
   assert.match(appSource, /verifiedContributionSubtotal/);
-  assert.match(appSource, /verified subtotal, not the complete lifetime total/);
+  assert.match(appSource, /Confirmed is never inferred from the current treasury balance/);
+});
+
+test("personal contribution status checks strict state without resubmitting", () => {
+  assert.match(appSource, /function personalContributionMarkup/);
+  assert.match(appSource, />Your contribution</);
+  assert.match(appSource, /Awaiting confirmation/);
+  assert.match(appSource, /Outcome unresolved/);
+  assert.match(appSource, /Check payment status/);
+  assert.match(appSource, /Technical transaction details/);
+  assert.match(appSource, /data-pending-action-id/);
+  assert.match(appSource, /savePersonalContributionOutcome/);
+  assert.match(appSource, /hashless or provider-unseen actions are excluded/);
+});
+
+test("goal review warns that known pending payments can overfund concurrently", () => {
+  assert.match(appSource, /awaitingBeforeApproval/);
+  assert.match(appSource, /Known unresolved contributions plus this payment could exceed the goal/);
+  assert.match(appSource, /does not enforce the fundraising cap atomically/);
 });
 
 test("disconnected visitors get a wallet action and unsupported requests stay disabled", () => {

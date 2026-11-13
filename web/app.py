@@ -385,6 +385,30 @@ def _successful_execution(result):
     ) and any(key.startswith("Success") for key in result["status"])
 
 
+class ContributionTransactionPending(ValueError):
+    """The exact contribution transaction exists, but its final outcome is not known."""
+
+    def __init__(self, record):
+        super().__init__("Contribution transaction is not final yet")
+        self.record = record
+
+
+class ContributionTransactionFailed(ValueError):
+    """The exact contribution transaction reached a definitive failed outcome."""
+
+    def __init__(self, record):
+        super().__init__("Contribution transaction failed")
+        self.record = record
+
+
+class ContributionTransactionResolved(ValueError):
+    """The transaction is final but has no one exact successful contribution receipt."""
+
+    def __init__(self, record):
+        super().__init__("Contribution transaction resolved without an exact transfer receipt")
+        self.record = record
+
+
 def _function_call(transaction, method_name):
     actions = transaction.get("actions") or []
     if len(actions) != 1 or not isinstance(actions[0], dict):
@@ -473,11 +497,11 @@ def _verify_contribution_transaction(
         {
             "tx_hash": transaction_hash,
             "sender_account_id": signer_id,
-            "wait_until": "FINAL",
+            # Observe the submitted transaction without blocking this request until finality.
+            # Later checks use the same exact identity and promote it only after FINAL.
+            "wait_until": "NONE",
         },
     )
-    if not _successful_execution(result):
-        raise ValueError("Contribution transaction did not finalize successfully")
     transaction = result.get("transaction") or {}
     call, args = _function_call(transaction, "ft_transfer")
     amount = str(args.get("amount") or "")
@@ -493,17 +517,27 @@ def _verify_contribution_transaction(
         or (expected_memo is not None and args.get("memo") != expected_memo)
     ):
         raise ValueError("Contribution transaction does not exactly match this fund")
-    receipt_id = _successful_nep141_transfer(
-        result, token_id, signer_id, dao_id, amount
-    )
-    return {
+    observed = {
         "amount": amount,
         "contributor": signer_id,
-        "timestamp": _transaction_timestamp(result),
         "transactionHash": transaction_hash,
-        "receiptId": receipt_id,
         "tokenId": token_id,
         "memo": str(args.get("memo") or ""),
+    }
+    if result.get("final_execution_status") != "FINAL":
+        raise ContributionTransactionPending(observed)
+    if not _successful_execution(result):
+        raise ContributionTransactionFailed(observed)
+    try:
+        receipt_id = _successful_nep141_transfer(
+            result, token_id, signer_id, dao_id, amount
+        )
+    except ValueError as error:
+        raise ContributionTransactionResolved(observed) from error
+    return {
+        **observed,
+        "timestamp": _transaction_timestamp(result),
+        "receiptId": receipt_id,
     }
 
 
@@ -1038,7 +1072,8 @@ def _persisted_community_activity(fund):
     """Return verified local evidence without making any provider or RPC request."""
     slug = fund["slug"]
     contributions = _verified_contribution_ledger(slug)
-    subtotal = str(sum(int(record["amount"]) for record in contributions))
+    contribution_summary = _contribution_summary(slug)
+    subtotal = contribution_summary["verifiedContributionSubtotal"]
     history = _history_snapshot(slug)
     history_complete = bool(history) and history.get("contributionTotal") == subtotal
     treasury = _treasury_snapshot(slug)
@@ -1049,7 +1084,7 @@ def _persisted_community_activity(fund):
         "boundedEvidence": bool(contributions) and not history_complete,
         "contributions": contributions,
         "proposalTransactions": {},
-        "verifiedContributionSubtotal": subtotal,
+        **contribution_summary,
         "lifetimeRaised": subtotal if history_complete else None,
         "historyVerifiedAt": history.get("verifiedAt") if history_complete else None,
         "historyStale": True,
@@ -1070,6 +1105,8 @@ def _durable_community_activity(fund, *, force=False):
         cached = _peek_community_activity_cache(dao_id, token_id)
         if cached and "verifiedContributionSubtotal" in cached:
             return cached
+    if force:
+        _reconcile_contribution_attempts(fund)
     discovery_complete = False
     discovery_error = None
     if token_id:
@@ -1122,7 +1159,8 @@ def _durable_community_activity(fund, *, force=False):
     contributions = _verified_contribution_ledger(slug)
     if not contributions and not treasury and payload.get("error"):
         raise RuntimeError(payload["error"])
-    subtotal = str(sum(int(record["amount"]) for record in contributions))
+    contribution_summary = _contribution_summary(slug)
+    subtotal = contribution_summary["verifiedContributionSubtotal"]
     if discovery_complete:
         history = _store_history_snapshot(slug, subtotal)
     else:
@@ -1136,7 +1174,7 @@ def _durable_community_activity(fund, *, force=False):
         "contributionHistoryComplete": history_complete,
         "boundedEvidence": bool(contributions) and not history_complete,
         "contributions": contributions,
-        "verifiedContributionSubtotal": subtotal,
+        **contribution_summary,
         "lifetimeRaised": subtotal if history_complete else None,
         "historyVerifiedAt": history.get("verifiedAt") if history_complete else None,
         "historyStale": not discovery_complete,
@@ -1207,9 +1245,22 @@ def verify_community_fund_contribution(slug):
         if transaction_hash:
             if not re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{40,64}", transaction_hash):
                 return jsonify({"error": "The transaction hash is invalid."}), 400
-            record = _verify_contribution_transaction(
-                transaction_hash, signer_id, dao_id, token_id, amount, memo
-            )
+            record = next((
+                item for item in _verified_contribution_ledger(slug)
+                if item["transactionHash"] == transaction_hash
+            ), None)
+            if record and (
+                record["contributor"] != signer_id
+                or record["amount"] != amount
+                or record["tokenId"] != token_id
+            ):
+                return jsonify({
+                    "error": "The durable receipt does not match this saved contribution."
+                }), 409
+            if not record:
+                record = _verify_contribution_transaction(
+                    transaction_hash, signer_id, dao_id, token_id, amount, memo
+                )
         else:
             started_at = str(body.get("startedAtNs") or "")
             if not started_at.isdigit() or int(started_at) <= 0:
@@ -1235,11 +1286,53 @@ def verify_community_fund_contribution(slug):
                     "candidateCount": len(matches),
                 }), 409
             record = matches[0]
+        record = {**record, "memo": str(record.get("memo") or memo)}
         stored = _store_verified_contribution(slug, dao_id, token_id, record)
+        attempt = _store_contribution_attempt(
+            slug, dao_id, token_id, record, "confirmed",
+            receipt_id=stored["receiptId"], resolution_reason="verified_receipt",
+        )
         with _community_activity_cache_lock:
             _community_activity_cache.pop((dao_id, token_id), None)
-        return jsonify({"record": stored})
+        return jsonify({
+            "state": "confirmed", "record": stored, "attempt": attempt,
+            "summary": _contribution_summary(slug),
+        })
+    except ContributionTransactionPending as error:
+        attempt = _store_contribution_attempt(
+            slug, dao_id, token_id, error.record, "awaiting"
+        )
+        return jsonify({
+            "state": "awaiting", "attempt": attempt,
+            "summary": _contribution_summary(slug),
+        }), 202
+    except ContributionTransactionFailed as error:
+        attempt = _store_contribution_attempt(
+            slug, dao_id, token_id, error.record, "failed",
+            resolution_reason="final_failure",
+        )
+        return jsonify({
+            "state": "failed", "attempt": attempt,
+            "summary": _contribution_summary(slug),
+        })
+    except ContributionTransactionResolved as error:
+        attempt = _store_contribution_attempt(
+            slug, dao_id, token_id, error.record, "resolved",
+            resolution_reason="final_without_exact_receipt",
+        )
+        return jsonify({
+            "state": "resolved", "attempt": attempt,
+            "summary": _contribution_summary(slug),
+        })
     except (OSError, URLError, RuntimeError, ValueError, TypeError, json.JSONDecodeError) as error:
+        existing = _contribution_attempt(slug, transaction_hash) if transaction_hash else None
+        if existing:
+            return jsonify({
+                "state": existing["state"], "attempt": existing,
+                "summary": _contribution_summary(slug),
+                "verificationUnavailable": True,
+                "error": "Finalized state could not be refreshed; the previously observed attempt is preserved.",
+            })
         return jsonify({"error": f"Finalized contribution verification unavailable: {error}"}), 503
 
 
@@ -1320,6 +1413,25 @@ def _ensure_community_fund_schema(db):
         );
         CREATE INDEX IF NOT EXISTS community_verified_contributions_fund
             ON community_verified_contributions(fund_slug, block_timestamp, id);
+        CREATE TABLE IF NOT EXISTS community_contribution_attempts (
+            attempt_id TEXT PRIMARY KEY,
+            fund_slug TEXT NOT NULL,
+            dao_id TEXT NOT NULL,
+            token_id TEXT NOT NULL,
+            transaction_hash TEXT NOT NULL,
+            signer_id TEXT NOT NULL,
+            amount TEXT NOT NULL,
+            memo TEXT NOT NULL,
+            state TEXT NOT NULL CHECK (state IN ('awaiting', 'confirmed', 'failed', 'resolved')),
+            receipt_id TEXT,
+            resolution_reason TEXT NOT NULL DEFAULT '',
+            first_observed_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            resolved_at TEXT,
+            UNIQUE (fund_slug, transaction_hash)
+        );
+        CREATE INDEX IF NOT EXISTS community_contribution_attempts_fund_state
+            ON community_contribution_attempts(fund_slug, state, updated_at);
         CREATE TABLE IF NOT EXISTS community_fund_financial_snapshots (
             fund_slug TEXT PRIMARY KEY,
             dao_id TEXT NOT NULL,
@@ -1338,10 +1450,177 @@ def _ensure_community_fund_schema(db):
 
 
 def _financial_db():
-    db = sqlite3.connect(DATABASE)
+    db = sqlite3.connect(DATABASE, timeout=5)
     db.row_factory = sqlite3.Row
     _ensure_community_fund_schema(db)
     return db
+
+
+def _contribution_attempt_id(fund_slug, transaction_hash):
+    identity = f"testnet\n{fund_slug}\n{transaction_hash}".encode("utf-8")
+    return hashlib.sha256(identity).hexdigest()
+
+
+def _attempt_record(row):
+    if not row:
+        return None
+    return {
+        "attemptId": row["attempt_id"],
+        "fundSlug": row["fund_slug"],
+        "transactionHash": row["transaction_hash"],
+        "amount": row["amount"],
+        "state": row["state"],
+        "receiptId": row["receipt_id"],
+        "firstObservedAt": row["first_observed_at"],
+        "updatedAt": row["updated_at"],
+        "resolvedAt": row["resolved_at"],
+    }
+
+
+def _contribution_attempt(fund_slug, transaction_hash):
+    with _financial_db() as db:
+        row = db.execute(
+            """
+            SELECT * FROM community_contribution_attempts
+            WHERE fund_slug = ? AND transaction_hash = ?
+            """,
+            (fund_slug, transaction_hash),
+        ).fetchone()
+    return _attempt_record(row)
+
+
+def _store_contribution_attempt(
+    fund_slug, dao_id, token_id, record, state, *, receipt_id=None,
+    resolution_reason="",
+):
+    """Idempotently persist one independently observed transaction identity."""
+    if state not in {"awaiting", "confirmed", "failed", "resolved"}:
+        raise ValueError("Contribution attempt state is invalid")
+    required = {"transactionHash", "contributor", "amount", "memo"}
+    if not required.issubset(record) or not str(record["amount"]).isdigit():
+        raise ValueError("Contribution attempt evidence is incomplete")
+    now = datetime.now(timezone.utc).isoformat()
+    transaction_hash = str(record["transactionHash"])
+    immutable = (
+        fund_slug, dao_id, token_id, transaction_hash,
+        str(record["contributor"]), str(record["amount"]), str(record["memo"]),
+    )
+    with _financial_db() as db:
+        db.execute(
+            """
+            INSERT INTO community_contribution_attempts (
+                attempt_id, fund_slug, dao_id, token_id, transaction_hash,
+                signer_id, amount, memo, state, receipt_id, resolution_reason,
+                first_observed_at, updated_at, resolved_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(fund_slug, transaction_hash) DO NOTHING
+            """,
+            (
+                _contribution_attempt_id(fund_slug, transaction_hash),
+                *immutable, state, receipt_id, resolution_reason, now, now,
+                None if state == "awaiting" else now,
+            ),
+        )
+        existing = db.execute(
+            """
+            SELECT * FROM community_contribution_attempts
+            WHERE fund_slug = ? AND transaction_hash = ?
+            """,
+            (fund_slug, transaction_hash),
+        ).fetchone()
+        existing_identity = (
+            existing["fund_slug"], existing["dao_id"], existing["token_id"],
+            existing["transaction_hash"], existing["signer_id"],
+            existing["amount"], existing["memo"],
+        )
+        if existing_identity != immutable:
+            raise ValueError("Contribution attempt identity changed")
+        current_state = existing["state"]
+        if current_state in {"confirmed", "failed", "resolved"}:
+            state = current_state
+            receipt_id = existing["receipt_id"]
+            resolution_reason = existing["resolution_reason"]
+        db.execute(
+            """
+            UPDATE community_contribution_attempts
+            SET state = ?, receipt_id = ?, resolution_reason = ?,
+                updated_at = ?, resolved_at = ?
+            WHERE attempt_id = ?
+            """,
+            (
+                state, receipt_id, resolution_reason, now,
+                None if state == "awaiting" else (existing["resolved_at"] or now),
+                existing["attempt_id"],
+            ),
+        )
+        row = db.execute(
+            """
+            SELECT * FROM community_contribution_attempts
+            WHERE fund_slug = ? AND transaction_hash = ?
+            """,
+            (fund_slug, transaction_hash),
+        ).fetchone()
+    return _attempt_record(row)
+
+
+def _contribution_summary(fund_slug):
+    contributions = _verified_contribution_ledger(fund_slug)
+    with _financial_db() as db:
+        pending = db.execute(
+            """
+            SELECT COALESCE(SUM(CAST(amount AS INTEGER)), 0) AS amount, COUNT(*) AS count
+            FROM community_contribution_attempts
+            WHERE fund_slug = ? AND state = 'awaiting'
+            """,
+            (fund_slug,),
+        ).fetchone()
+    return {
+        "verifiedContributionSubtotal": str(sum(int(item["amount"]) for item in contributions)),
+        "awaitingConfirmation": str(pending["amount"]),
+        "awaitingAttemptCount": int(pending["count"]),
+        # Hashless and provider-unseen wallet actions cannot safely enter this aggregate.
+        "awaitingScope": "observed_transactions_only",
+    }
+
+
+def _reconcile_contribution_attempts(fund, limit=20):
+    """Refresh known exact attempts without indexer discovery or browser participation."""
+    slug = fund["slug"]
+    dao_id = fund["daoId"]
+    token_id = fund["goal"].get("tokenId", "")
+    with _financial_db() as db:
+        rows = db.execute(
+            """
+            SELECT transaction_hash, signer_id, amount, memo
+            FROM community_contribution_attempts
+            WHERE fund_slug = ? AND state = 'awaiting'
+            ORDER BY first_observed_at
+            LIMIT ?
+            """,
+            (slug, limit),
+        ).fetchall()
+    for row in rows:
+        try:
+            record = _verify_contribution_transaction(
+                row["transaction_hash"], row["signer_id"], dao_id, token_id,
+                row["amount"], row["memo"],
+            )
+            _store_verified_contribution(slug, dao_id, token_id, record)
+        except ContributionTransactionPending:
+            continue
+        except ContributionTransactionFailed as error:
+            _store_contribution_attempt(
+                slug, dao_id, token_id, error.record, "failed",
+                resolution_reason="final_failure",
+            )
+        except ContributionTransactionResolved as error:
+            _store_contribution_attempt(
+                slug, dao_id, token_id, error.record, "resolved",
+                resolution_reason="final_without_exact_receipt",
+            )
+        except (OSError, URLError, RuntimeError, ValueError, TypeError, json.JSONDecodeError):
+            # Preserve the last observed state; a later bounded refresh will try again.
+            continue
 
 
 def _store_verified_contribution(fund_slug, dao_id, token_id, record):
@@ -1369,6 +1648,21 @@ def _store_verified_contribution(fund_slug, dao_id, token_id, record):
                 fund_slug, dao_id, token_id, record["transactionHash"],
                 record["receiptId"], record["contributor"], str(record["amount"]),
                 str(record["timestamp"]), verified_at,
+            ),
+        )
+        db.execute(
+            """
+            UPDATE community_contribution_attempts
+            SET state = 'confirmed', receipt_id = ?, resolution_reason = 'verified_receipt',
+                updated_at = ?, resolved_at = COALESCE(resolved_at, ?)
+            WHERE fund_slug = ? AND transaction_hash = ?
+              AND signer_id = ? AND amount = ? AND token_id = ?
+              AND state = 'awaiting'
+            """,
+            (
+                record["receiptId"], verified_at, verified_at, fund_slug,
+                record["transactionHash"], record["contributor"],
+                str(record["amount"]), token_id,
             ),
         )
     return {**record, "verifiedAt": verified_at}
@@ -1591,7 +1885,6 @@ def _verified_fund_directory_item(fund, *, cached_only=False):
     if not dao_id or not goal.get("configured"):
         return None
     contributed = None
-    verified_subtotal = None
     contributor_count = None
     verification_state = "pending"
     try:
@@ -1602,29 +1895,19 @@ def _verified_fund_directory_item(fund, *, cached_only=False):
         )
         if activity is None:
             raise RuntimeError("Verified activity is not cached yet.")
+        contributions = activity.get("contributions", [])
+        contributed = int(activity.get("verifiedContributionSubtotal") or sum(
+            int(item.get("amount", "0")) for item in contributions
+        ))
+        contributor_count = len({
+            item.get("contributor") or item.get("account")
+            for item in contributions
+            if item.get("contributor") or item.get("account")
+        })
         history_complete = activity.get(
             "contributionHistoryComplete", activity.get("complete", False)
         )
-        if history_complete:
-            contributions = activity.get("contributions", [])
-            contributed = int(activity.get("lifetimeRaised") or sum(
-                int(item.get("amount", "0")) for item in contributions
-            ))
-            contributor_count = len({
-                item.get("contributor") or item.get("account")
-                for item in contributions
-                if item.get("contributor") or item.get("account")
-            })
-            verification_state = "current"
-        elif activity.get("contributions"):
-            contributions = activity.get("contributions", [])
-            verified_subtotal = int(activity.get("verifiedContributionSubtotal") or "0")
-            contributor_count = len({
-                item.get("contributor") or item.get("account")
-                for item in contributions
-                if item.get("contributor") or item.get("account")
-            })
-            verification_state = "partial"
+        verification_state = "current" if history_complete else "partial"
     except (OSError, URLError, RuntimeError, ValueError, TypeError, json.JSONDecodeError):
         pass
     target = int(goal.get("targetUnits") or goal.get("targetYocto") or "0")
@@ -1636,10 +1919,6 @@ def _verified_fund_directory_item(fund, *, cached_only=False):
         status = "Open for contributions"
     decimals = int(goal.get("decimals", 6))
     amount = None if contributed is None else f"{Decimal(contributed) / (Decimal(10) ** decimals):.2f}"
-    subtotal_amount = (
-        None if verified_subtotal is None
-        else f"{Decimal(verified_subtotal) / (Decimal(10) ** decimals):.2f}"
-    )
     target_amount = f"{Decimal(target) / (Decimal(10) ** decimals):.2f}"
     return {
         "slug": fund["slug"],
@@ -1652,8 +1931,8 @@ def _verified_fund_directory_item(fund, *, cached_only=False):
         "raisedAmount": amount,
         "targetUnits": str(target),
         "raisedUnits": None if contributed is None else str(contributed),
-        "verifiedSubtotalAmount": subtotal_amount,
-        "verifiedSubtotalUnits": None if verified_subtotal is None else str(verified_subtotal),
+        "verifiedSubtotalAmount": amount,
+        "verifiedSubtotalUnits": None if contributed is None else str(contributed),
         "contributorsCount": contributor_count,
         "contribution_deadline": "No deadline configured",
         "isVerifiedFund": True,

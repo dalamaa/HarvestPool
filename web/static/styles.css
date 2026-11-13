@@ -1089,6 +1089,7 @@ h3 { margin-bottom: 10px; font-size: 21px; line-height: 1.1; }
 .fund-safety-blocked ul { margin: 8px 0 0; padding-left: 20px; }
 .community-fund-primary { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(300px, .75fr); align-items: start; gap: 20px; margin-bottom: 20px; }
 .community-fund-primary > * { min-width: 0; }
+.community-summary-column { display: grid; min-width: 0; gap: 16px; }
 .community-goal-card { margin: 0; padding: clamp(22px, 4vw, 32px); border: 1px solid #b9d8c8; border-radius: 13px; background: linear-gradient(135deg, #f4faf5 0%, var(--white) 70%); box-shadow: var(--shadow); }
 .goal-card-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
 .goal-card-top h2 { max-width: 28ch; margin: 5px 0 0; font-size: clamp(27px, 3vw, 38px); line-height: 1.08; }
@@ -1098,7 +1099,7 @@ h3 { margin-bottom: 10px; font-size: 21px; line-height: 1.1; }
 .goal-progress-label { display: flex; justify-content: space-between; gap: 16px; margin-top: 9px; color: var(--muted); font-size: 13px; }
 .goal-progress-label strong { color: var(--pine); }
 .goal-progress-unavailable { padding: 14px 16px; border: 1px dashed var(--line); border-radius: 8px; background: var(--mist); color: var(--muted); font-size: 13px; }
-.goal-summary-figures { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 24px 0 20px; padding: 18px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.goal-summary-figures { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 24px 0 20px; padding: 18px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .goal-summary-figures > div { min-width: 0; padding: 0 14px; }
 .goal-summary-figures > div:first-child { padding-left: 0; }
 .goal-summary-figures > div:last-child { padding-right: 0; }
@@ -1110,6 +1111,15 @@ h3 { margin-bottom: 10px; font-size: 21px; line-height: 1.1; }
 .goal-boundary-note { max-width: 75ch; margin: 8px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
 .goal-summary-action { margin-top: 18px; }
 .goal-testnet-note { margin: 18px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.personal-contribution-card { padding: 22px; border: 1px solid var(--line); border-radius: 12px; background: var(--white); box-shadow: var(--shadow); }
+.personal-contribution-card h3 { margin: 6px 0 16px; color: var(--pine); font-size: 22px; }
+.personal-contribution-list { display: grid; gap: 12px; }
+.personal-contribution-row { padding: 16px; border: 1px solid var(--line); border-radius: 9px; background: var(--paper); }
+.personal-contribution-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.personal-contribution-heading > div { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; min-width: 0; }
+.personal-contribution-heading strong { color: var(--pine); font-size: 20px; font-variant-numeric: tabular-nums; }
+.personal-contribution-row > p { margin: 10px 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
+.personal-contribution-row .technical-details { margin-top: 10px; }
 .goal-fixed-recipient { display: grid; gap: 5px; margin: 15px 0 17px; padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--mist); }
 .goal-fixed-recipient > span { color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
 .goal-fixed-recipient code { color: var(--pine); overflow-wrap: anywhere; }
@@ -1202,16 +1212,17 @@ h3 { margin-bottom: 10px; font-size: 21px; line-height: 1.1; }
   .request-goal { min-width: 0; }
   .community-card-meta { grid-template-columns: 1fr; }
   .community-fund-section { padding-bottom: 74px; }
-  .community-goal-card, .fund-overview, .fund-proposals, .fund-history, .fund-action-card, .fund-setup-state { padding: 18px; }
+  .community-goal-card, .personal-contribution-card, .fund-overview, .fund-proposals, .fund-history, .fund-action-card, .fund-setup-state { padding: 18px; }
   .goal-card-top, .fund-overview-heading, .fund-proposal-top, .fund-payment-reference { align-items: flex-start; flex-direction: column; }
   .fund-stat-grid, .fund-action-grid, .fund-proposal-details, .fund-history-row { grid-template-columns: 1fr; }
-  .goal-summary-figures { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 16px; }
-  .goal-summary-figures > div { padding: 0 10px; }
-  .goal-summary-figures > div:nth-child(odd) { padding-left: 0; border-left: 0; }
-  .goal-summary-figures > div:nth-child(even) { padding-right: 0; }
-  .goal-summary-figures > div:nth-child(n + 3) { padding-top: 16px; border-top: 1px solid var(--line); }
+  .goal-summary-figures { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .goal-summary-figures > div { padding: 0 8px; }
+  .goal-summary-figures > div:first-child { padding-left: 0; }
+  .goal-summary-figures > div:last-child { padding-right: 0; }
   .goal-summary-figures dd { font-size: clamp(17px, 5vw, 21px); }
   .goal-progress-label { align-items: flex-start; flex-direction: column; gap: 3px; }
+  .personal-contribution-heading { align-items: flex-start; flex-direction: column; }
+  .personal-contribution-heading .button { width: 100%; }
   .fund-stat-grid > div { min-height: 0; }
   .fund-proposal-actions .button, .fund-action-card > .button { width: 100%; }
   .fund-history-row > .text-link, .fund-history-row > .fund-reference-missing { grid-column: auto; }

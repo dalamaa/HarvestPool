@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 import time
+from concurrent.futures import ThreadPoolExecutor
 from urllib.error import HTTPError, URLError
 from unittest.mock import patch
 
@@ -412,13 +413,13 @@ class CommunityFundActivityTests(unittest.TestCase):
             directory = web_app.app.test_client().get("/api/community-funds").get_json()["funds"]
         blocking_read.assert_not_called()
         garden = next(item for item in directory if item.get("slug") == "community-garden")
-        self.assertIsNone(garden["raisedAmount"])
+        self.assertEqual(garden["raisedAmount"], "0.00")
         self.assertEqual(garden["activityUrl"], "/api/community-funds/community-garden/activity")
         self.assertEqual(garden["decimals"], 6)
         self.assertEqual(garden["targetUnits"], "100000000")
-        self.assertIsNone(garden["raisedUnits"])
-        self.assertEqual(garden["status"], "Verification pending")
-        self.assertEqual(garden["verificationState"], "pending")
+        self.assertEqual(garden["raisedUnits"], "0")
+        self.assertEqual(garden["status"], "Open for contributions")
+        self.assertEqual(garden["verificationState"], "partial")
 
     def test_directory_does_not_treat_nonpayment_proposals_as_spending(self):
         fund = web_app._configured_community_funds()["community-garden"]
@@ -778,8 +779,244 @@ class CommunityFundActivityTests(unittest.TestCase):
 
         self.assertEqual(first.status_code, 200)
         self.assertEqual(second.status_code, 200)
-        self.assertEqual(verify.call_count, 2)
+        self.assertEqual(verify.call_count, 1)
         self.assertEqual(len(web_app._verified_contribution_ledger("community-garden")), 1)
+
+    def test_two_observed_attempts_move_from_awaiting_to_confirmed_without_duplicates(self):
+        fund = web_app._configured_community_funds()["community-garden"]
+        memo = "Contribution toward Community Garden"
+        baseline = {
+            "transactionHash": "C" * 44,
+            "receiptId": "D" * 44,
+            "contributor": "baseline.testnet",
+            "amount": "50000000",
+            "timestamp": "1794575420755944000",
+            "tokenId": web_app.CANONICAL_USDC_TOKEN_ID,
+            "memo": memo,
+        }
+        web_app._store_verified_contribution(
+            "community-garden", fund["daoId"], web_app.CANONICAL_USDC_TOKEN_ID,
+            baseline,
+        )
+        attempts = {
+            "alice.testnet": {
+                "transactionHash": "A" * 44, "contributor": "alice.testnet",
+                "amount": "5000000", "tokenId": web_app.CANONICAL_USDC_TOKEN_ID,
+                "memo": memo,
+            },
+            "bob.testnet": {
+                "transactionHash": "B" * 44, "contributor": "bob.testnet",
+                "amount": "15000000", "tokenId": web_app.CANONICAL_USDC_TOKEN_ID,
+                "memo": memo,
+            },
+        }
+
+        def pending(transaction_hash, signer_id, *_args):
+            self.assertEqual(transaction_hash, attempts[signer_id]["transactionHash"])
+            raise web_app.ContributionTransactionPending(attempts[signer_id])
+
+        client = web_app.app.test_client()
+        with patch.object(web_app, "_verify_contribution_transaction", side_effect=pending):
+            for signer_id, record in attempts.items():
+                body = {
+                    "transactionHash": record["transactionHash"],
+                    "signerId": signer_id, "amount": record["amount"], "memo": memo,
+                }
+                self.assertEqual(client.post(
+                    "/api/community-funds/community-garden/contributions/verify", json=body
+                ).status_code, 202)
+            duplicate = client.post(
+                "/api/community-funds/community-garden/contributions/verify",
+                json={
+                    "transactionHash": attempts["alice.testnet"]["transactionHash"],
+                    "signerId": "alice.testnet", "amount": "5000000", "memo": memo,
+                },
+            )
+        self.assertEqual(duplicate.status_code, 202)
+        summary = client.get("/api/community-funds/community-garden/activity").get_json()
+        self.assertEqual(summary["verifiedContributionSubtotal"], "50000000")
+        self.assertEqual(summary["awaitingConfirmation"], "20000000")
+        self.assertEqual(summary["awaitingAttemptCount"], 2)
+
+        verified_alice = {
+            **attempts["alice.testnet"], "receiptId": "E" * 44,
+            "timestamp": "1794575420755945000",
+        }
+        with patch.object(web_app, "_verify_contribution_transaction", return_value=verified_alice):
+            response = client.post(
+                "/api/community-funds/community-garden/contributions/verify",
+                json={
+                    "transactionHash": verified_alice["transactionHash"],
+                    "signerId": "alice.testnet", "amount": "5000000", "memo": memo,
+                },
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["summary"]["verifiedContributionSubtotal"], "55000000")
+        self.assertEqual(response.get_json()["summary"]["awaitingConfirmation"], "15000000")
+
+        verified_bob = {
+            **attempts["bob.testnet"], "receiptId": "F" * 44,
+            "timestamp": "1794575420755946000",
+        }
+        with patch.object(web_app, "_verify_contribution_transaction", return_value=verified_bob):
+            response = client.post(
+                "/api/community-funds/community-garden/contributions/verify",
+                json={
+                    "transactionHash": verified_bob["transactionHash"],
+                    "signerId": "bob.testnet", "amount": "15000000", "memo": memo,
+                },
+            )
+        self.assertEqual(response.get_json()["summary"]["verifiedContributionSubtotal"], "70000000")
+        self.assertEqual(response.get_json()["summary"]["awaitingConfirmation"], "0")
+
+    def test_pending_attempt_requires_an_exact_rpc_observed_transfer_identity(self):
+        transaction_hash = "K" * 44
+        signer_id = "alice.testnet"
+        dao_id = web_app.COMMUNITY_GARDEN_DAO_ID
+        token_id = web_app.CANONICAL_USDC_TOKEN_ID
+        amount = "5000000"
+        memo = "Contribution toward Community Garden"
+        args = base64.b64encode(json.dumps({
+            "receiver_id": dao_id, "amount": amount, "memo": memo,
+        }).encode()).decode()
+        pending_result = {
+            "final_execution_status": "EXECUTED_OPTIMISTIC",
+            "transaction": {
+                "hash": transaction_hash,
+                "signer_id": signer_id,
+                "receiver_id": token_id,
+                "actions": [{"FunctionCall": {
+                    "method_name": "ft_transfer", "args": args, "deposit": "1",
+                }}],
+            },
+        }
+        with patch.object(web_app, "_community_rpc", return_value=pending_result) as rpc:
+            with self.assertRaises(web_app.ContributionTransactionPending):
+                web_app._verify_contribution_transaction(
+                    transaction_hash, signer_id, dao_id, token_id, amount, memo
+                )
+        self.assertEqual(rpc.call_args.args[1]["wait_until"], "NONE")
+
+        wrong_receiver = {
+            **pending_result,
+            "transaction": {**pending_result["transaction"], "receiver_id": "fake-token.testnet"},
+        }
+        with patch.object(web_app, "_community_rpc", return_value=wrong_receiver):
+            with self.assertRaisesRegex(ValueError, "does not exactly match"):
+                web_app._verify_contribution_transaction(
+                    transaction_hash, signer_id, dao_id, token_id, amount, memo
+                )
+        self.assertEqual(web_app._contribution_summary("community-garden")["awaitingConfirmation"], "0")
+
+    def test_failed_attempt_leaves_awaiting_and_provider_failure_preserves_observed_state(self):
+        memo = "Contribution toward Community Garden"
+        record = {
+            "transactionHash": "G" * 44,
+            "contributor": "alice.testnet",
+            "amount": "5000000",
+            "tokenId": web_app.CANONICAL_USDC_TOKEN_ID,
+            "memo": memo,
+        }
+        body = {
+            "transactionHash": record["transactionHash"],
+            "signerId": record["contributor"], "amount": record["amount"], "memo": memo,
+        }
+        client = web_app.app.test_client()
+        with patch.object(
+            web_app, "_verify_contribution_transaction",
+            side_effect=web_app.ContributionTransactionPending(record),
+        ):
+            self.assertEqual(client.post(
+                "/api/community-funds/community-garden/contributions/verify", json=body
+            ).status_code, 202)
+        with patch.object(web_app, "_verify_contribution_transaction", side_effect=URLError("rpc down")):
+            preserved = client.post(
+                "/api/community-funds/community-garden/contributions/verify", json=body
+            )
+        self.assertEqual(preserved.status_code, 200)
+        self.assertTrue(preserved.get_json()["verificationUnavailable"])
+        self.assertEqual(preserved.get_json()["summary"]["awaitingConfirmation"], "5000000")
+
+        with patch.object(
+            web_app, "_verify_contribution_transaction",
+            side_effect=web_app.ContributionTransactionFailed(record),
+        ):
+            failed = client.post(
+                "/api/community-funds/community-garden/contributions/verify", json=body
+            )
+        self.assertEqual(failed.get_json()["state"], "failed")
+        self.assertEqual(failed.get_json()["summary"]["awaitingConfirmation"], "0")
+        self.assertEqual(failed.get_json()["summary"]["verifiedContributionSubtotal"], "0")
+
+    def test_concurrent_attempt_writes_are_idempotent_and_survive_new_connections(self):
+        fund = web_app._configured_community_funds()["community-garden"]
+        memo = "Contribution toward Community Garden"
+        records = [
+            {
+                "transactionHash": character * 44,
+                "contributor": signer,
+                "amount": amount,
+                "tokenId": web_app.CANONICAL_USDC_TOKEN_ID,
+                "memo": memo,
+            }
+            for character, signer, amount in (
+                ("H", "alice.testnet", "5000000"),
+                ("J", "bob.testnet", "15000000"),
+            )
+        ]
+        # Initialize the additive schema before concurrent worker connections begin.
+        self.assertEqual(web_app._contribution_summary("community-garden")["awaitingConfirmation"], "0")
+
+        def store(record):
+            return web_app._store_contribution_attempt(
+                "community-garden", fund["daoId"], web_app.CANONICAL_USDC_TOKEN_ID,
+                record, "awaiting",
+            )
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(store, [records[0], records[1], records[0], records[1]]))
+        summary = web_app._contribution_summary("community-garden")
+        self.assertEqual(summary["awaitingConfirmation"], "20000000")
+        self.assertEqual(summary["awaitingAttemptCount"], 2)
+        web_app._community_activity_cache.clear()
+        restarted = web_app.app.test_client().get(
+            "/api/community-funds/community-garden/activity"
+        ).get_json()
+        self.assertEqual(restarted["awaitingConfirmation"], "20000000")
+        self.assertEqual(restarted["awaitingAttemptCount"], 2)
+
+    def test_background_refresh_reconciles_known_attempts_without_browser_or_indexer(self):
+        fund = web_app._configured_community_funds()["community-garden"]
+        memo = "Contribution toward Community Garden"
+        alice = {
+            "transactionHash": "L" * 44, "contributor": "alice.testnet",
+            "amount": "5000000", "tokenId": web_app.CANONICAL_USDC_TOKEN_ID,
+            "memo": memo,
+        }
+        bob = {
+            "transactionHash": "M" * 44, "contributor": "bob.testnet",
+            "amount": "15000000", "tokenId": web_app.CANONICAL_USDC_TOKEN_ID,
+            "memo": memo,
+        }
+        for record in (alice, bob):
+            web_app._store_contribution_attempt(
+                "community-garden", fund["daoId"], web_app.CANONICAL_USDC_TOKEN_ID,
+                record, "awaiting",
+            )
+        verified_alice = {
+            **alice, "receiptId": "N" * 44,
+            "timestamp": "1794575420755947000",
+        }
+        with patch.object(
+            web_app, "_verify_contribution_transaction",
+            side_effect=[verified_alice, web_app.ContributionTransactionFailed(bob)],
+        ) as verify:
+            web_app._reconcile_contribution_attempts(fund)
+        self.assertEqual(verify.call_count, 2)
+        summary = web_app._contribution_summary("community-garden")
+        self.assertEqual(summary["verifiedContributionSubtotal"], "5000000")
+        self.assertEqual(summary["awaitingConfirmation"], "0")
+        self.assertEqual(summary["awaitingAttemptCount"], 0)
 
     def test_hashless_recovery_refuses_ambiguous_exact_candidates(self):
         timestamp = 1794575420755944648

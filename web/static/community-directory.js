@@ -53,21 +53,19 @@
     const verificationCopy = !fund.isVerifiedFund
       ? "No treasury or verified contribution history"
       : fund.verificationState === "current"
-      ? "Verified finalized activity"
+      ? "Confirmed finalized receipts"
       : fund.verificationState === "last-verified"
         ? "Last verified finalized activity · refreshing"
         : fund.verificationState === "partial"
-          ? "Verified receipt subtotal · history discovery incomplete"
+          ? "Confirmed receipts · broader discovery may be incomplete"
         : fund.verificationState === "error"
           ? "Verification is temporarily unavailable"
           : "Checking finalized activity…";
     const raisedCopy = !fund.isVerifiedFund
       ? "Contributions unavailable"
-      : fund.verificationState === "partial" && fund.verifiedSubtotalAmount !== null && fund.verifiedSubtotalAmount !== undefined
-      ? `At least ${money(fund.verifiedSubtotalAmount)} verified`
       : fund.raisedAmount === null || fund.raisedAmount === undefined
       ? "Raised amount pending verification"
-      : `${money(fund.raisedAmount)} raised`;
+      : `${money(fund.raisedAmount)} confirmed`;
     const contributorCopy = !fund.isVerifiedFund
       ? "Contributions unavailable"
       : fund.contributorsCount === null || fund.contributorsCount === undefined
@@ -91,15 +89,15 @@
     const whole = total / scale;
     const fraction = (total % scale).toString().padStart(Number(fund.decimals ?? 6), "0").slice(0, 2).padEnd(2, "0");
     const complete = activity.contributionHistoryComplete === true;
-    fund.raisedAmount = complete ? `${whole}.${fraction}` : null;
-    fund.raisedUnits = complete ? total.toString() : null;
+    fund.raisedAmount = `${whole}.${fraction}`;
+    fund.raisedUnits = total.toString();
     fund.verifiedSubtotalAmount = `${whole}.${fraction}`;
     fund.verifiedSubtotalUnits = total.toString();
     fund.verifiedContributorIds = directoryTools.verifiedContributors(contributions);
     fund.contributorsCount = fund.verifiedContributorIds.length;
-    fund.status = complete
-      ? (total >= BigInt(String(fund.targetUnits || "0")) ? "Goal reached" : "Open for contributions")
-      : "Verification pending";
+    fund.status = total >= BigInt(String(fund.targetUnits || "0"))
+      ? "Goal reached"
+      : "Open for contributions";
     fund.verificationState = verificationState
       || (complete ? "current" : "partial");
     return true;
