@@ -44,8 +44,9 @@ test("lost callbacks and refresh recovery retain the pending lock and reconcile 
 
 test("ordinary wallet and callback confirmation do not show an unknown-outcome warning", () => {
   assert.match(appSource, /phase: "wallet"/);
-  assert.match(appSource, /phase: "confirming"/);
-  assert.match(appSource, /phase: "unresolved"/);
+  assert.match(appSource, /phase: walletUnresponsive \? "wallet-unresponsive" : "confirming"/);
+  assert.match(appSource, /wallet-unresponsive/);
+  assert.match(appSource, /: "unresolved"/);
   assert.match(appSource, /Your request was submitted\. We’re checking the result now/);
 });
 

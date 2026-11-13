@@ -168,7 +168,7 @@
   const YOCTO_PER_NEAR = 10n ** 24n;
   const PRICE_SCALE = 1_000_000n;
   const RECONCILIATION_MAX_AGE_MS = 5 * 60_000;
-  const TRANSACTION_BUNDLE_VERSION = "2026-11-13.4";
+  const TRANSACTION_BUNDLE_VERSION = "2026-11-13.5";
   const WALLET_RESULT_TIMEOUT_MS = 15_000;
   const EXPLORE_REFRESH_INTERVAL_MS = 15_000;
   const CREATE_SUBMITTED_KEY = "harvestpool:create-submitted:v1";
@@ -1692,7 +1692,12 @@
             showToast("That action did not complete. Your saved information is unchanged.", "error");
           }
         } else {
-          const unresolved = poll ? pendingActionStore.save({ ...action, phase: "unresolved" }) : action;
+          const unresolved = poll ? pendingActionStore.save({
+            ...action,
+            phase: !action.transactionHash && action.phase === "wallet-unresponsive"
+              ? "wallet-unresponsive"
+              : "unresolved",
+          }) : action;
           remaining.push(unresolved);
         }
       }
@@ -2140,6 +2145,7 @@
       if (walletWait.state === "pending") {
         const error = new Error("Meteor has not returned a final response yet.");
         error.transactionState = "pending";
+        error.walletResponseTimedOut = true;
         throw error;
       }
       if (walletWait.state === "rejected") throw walletWait.error;
@@ -2363,7 +2369,11 @@
         id: action.id,
         actionId: action.id,
         amount: String(action.args?.amount || "0"),
-        state: action.transactionHash ? "awaiting" : "unresolved",
+        state: action.transactionHash
+          ? "awaiting"
+          : action.phase === "wallet-unresponsive"
+            ? "wallet-unresponsive"
+            : "unresolved",
         transactionHash: action.transactionHash || null,
         updatedAt: Number(action.savedAt || 0),
       })),
@@ -2371,21 +2381,33 @@
       ...resolved,
     ].sort((left, right) => Number(right.updatedAt || 0) - Number(left.updatedAt || 0));
     if (!records.length) return "";
-    const rows = records.map((record) => {
+    const contributionRow = (record, { previous = false } = {}) => {
       const amount = communityAmount(record.amount, goal);
       const status = record.state === "confirmed"
         ? "Confirmed"
         : record.state === "failed"
           ? "Failed"
+          : record.state === "wallet-rejected"
+            ? "Not submitted"
+          : record.state === "wallet-failed"
+            ? "Wallet launch failed"
+          : record.state === "wallet-unresponsive"
+            ? "Meteor did not respond"
           : record.state === "unresolved"
-            ? "Outcome unresolved"
-            : "Awaiting confirmation";
+            ? "Checking your payment"
+            : "Checking your payment";
       const message = record.state === "confirmed"
         ? `Your ${amount} payment is confirmed.`
         : record.state === "failed"
           ? `Your ${amount} transaction reached a final outcome without a verified contribution.`
+          : record.state === "wallet-rejected"
+            ? `Meteor cancelled or rejected your ${amount} request. HarvestPool has no evidence that money was submitted or received.`
+          : record.state === "wallet-failed"
+            ? `Meteor did not launch for your ${amount} request. HarvestPool has no evidence that money was submitted or received.`
+          : record.state === "wallet-unresponsive"
+            ? `Meteor did not return a transaction for your ${amount} request. HarvestPool has no evidence that money was submitted or received. Check Meteor activity before trying again.`
           : record.state === "unresolved"
-            ? `Meteor returned no transaction hash for your ${amount} payment. It remains protected from duplicate submission but is not included in the community awaiting total.`
+            ? `We're checking your ${amount} request, but no submitted transaction is visible yet. It is not included in Awaiting confirmation.`
             : `We're checking your ${amount} payment. You don't need to pay again. This observed payment is included in the community awaiting total.`;
       const statusClass = record.state === "confirmed" ? "status-funded" : "status-pending";
       const check = record.actionId
@@ -2396,9 +2418,14 @@
       const transaction = record.transactionHash
         ? `<code>${escapeHtml(record.transactionHash)}</code>`
         : "Not returned by Meteor";
-      return `<article class="personal-contribution-row" data-personal-contribution><div class="personal-contribution-heading"><div><span class="personal-contribution-label">Your contribution</span><strong>${escapeHtml(amount)}</strong><span class="status ${statusClass}"><span></span>${escapeHtml(status)}</span></div>${check}</div><p>${escapeHtml(message)}</p><details class="technical-details"><summary>Technical transaction details</summary><dl class="checkout-status-facts"><div><dt>Transaction</dt><dd>${transaction}</dd></div>${record.receiptId ? `<div><dt>Receipt</dt><dd><code>${escapeHtml(record.receiptId)}</code></dd></div>` : ""}</dl></details><p class="field-help" role="status" aria-live="polite" data-pending-check-result></p></article>`;
-    }).join("");
-    return `<section class="personal-contribution-card" aria-labelledby="personal-contribution-heading"><span class="section-kicker">Payment status</span><h3 id="personal-contribution-heading">What happened to your payment</h3><div class="personal-contribution-list">${rows}</div></section>`;
+      return `<article class="personal-contribution-row${previous ? " personal-contribution-previous" : ""}" data-personal-contribution><div class="personal-contribution-heading"><div>${previous ? "" : '<span class="personal-contribution-label">Your contribution</span>'}<strong>${escapeHtml(amount)}</strong><span class="status ${statusClass}"><span></span>${escapeHtml(status)}</span></div>${check}</div>${previous ? "" : `<p>${escapeHtml(message)}</p><details class="technical-details"><summary>Technical transaction details</summary><dl class="checkout-status-facts"><div><dt>Transaction</dt><dd>${transaction}</dd></div>${record.receiptId ? `<div><dt>Receipt</dt><dd><code>${escapeHtml(record.receiptId)}</code></dd></div>` : ""}</dl></details><p class="field-help" role="status" aria-live="polite" data-pending-check-result></p>`}</article>`;
+    };
+    const latest = records[0];
+    const previousConfirmed = records.slice(1).filter((record) => record.state === "confirmed");
+    const previous = previousConfirmed.length
+      ? `<details class="previous-contributions"><summary>Previous contributions (${previousConfirmed.length})</summary><div class="personal-contribution-list">${previousConfirmed.map((record) => contributionRow(record, { previous: true })).join("")}</div></details>`
+      : "";
+    return `<section class="personal-contribution-card" aria-labelledby="personal-contribution-heading"><span class="section-kicker">Payment status</span><h3 id="personal-contribution-heading">Latest payment</h3><div class="personal-contribution-list">${contributionRow(latest)}</div>${previous}</section>`;
   }
 
   function persistedCommunityFundMarkup(fund, goal) {
@@ -2503,13 +2530,13 @@
       : "";
     const contributionForm = safety.ready && assetReady && state.accountId && goalSnapshot
       && (!goal.uiContributionCap || !contributionLimit.reached)
-      ? `<form class="fund-action-card fund-contribution-card" id="community-contribution-form" data-community-contribution novalidate><span class="section-kicker">Support this fund</span><h2>Contribute</h2><p>Choose an amount to support this fund.</p><label for="fund-contribution-amount">${isUsdc ? "Amount ($)" : `Amount in ${assetLabel}`}</label><input id="fund-contribution-amount" name="amount" type="number" inputmode="decimal" min="0.000001" step="0.000001" aria-describedby="fund-contribution-help fund-contribution-terms" required><p class="field-help" id="fund-contribution-help">Small amounts such as $0.01 or $0.10 are supported. The wallet review identifies ${escapeHtml(assetLabel)}, the recipient, and the exact amount.</p>${goal.contributionTerms ? `<p class="fund-contribution-terms" id="fund-contribution-terms"><strong>Contribution terms:</strong> ${escapeHtml(goal.contributionTerms)}</p>` : '<p class="fund-contribution-terms" id="fund-contribution-terms">This public Testnet contribution cannot be personally withdrawn or automatically refunded.</p>'}<div class="form-error-summary" tabindex="-1" role="alert" hidden></div><button class="button button-primary" type="submit">Contribute</button>${personalContribution}</form>`
+      ? `<form class="fund-action-card fund-contribution-card" id="community-contribution-form" data-community-contribution novalidate><span class="section-kicker">Support this fund</span><h2>Contribute</h2><p>Choose an amount to support this fund.</p><label for="fund-contribution-amount">${isUsdc ? "Amount ($)" : `Amount in ${assetLabel}`}</label><input id="fund-contribution-amount" name="amount" type="number" inputmode="decimal" min="0.000001" step="0.000001" required><div class="form-error-summary" tabindex="-1" role="alert" hidden></div><button class="button button-primary" type="submit">Contribute</button>${personalContribution}</form>`
       : "";
     const goalReachedNotice = goal.uiContributionCap && contributionLimit.reached
       ? `<div class="fund-action-card fund-contribution-card" id="community-contribution-panel" tabindex="-1"><span class="section-kicker">Goal reached</span><h2>Contributions are closed in HarvestPool</h2><p>The ${escapeHtml(communityAmount(targetUnits, goal))} goal has been reached. This is an application-level restriction; the blockchain contracts do not enforce the fundraising goal.</p></div>`
       : "";
     const connectContribution = !state.accountId && !contributionLimit.reached
-      ? `<aside class="fund-action-card fund-contribution-card" id="community-contribution-panel" tabindex="-1"><span class="section-kicker">Support this fund</span><h2>Contribute</h2><p>Connect an eligible Testnet wallet to choose an amount and review the exact token transaction before approval.</p><button class="button button-dark" type="button" data-connect-wallet>Connect wallet</button>${goal.contributionTerms ? `<p class="fund-contribution-terms"><strong>Contribution terms:</strong> ${escapeHtml(goal.contributionTerms)}</p>` : ""}</aside>`
+      ? `<aside class="fund-action-card fund-contribution-card" id="community-contribution-panel" tabindex="-1"><span class="section-kicker">Support this fund</span><h2>Contribute</h2><p>Connect your wallet to choose an amount.</p><button class="button button-dark" type="button" data-connect-wallet>Connect wallet</button></aside>`
       : "";
     const contributionUnavailable = state.accountId && !registrationAction && !contributionForm && !goalReachedNotice
       ? '<aside class="fund-action-card fund-contribution-card" id="community-contribution-panel" tabindex="-1"><span class="section-kicker">Contribution status</span><h2>Contributions unavailable</h2><p>HarvestPool has not completed every treasury and token verification required to enable this action.</p></aside>'
@@ -2536,7 +2563,7 @@
     const progressCopy = goalSnapshot
       ? `<div class="goal-progress-label"><strong>${communityProgressPercent(goalSnapshot.contributed, goalSnapshot.target)}% confirmed</strong><span>${escapeHtml(communityAmount(remaining, goal))} left to reach the goal</span></div>`
       : "";
-    const goalCard = `<section class="community-goal-card" aria-labelledby="community-goal-heading"><div class="goal-card-top"><div><span class="section-kicker">Fundraising progress</span><h2 id="community-goal-heading">${escapeHtml(goal.title)}</h2></div><span class="status ${goalStatusClass}"><span></span>${escapeHtml(goalSnapshot?.status || "Verification incomplete")}</span></div><p class="goal-purpose">${escapeHtml(goal.purpose)}</p><dl class="goal-summary-figures"><div><dt>Goal</dt><dd>${escapeHtml(communityAmount(targetUnits, goal))}</dd></div><div><dt>Confirmed</dt><dd>${escapeHtml(confirmedDisplay)}</dd></div><div><dt>Awaiting confirmation</dt><dd>${escapeHtml(communityAmount(awaitingConfirmation, goal))}</dd></div></dl>${goalProgress}${progressCopy}<p class="goal-testnet-note">Last exact receipt verification: ${escapeHtml(communityVerificationTime(fund.activity))} · Testnet only. Confirmed is the durable finalized receipt sum. Awaiting confirmation includes every reliably observed pending contribution, including yours when an exact submitted transaction is known. Hashless or provider-unseen actions are excluded until discovered. Current treasury and payments remain in the financial details below.</p></section>`;
+    const goalCard = `<section class="community-goal-card" aria-labelledby="community-goal-heading"><div class="goal-card-top"><div><span class="section-kicker">Fundraising progress</span><h2 id="community-goal-heading">${escapeHtml(goal.title)}</h2></div><span class="status ${goalStatusClass}"><span></span>${escapeHtml(goalSnapshot?.status || "Verification incomplete")}</span></div><p class="goal-purpose">${escapeHtml(goal.purpose)}</p><dl class="goal-summary-figures"><div><dt>Goal</dt><dd>${escapeHtml(communityAmount(targetUnits, goal))}</dd></div><div><dt>Confirmed</dt><dd>${escapeHtml(confirmedDisplay)}</dd></div><div><dt>Awaiting confirmation</dt><dd>${escapeHtml(communityAmount(awaitingConfirmation, goal))}</dd></div></dl>${goalProgress}${progressCopy}<p class="goal-testnet-note">Awaiting confirmation includes community payments with trustworthy submission evidence that are still being verified.</p></section>`;
     const activeTab = state.communityFund.activeTab || requestedCommunityTab();
     state.communityFund.activeTab = activeTab;
     const countLabel = (count) => count === null ? "" : ` <span>(${count})</span>`;
@@ -4042,11 +4069,25 @@
         onPhase: options.onPhase,
         onError: (message, error) => {
           transactionError = error;
+          if (methodName === "community_contribute_usdc") {
+            console.warn("Community contribution wallet request did not complete.", {
+              kind: transactionErrorKind(error),
+              timedOut: error?.walletResponseTimedOut === true,
+              message: String(error?.message || error || "Unknown wallet error"),
+            });
+          }
           options.onError?.(message, error);
         },
       },
     );
     if (!outcome && transactionError?.transactionState !== "pending") {
+      if (methodName === "community_contribute_usdc") {
+        savePersonalContributionOutcome(saved, {
+          state: transactionErrorKind(transactionError) === "wallet-rejected"
+            ? "wallet-rejected"
+            : "wallet-failed",
+        });
+      }
       pendingActionStore.remove(saved.id);
       if (button) {
         delete button.dataset.submissionLock;
@@ -4060,9 +4101,10 @@
     setBusy(button, true, actionProgressCopy(methodName));
     const transactionHash = confirmationTools.transactionHash(outcome);
     const latestSaved = pendingActionStore.list(saved.signerId).find((item) => item.id === saved.id) || saved;
+    const walletUnresponsive = !outcome && transactionError?.walletResponseTimedOut === true;
     const submittedAction = pendingActionStore.save({
       ...latestSaved,
-      phase: "confirming",
+      phase: walletUnresponsive ? "wallet-unresponsive" : "confirming",
       transactionHash: transactionHash || latestSaved.transactionHash || null,
     });
     if (methodName === "community_contribute_usdc") {
@@ -4104,7 +4146,11 @@
     if (stillPending) {
       pendingActionStore.save({
         ...stillPending,
-        phase: stillPending.transactionHash ? "confirming" : "unresolved",
+        phase: stillPending.transactionHash
+          ? "confirming"
+          : stillPending.phase === "wallet-unresponsive"
+            ? "wallet-unresponsive"
+            : "unresolved",
       });
     }
     renderPendingConfirmationNotice();
@@ -4733,7 +4779,7 @@
       args,
       gas: isUsdc ? "30000000000000" : "Wallet-estimated transfer fee",
       deposit: isUsdc ? "1 yoctoNEAR" : `${amount} yoctoNEAR (${communityFundTools.formatNear(amount)} Testnet NEAR)`,
-      warning: `This public Testnet transfer sends ${isUsdc ? "canonical Testnet USDC" : "Testnet NEAR"} to ${appConfig.communityDaoId}. It is not a purchase contribution and has no automatic refund or personal withdrawal path; spending requires an approved DAO payment proposal.${overfundingRisk ? " Known unresolved contributions plus this payment could exceed the goal. The DAO does not enforce the fundraising cap atomically, so simultaneous overfunding remains possible." : " The DAO does not enforce the fundraising cap atomically, so simultaneous overfunding remains possible."}`,
+      warning: `Testnet only. This public transfer goes to ${appConfig.communityDaoId}; it cannot be personally withdrawn or automatically refunded, and members approve spending.${overfundingRisk ? " Known pending payments plus this payment could exceed the goal because the cap is not enforced atomically." : " The fundraising cap is not enforced atomically."}`,
       confirmLabel: "Continue to Meteor",
     });
     if (!approved) return;
