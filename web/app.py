@@ -156,6 +156,25 @@ def _community_goal_config():
 
 COMMUNITY_GOAL = _community_goal_config()
 COMMUNITY_EVIDENCE = _community_evidence_config()
+COMMUNITY_GARDEN_DAO_ID = "harvestpool-community-garden.sputnikv2.testnet"
+COMMUNITY_GARDEN_GOAL = {
+    "configured": True,
+    "title": "Community Garden",
+    "purpose": "Build a separate, member-governed Testnet USDC fund for community garden supplies and shared growing needs.",
+    "contributionTerms": (
+        "Contributions are public Testnet USDC transfers to this DAO treasury and cannot be "
+        "personally withdrawn or automatically refunded. HarvestPool stops contributions at the "
+        "0.10 USDC target in the app; the DAO and token contracts do not enforce that limit."
+    ),
+    "recipient": "harvestpool-farmer-1.testnet",
+    "currency": "USDC",
+    "decimals": 6,
+    "tokenId": CANONICAL_USDC_TOKEN_ID,
+    "targetUnits": "100000",
+    "targetYocto": "",
+    "configurationError": "",
+    "uiContributionCap": True,
+}
 NEAR_PRICE_URL = os.environ.get(
     "HARVESTPOOL_NEAR_PRICE_URL",
     "https://api.coingecko.com/api/v3/simple/price?ids=near&vs_currencies=usd&include_last_updated_at=true",
@@ -167,8 +186,37 @@ _near_price_cache = None
 _near_price_cache_lock = threading.Lock()
 
 
-def render_page(page, *, purchase_id=None, share_mode=False, fund_slug=None):
+def _configured_community_funds():
+    """Return verified fund configs without sharing DAO accounting or evidence."""
+    funds = {
+        "community-garden": {
+            "slug": "community-garden",
+            "daoId": COMMUNITY_GARDEN_DAO_ID,
+            "goal": COMMUNITY_GARDEN_GOAL,
+            "evidence": {},
+            "category": "Neighborhood improvement",
+        },
+    }
+    if COMMUNITY_DAO_ID and COMMUNITY_GOAL.get("configured"):
+        funds["shared-community-equipment"] = {
+            "slug": "shared-community-equipment",
+            "daoId": COMMUNITY_DAO_ID,
+            "goal": COMMUNITY_GOAL,
+            "evidence": COMMUNITY_EVIDENCE,
+            "category": "Community equipment",
+        }
+    return funds
+
+
+def render_page(
+    page, *, purchase_id=None, share_mode=False, fund_slug=None, community_fund=None
+):
     """Render a client-driven page without moving contract authority into Flask."""
+    active_fund = community_fund or {
+        "daoId": COMMUNITY_DAO_ID,
+        "goal": COMMUNITY_GOAL,
+        "slug": fund_slug,
+    }
     return render_template(
         "index.html",
         page=page,
@@ -179,10 +227,15 @@ def render_page(page, *, purchase_id=None, share_mode=False, fund_slug=None):
         v3_contract_id=V3_CONTRACT_ID,
         contract_version=CONTRACT_VERSION,
         public_base_url=PUBLIC_BASE_URL,
-        community_dao_id=COMMUNITY_DAO_ID,
+        community_dao_id=active_fund.get("daoId", ""),
         community_dao_factory_id=COMMUNITY_DAO_FACTORY_ID,
         community_dao_code_hash=COMMUNITY_DAO_CODE_HASH,
-        community_goal=COMMUNITY_GOAL,
+        community_goal=active_fund.get("goal", {}),
+        community_activity_url=(
+            f"/api/community-funds/{active_fund['slug']}/activity"
+            if active_fund.get("slug") in _configured_community_funds()
+            else "/api/community-fund/activity"
+        ),
         fund_slug=fund_slug,
     )
 
@@ -720,7 +773,9 @@ def _merge_community_activity(evidence, indexed):
     }
 
 
-def _cached_community_activity(dao_id, token_id="", *, force=False):
+def _cached_community_activity(
+    dao_id, token_id="", *, force=False, goal=None, evidence=None
+):
     cache_key = (dao_id, token_id)
     now = time.monotonic()
     with _community_activity_cache_lock:
@@ -728,16 +783,18 @@ def _cached_community_activity(dao_id, token_id="", *, force=False):
         if cached and not force and now - cached["cached_at"] < COMMUNITY_ACTIVITY_CACHE_SECONDS:
             return dict(cached["payload"])
     try:
-        if COMMUNITY_EVIDENCE:
-            evidence = _known_community_activity(
-                dao_id, token_id, COMMUNITY_GOAL, COMMUNITY_EVIDENCE
+        selected_goal = COMMUNITY_GOAL if goal is None else goal
+        selected_evidence = COMMUNITY_EVIDENCE if evidence is None else evidence
+        if selected_evidence:
+            known_evidence = _known_community_activity(
+                dao_id, token_id, selected_goal, selected_evidence
             )
             try:
                 indexed = _community_activity(dao_id, token_id)
             except (OSError, URLError, RuntimeError, ValueError, TypeError, json.JSONDecodeError):
-                payload = evidence
+                payload = known_evidence
             else:
-                payload = _merge_community_activity(evidence, indexed)
+                payload = _merge_community_activity(known_evidence, indexed)
         else:
             payload = _community_activity(dao_id, token_id)
     except (OSError, URLError, RuntimeError, ValueError, TypeError, json.JSONDecodeError):
@@ -778,6 +835,22 @@ def community_fund_activity():
         return jsonify(_cached_community_activity(COMMUNITY_DAO_ID, token_id, force=force))
     except (OSError, URLError, RuntimeError, ValueError, TypeError, json.JSONDecodeError) as error:
         return jsonify({"error": f"Community Goals transaction history unavailable: {error}"}), 503
+
+
+@app.get("/api/community-funds/<slug>/activity")
+def configured_community_fund_activity(slug):
+    fund = _configured_community_funds().get(slug)
+    if not fund:
+        return jsonify({"error": "Verified Community Fund is not configured."}), 404
+    try:
+        force = request.args.get("refresh") == "1"
+        goal = fund["goal"]
+        token_id = goal.get("tokenId", "") if goal.get("configured") else ""
+        return jsonify(_cached_community_activity(
+            fund["daoId"], token_id, force=force, goal=goal, evidence=fund["evidence"]
+        ))
+    except (OSError, URLError, RuntimeError, ValueError, TypeError, json.JSONDecodeError) as error:
+        return jsonify({"error": f"Community Fund transaction history unavailable: {error}"}), 503
 
 
 def get_db():
@@ -954,18 +1027,19 @@ def close_db(_error):
         db.close()
 
 
-def _verified_fund_directory_item():
-    """Return the configured one-goal treasury as a directory item without inventing metadata."""
-    if not COMMUNITY_DAO_ID or not COMMUNITY_GOAL.get("configured"):
+def _verified_fund_directory_item(fund):
+    """Return one verified treasury without mixing its activity with another fund."""
+    dao_id = fund["daoId"]
+    goal = fund["goal"]
+    if not dao_id or not goal.get("configured"):
         return None
     contributed = None
     contributor_count = None
-    has_payment = False
     try:
         activity = _cached_community_activity(
-            COMMUNITY_DAO_ID, COMMUNITY_GOAL.get("tokenId", "")
+            dao_id, goal.get("tokenId", ""), goal=goal, evidence=fund["evidence"]
         )
-        if activity.get("complete"):
+        if activity.get("complete") or activity.get("boundedEvidence"):
             contributions = activity.get("contributions", [])
             contributed = sum(int(item.get("amount", "0")) for item in contributions)
             contributor_count = len({
@@ -973,27 +1047,24 @@ def _verified_fund_directory_item():
                 for item in contributions
                 if item.get("contributor") or item.get("account")
             })
-            has_payment = bool(activity.get("proposalTransactions"))
     except (OSError, URLError, RuntimeError, ValueError, TypeError, json.JSONDecodeError):
         pass
-    target = int(COMMUNITY_GOAL.get("targetUnits") or COMMUNITY_GOAL.get("targetYocto") or "0")
+    target = int(goal.get("targetUnits") or goal.get("targetYocto") or "0")
     if contributed is None:
-        status = "In Progress"
-    elif has_payment:
         status = "In Progress"
     elif contributed >= target:
         status = "Fully Funded"
     else:
         status = "Open for Contributions"
-    decimals = int(COMMUNITY_GOAL.get("decimals", 6))
+    decimals = int(goal.get("decimals", 6))
     amount = None if contributed is None else f"{Decimal(contributed) / (Decimal(10) ** decimals):.2f}"
     target_amount = f"{Decimal(target) / (Decimal(10) ** decimals):.2f}"
     return {
-        "slug": "shared-community-equipment",
-        "title": COMMUNITY_GOAL["title"],
-        "category": "Community equipment",
+        "slug": fund["slug"],
+        "title": goal["title"],
+        "category": fund["category"],
         "location": "Online · NEAR Testnet",
-        "description": COMMUNITY_GOAL["purpose"],
+        "description": goal["purpose"],
         "status": status,
         "targetAmount": target_amount,
         "raisedAmount": amount,
@@ -1001,7 +1072,7 @@ def _verified_fund_directory_item():
         "contribution_deadline": "No deadline configured",
         "isVerifiedFund": True,
         "isMine": False,
-        "detailUrl": "/community-funds/shared-community-equipment",
+        "detailUrl": f"/community-funds/{fund['slug']}",
     }
 
 
@@ -1012,9 +1083,10 @@ def list_community_funds():
         "SELECT * FROM community_fund_requests ORDER BY created_at DESC, id DESC"
     ).fetchall()
     items = []
-    verified = _verified_fund_directory_item()
-    if verified:
-        items.append(verified)
+    for fund in _configured_community_funds().values():
+        verified = _verified_fund_directory_item(fund)
+        if verified:
+            items.append(verified)
     for row in rows:
         item = _public_fund(row, owner_token=owner_token)
         item.update(
@@ -1179,7 +1251,18 @@ def start_community_fund():
 @app.get("/community-funds/shared-community-equipment")
 @app.get("/community-fund")
 def verified_community_fund():
-    return render_page("community_fund", fund_slug="shared-community-equipment")
+    fund = _configured_community_funds().get("shared-community-equipment")
+    return render_page(
+        "community_fund", fund_slug="shared-community-equipment", community_fund=fund
+    )
+
+
+@app.get("/community-funds/community-garden")
+def community_garden_fund():
+    fund = _configured_community_funds()["community-garden"]
+    return render_page(
+        "community_fund", fund_slug="community-garden", community_fund=fund
+    )
 
 
 @app.get("/community-funds/<slug>")

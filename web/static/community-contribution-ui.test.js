@@ -6,10 +6,11 @@ const path = require("node:path");
 const appSource = fs.readFileSync(path.join(__dirname, "app.js"), "utf8");
 const directorySource = fs.readFileSync(path.join(__dirname, "community-directory.js"), "utf8");
 
-test("supported Community Fund keeps a clear USDC contribution action after its target", () => {
-  assert.match(appSource, /Keep supporting this fund/);
+test("Community Garden closes its contribution action at the application target", () => {
+  assert.match(appSource, /Goal Reached\. HarvestPool has disabled additional contributions/);
   assert.match(appSource, />Contribute USDC</);
-  assert.doesNotMatch(appSource, /This contribution would exceed the goal/);
+  assert.match(appSource, /This contribution exceeds the remaining/);
+  assert.match(appSource, /application-level restriction/);
 });
 
 test("contribution review names the exact asset, network, recipient, and no-refund boundary", () => {

@@ -1081,7 +1081,7 @@
         viewOnContract(daoId, "get_last_proposal_id"),
         queryRpc({ request_type: "view_access_key_list", finality: "final", account_id: daoId }),
         queryRpc({ request_type: "view_account", finality: "final", account_id: daoId }),
-        fetch(`/api/community-fund/activity${refreshActivity ? "?refresh=1" : ""}`, { headers: { Accept: "application/json" } }).then(async (response) => {
+        fetch(`${appConfig.communityActivityUrl || "/api/community-fund/activity"}${refreshActivity ? "?refresh=1" : ""}`, { headers: { Accept: "application/json" } }).then(async (response) => {
           const payload = await response.json();
           if (!response.ok) throw new Error(payload.error || "Transaction history is unavailable.");
           return payload;
@@ -2138,6 +2138,9 @@
     const isMemberAccount = Boolean(state.accountId && safety.members.includes(state.accountId));
     const canPropose = Boolean(state.accountId && safety.proposerAccounts.has(state.accountId));
     const targetUnits = String(goal.targetUnits || goal.targetYocto || "0");
+    const contributionLimit = goalSnapshot
+      ? communityFundTools.contributionLimit(goal, goalSnapshot.contributed)
+      : { allowed: false, reached: false, remaining: null };
     const assetLabel = isUsdc ? "USDC on NEAR Testnet" : "Testnet NEAR";
     const safetyMarkup = safety.ready
       ? `<details class="fund-protection-details"><summary>How your money is protected</summary><p>Everyone can see how much money the community has, where it goes, and how much remains. A payment needs ${safety.requiredVotes} of ${safety.memberCount} member approvals.</p><ul><li>No DAO account access keys</li><li>Factory auto-updates are off</li><li>No policy-change, upgrade, or arbitrary-call permission</li><li>The app fixes this goal’s intended recipient; the DAO contract itself relies on member approval of the recipient named in each request.</li></ul><p>Contributions and votes are public on Testnet. Contributions are not private and cannot be personally withdrawn or automatically refunded.</p></details>`
@@ -2149,7 +2152,11 @@
       ? `<div class="fund-action-card"><span class="section-kicker">One-time setup</span><h2>Register the treasury for USDC</h2><p>The DAO must be registered with the USDC contract before it can receive tokens. This uses the token contract’s exact minimum storage deposit and transfers no USDC.</p><button class="button button-primary" type="button" data-community-action="register-token">Review registration</button></div>`
       : "";
     const contributionForm = safety.ready && assetReady && state.accountId && goalSnapshot
-      ? `<form class="fund-action-card" data-community-contribution novalidate><span class="section-kicker">Contribute USDC</span><h2>${BigInt(goalSnapshot.contributed) >= BigInt(targetUnits) ? "Keep supporting this fund" : "Help fund this goal"}</h2><p>Send ${assetLabel} from your wallet to the community’s separate DAO treasury. ${BigInt(goalSnapshot.contributed) >= BigInt(targetUnits) ? "The original target has been reached; additional contributions increase the public treasury total." : ""} The transfer is public and cannot be personally withdrawn or automatically refunded.</p><label for="fund-contribution-amount">${isUsdc ? "Contribution amount (USDC)" : `Amount in ${assetLabel}`}</label><input id="fund-contribution-amount" name="amount" type="number" inputmode="decimal" min="0.000001" step="0.000001" aria-describedby="fund-contribution-help" required><p class="field-help" id="fund-contribution-help">Enter a small Testnet amount. You will review the exact token, network, and recipient before Meteor asks for approval.</p><div class="form-error-summary" tabindex="-1" role="alert" hidden></div><button class="button button-primary" type="submit">Contribute USDC</button></form>`
+      && (!goal.uiContributionCap || !contributionLimit.reached)
+      ? `<form class="fund-action-card" data-community-contribution novalidate><span class="section-kicker">Contribute USDC</span><h2>Help fund this goal</h2><p>Send ${assetLabel} from your wallet to the community’s separate DAO treasury. The transfer is public and cannot be personally withdrawn or automatically refunded.</p><label for="fund-contribution-amount">${isUsdc ? "Contribution amount (USDC)" : `Amount in ${assetLabel}`}</label><input id="fund-contribution-amount" name="amount" type="number" inputmode="decimal" min="0.000001" step="0.000001" aria-describedby="fund-contribution-help" required><p class="field-help" id="fund-contribution-help">Enter a small Testnet amount. You will review the exact token, network, and recipient before Meteor asks for approval.</p><div class="form-error-summary" tabindex="-1" role="alert" hidden></div><button class="button button-primary" type="submit">Contribute USDC</button></form>`
+      : "";
+    const goalReachedNotice = goal.uiContributionCap && contributionLimit.reached
+      ? '<div class="fund-action-card"><span class="section-kicker">Goal Reached</span><h2>Contributions are closed in HarvestPool</h2><p>The 0.10 USDC target has been reached. This is an application-level restriction; the DAO and token contracts do not enforce the fundraising target.</p></div>'
       : "";
     const proposalForm = safety.ready && assetReady && canPropose && activityComplete && goalSnapshot
       && sections.open.length === 0
@@ -2164,7 +2171,7 @@
         ? (BigInt(goalSnapshot.target) - BigInt(goalSnapshot.contributed)).toString()
         : "0")
       : null;
-    const goalCard = `<section class="community-goal-card" aria-labelledby="community-goal-heading"><div class="goal-card-top"><div><span class="section-kicker">Fundraising progress</span><h2 id="community-goal-heading">${escapeHtml(goal.title)}</h2></div><span class="status ${goalSnapshot ? "status-open" : "status-pending"}"><span></span>${escapeHtml(goalSnapshot?.status || "Verification unavailable")}</span></div><p class="goal-purpose">${escapeHtml(goal.purpose)}</p>${goalProgress}<dl class="goal-details"><div><dt>Target</dt><dd>${escapeHtml(communityAmount(targetUnits, goal))}</dd></div><div><dt>Total contributions received</dt><dd>${goalSnapshot ? escapeHtml(communityAmount(goalSnapshot.contributed, goal)) : "Unavailable"}</dd></div><div><dt>Remaining to goal</dt><dd>${remaining === null ? "Unavailable" : escapeHtml(communityAmount(remaining, goal))}</dd></div><div><dt>Payments executed</dt><dd>${spent === null ? "Unavailable" : escapeHtml(communityAmount(spent, goal))}</dd></div><div><dt>Treasury balance available</dt><dd>${assetReady ? escapeHtml(communityAmount(availableBalance, goal)) : "Unavailable"}</dd></div></dl><p class="goal-boundary-note">Totals use the finalized token balance plus verified DAO payment receipts. Payments use ${assetLabel}. Intended recipient: <code>${escapeHtml(goal.recipient)}</code>. ${safety.ready ? `${safety.requiredVotes} of ${safety.memberCount} fixed DAO members must approve each payment; contributors do not automatically become voters.` : "Payment authority verification failed."}</p></section>`;
+    const goalCard = `<section class="community-goal-card" aria-labelledby="community-goal-heading"><div class="goal-card-top"><div><span class="section-kicker">Fundraising progress</span><h2 id="community-goal-heading">${escapeHtml(goal.title)}</h2></div><span class="status ${goalSnapshot ? "status-open" : "status-pending"}"><span></span>${escapeHtml(goalSnapshot?.status || "Verification unavailable")}</span></div><p class="goal-purpose">${escapeHtml(goal.purpose)}</p>${goal.contributionTerms ? `<p class="goal-boundary-note"><strong>Contribution terms:</strong> ${escapeHtml(goal.contributionTerms)}</p>` : ""}${goalProgress}<dl class="goal-details"><div><dt>Target</dt><dd>${escapeHtml(communityAmount(targetUnits, goal))}</dd></div><div><dt>Raised</dt><dd>${goalSnapshot ? escapeHtml(communityAmount(goalSnapshot.contributed, goal)) : "Unavailable"}</dd></div><div><dt>Remaining</dt><dd>${remaining === null ? "Unavailable" : escapeHtml(communityAmount(remaining, goal))}</dd></div><div><dt>Payments executed</dt><dd>${spent === null ? "Unavailable" : escapeHtml(communityAmount(spent, goal))}</dd></div><div><dt>Treasury balance available</dt><dd>${assetReady ? escapeHtml(communityAmount(availableBalance, goal)) : "Unavailable"}</dd></div></dl><p class="goal-boundary-note">Totals use the finalized token balance plus verified DAO payment receipts. Payments use ${assetLabel}. Intended recipient: <code>${escapeHtml(goal.recipient)}</code>. ${safety.ready ? `${safety.requiredVotes} of ${safety.memberCount} fixed DAO members must approve each payment; contributors do not automatically become voters.` : "Payment authority verification failed."}</p></section>`;
     const activeTab = state.communityFund.activeTab || requestedCommunityTab();
     state.communityFund.activeTab = activeTab;
     const countLabel = (count) => count === null ? "" : ` <span>(${count})</span>`;
@@ -2180,7 +2187,7 @@
     const tabMarkup = `<div class="fund-tabs" role="tablist" aria-label="Community Goal sections">${tabs.map(([id, label, count]) => `<button class="fund-tab" id="community-tab-${id}" type="button" role="tab" aria-selected="${activeTab === id}" aria-controls="community-panel-${id}" tabindex="${activeTab === id ? "0" : "-1"}" data-community-tab="${id}">${label}${countLabel(count)}</button>`).join("")}</div>`;
     let panelMarkup = "";
     if (activeTab === "overview") {
-      panelMarkup = `<section class="fund-overview" id="community-panel-overview" role="tabpanel" aria-labelledby="community-tab-overview"><div class="fund-overview-heading"><div><span class="section-kicker">Take part</span><h2>Contribute or review the goal</h2><p><code>${escapeHtml(appConfig.communityDaoId)}</code></p></div>${connectMarkup}</div><div class="fund-stat-grid compact"><div><span>Paid</span><strong>${spent === null ? "Unavailable" : escapeHtml(communityAmount(spent, goal))}</strong><small>Only successful transfer receipts count</small></div><div><span>Needs approval</span><strong>${pending === null ? "Unavailable" : escapeHtml(communityAmount(pending, goal))}</strong><small>Open payment requests</small></div>${approvedUnverified !== "0" ? `<div><span>Confirmation pending</span><strong>${approvedUnverified === null ? "Unavailable" : escapeHtml(communityAmount(approvedUnverified, goal))}</strong><small>Not counted as paid</small></div>` : ""}</div><p class="fund-public-note">Any registered Testnet wallet can contribute ${assetLabel}. Only the fixed DAO members can request or approve payments.</p>${safetyMarkup}${registrationAction || contributionForm ? `<div class="fund-action-grid single">${registrationAction}${contributionForm}</div>` : ""}</section>`;
+      panelMarkup = `<section class="fund-overview" id="community-panel-overview" role="tabpanel" aria-labelledby="community-tab-overview"><div class="fund-overview-heading"><div><span class="section-kicker">Take part</span><h2>Contribute or review the goal</h2><p><code>${escapeHtml(appConfig.communityDaoId)}</code></p></div>${connectMarkup}</div><div class="fund-stat-grid compact"><div><span>Paid</span><strong>${spent === null ? "Unavailable" : escapeHtml(communityAmount(spent, goal))}</strong><small>Only successful transfer receipts count</small></div><div><span>Needs approval</span><strong>${pending === null ? "Unavailable" : escapeHtml(communityAmount(pending, goal))}</strong><small>Open payment requests</small></div>${approvedUnverified !== "0" ? `<div><span>Confirmation pending</span><strong>${approvedUnverified === null ? "Unavailable" : escapeHtml(communityAmount(approvedUnverified, goal))}</strong><small>Not counted as paid</small></div>` : ""}</div><p class="fund-public-note">Any registered Testnet wallet can contribute ${assetLabel}. Only the fixed DAO members can request or approve payments.</p>${safetyMarkup}${registrationAction || contributionForm || goalReachedNotice ? `<div class="fund-action-grid single">${registrationAction}${contributionForm}${goalReachedNotice}</div>` : ""}</section>`;
     } else if (activeTab === "contributions") {
       panelMarkup = `<section class="fund-history" id="community-panel-contributions" role="tabpanel" aria-labelledby="community-tab-contributions"><div class="section-heading-inline"><div><span class="section-kicker">Verified transfers in</span><h2>Contributions</h2></div></div>${communityHistoryMarkup(fund, [], goal, "contributions")}</section>`;
     } else if (activeTab === "votes") {
@@ -4263,6 +4270,30 @@
     if (isUsdc && BigInt(amount) > BigInt(state.communityFund.asset.accountBalance || "0")) {
       setErrorSummary(summary, "This wallet does not have enough Testnet USDC for that contribution.");
       return;
+    }
+    if (goal.uiContributionCap) {
+      const tokenId = communityTokenId(goal);
+      const allocations = communityFundTools.proposalSections(
+        state.communityFund.proposals,
+        state.communityFund.activity,
+        state.communityFund.safety,
+        state.accountId,
+        tokenId,
+      ).allocations;
+      const spent = allocations
+        .filter((allocation) => verifiedCommunityPayment(allocation, state.communityFund.activity))
+        .reduce((total, allocation) => total + BigInt(allocation.amount), 0n).toString();
+      const contributed = communityFundTools.totalContributions(
+        String(state.communityFund.asset?.daoBalance || "0"), spent,
+      );
+      const limit = communityFundTools.contributionLimit(goal, contributed, amount);
+      if (!limit.allowed) {
+        const message = limit.reached
+          ? "Goal Reached. HarvestPool has disabled additional contributions for this fund."
+          : `This contribution exceeds the remaining ${communityAmount(limit.remaining, goal)} application target.`;
+        setErrorSummary(summary, message);
+        return;
+      }
     }
     const receiver = isUsdc ? goal.tokenId : appConfig.communityDaoId;
     const method = isUsdc ? "ft_transfer" : "Native NEAR transfer";

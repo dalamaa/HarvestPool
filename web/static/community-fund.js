@@ -337,11 +337,31 @@
     };
   }
 
+  function contributionLimit(goal, contributionTotal, amount = "0") {
+    const targetUnits = goal?.targetUnits || goal?.targetYocto;
+    if (!goal?.uiContributionCap) {
+      return { allowed: true, reached: false, remaining: null };
+    }
+    if (![targetUnits, contributionTotal, amount].every((value) => /^\d+$/.test(String(value || "")))) {
+      return { allowed: false, reached: false, remaining: null };
+    }
+    const target = BigInt(targetUnits);
+    const contributed = BigInt(contributionTotal);
+    const requested = BigInt(amount);
+    const remaining = target > contributed ? target - contributed : 0n;
+    return {
+      allowed: contributed < target && requested <= remaining,
+      reached: contributed >= target,
+      remaining: remaining.toString(),
+    };
+  }
+
   return {
     DESCRIPTION_PREFIX,
     YOCTO_PER_NEAR,
     allocationFromProposal,
     analyzePolicy,
+    contributionLimit,
     decimalToYocto,
     decodeDescription,
     encodeDescription,

@@ -322,3 +322,31 @@ test("goal progress caps only the bar and keeps actual over-target totals", () =
   assert.equal(snapshot.progressBasisPoints, 10000);
   assert.equal(snapshot.status, "Goal Reached");
 });
+
+test("application target cap allows the remaining amount and blocks overshoot or repeats", () => {
+  const goal = { uiContributionCap: true, targetUnits: "100000" };
+  assert.deepEqual(fund.contributionLimit(goal, "0", "10000"), {
+    allowed: true,
+    reached: false,
+    remaining: "100000",
+  });
+  assert.deepEqual(fund.contributionLimit(goal, "90000", "10000"), {
+    allowed: true,
+    reached: false,
+    remaining: "10000",
+  });
+  assert.equal(fund.contributionLimit(goal, "90000", "10001").allowed, false);
+  assert.deepEqual(fund.contributionLimit(goal, "100000", "1"), {
+    allowed: false,
+    reached: true,
+    remaining: "0",
+  });
+});
+
+test("legacy fund remains uncapped unless its configuration opts in", () => {
+  assert.deepEqual(fund.contributionLimit({ targetUnits: "100000" }, "100000", "1"), {
+    allowed: true,
+    reached: false,
+    remaining: null,
+  });
+});
