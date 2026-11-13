@@ -116,6 +116,11 @@ test("Action Center uses accessible hash-aware tabs and deduplicates issues", ()
   assert.match(appSource, /role="tabpanel" aria-labelledby=/);
   assert.match(appSource, /\["ArrowLeft", "ArrowRight", "Home", "End"\]/);
   assert.match(appSource, /hash === "#issues" \|\| hash === "#raise-an-issue"/);
+  assert.match(appSource, /const ACTION_CENTER_TABS = \["active", "archived", "history", "issues"\]/);
+  assert.match(appSource, /labels = \{ active: "Active", archived: "Archived", history: "History", issues: "Issues" \}/);
+  assert.match(appSource, /data-action="archive-pending-alert"/);
+  assert.match(appSource, /Automatic verification and duplicate protection continue/);
+  assert.match(stylesSource, /@media \(max-width: 420px\)[\s\S]*\.action-center-tabs \{ display: grid; grid-template-columns: repeat\(2, minmax\(0, 1fr\)\); overflow: visible; \}/);
   assert.match(appSource, /window\.addEventListener\("hashchange"/);
   assert.match(appSource, /window\.addEventListener\("popstate"/);
   assert.match(appSource, /popstate[\s\S]*syncWalletAccount\(\)[\s\S]*refreshLiveData\(\{ force: true \}\)/);

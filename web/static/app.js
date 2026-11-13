@@ -42,6 +42,7 @@
   const rpcReadTools = window.HarvestPoolRpcReads;
   if (!rpcReadTools) throw new Error("HarvestPool RPC read helpers did not load.");
   const pendingActionStore = confirmationTools.pendingStore(window.localStorage);
+  const archivedActionAlertStore = actionCenterTools.archivedAlertStore(window.localStorage);
   const personalContributionOutcomePrefix = "harvestpool:community-contribution-outcomes:v1";
 
   function personalContributionOutcomeKey(accountId = state.accountId) {
@@ -78,6 +79,18 @@
       window.localStorage.setItem(personalContributionOutcomeKey(action.signerId), JSON.stringify(records.slice(0, 25)));
     } catch (_error) {
       // The authoritative receipt and attempt ledgers remain server-side.
+    }
+  }
+
+  function dismissPersonalContributionOutcome(outcomeId, accountId = state.accountId) {
+    if (!outcomeId || !accountId) return false;
+    const records = personalContributionOutcomes(accountId)
+      .filter((item) => String(item.id) !== String(outcomeId));
+    try {
+      window.localStorage.setItem(personalContributionOutcomeKey(accountId), JSON.stringify(records));
+      return true;
+    } catch (_error) {
+      return false;
     }
   }
   const submissionGate = confirmationTools.actionGate();
@@ -168,12 +181,13 @@
   const YOCTO_PER_NEAR = 10n ** 24n;
   const PRICE_SCALE = 1_000_000n;
   const RECONCILIATION_MAX_AGE_MS = 5 * 60_000;
-  const TRANSACTION_BUNDLE_VERSION = "2026-11-13.5";
+  const TRANSACTION_BUNDLE_VERSION = "2026-11-13.6";
   const WALLET_RESULT_TIMEOUT_MS = 15_000;
   const EXPLORE_REFRESH_INTERVAL_MS = 15_000;
   const CREATE_SUBMITTED_KEY = "harvestpool:create-submitted:v1";
   let exploreRefreshTimer = null;
   let communityReconciliationTimer = null;
+  let pendingReconciliationPromise = null;
   const manualPaymentCheckTimers = new WeakMap();
   let walletInitializationAttempt = 0;
 
@@ -883,9 +897,9 @@
     return viewValue !== undefined ? viewValue : Boolean(commitment && commitment.state === "Active");
   }
 
-  function actionCenterTasks() {
+  function actionCenterTasks({ scope = "active" } = {}) {
     const showEverySavedAction = appConfig.page === "decisions";
-    return actionCenterTools.eligibleTasks({
+    const tasks = actionCenterTools.eligibleTasks({
       accountId: state.accountId,
       purchases: state.purchases,
       issues: state.issues,
@@ -894,6 +908,12 @@
       pending: showEverySavedAction ? pendingActionStore.list() : (state.accountId ? pendingActionStore.list(state.accountId) : []),
       isMember: isMember(),
       includeSavedPending: showEverySavedAction,
+    });
+    if (scope === "all") return tasks;
+    return tasks.filter((task) => {
+      const archived = task.kind === "pending-transaction"
+        && archivedActionAlertStore.has(task.actionId);
+      return scope === "archived" ? archived : !archived;
     });
   }
 
@@ -906,6 +926,11 @@
   }
 
   function taskLabel(task) {
+    if (task.kind === "pending-transaction" && task.methodName === "community_contribute_usdc") {
+      return task.transactionHash
+        ? "A submitted payment is awaiting confirmation"
+        : "A payment attempt needs a status check";
+    }
     const labels = {
       "offer-vote": "An offer vote needs your decision",
       "fulfillment-vote": "Fulfillment evidence needs your approval",
@@ -913,7 +938,7 @@
       "supplier-consent": "A passed proposal needs your supplier response",
       "supplier-invitation": "A Group Deal proposal needs your review",
       refund: "Your refund is ready to claim",
-      "pending-transaction": "A submitted transaction still needs confirmation",
+      "pending-transaction": "A saved action still needs confirmation",
     };
     return labels[task.kind] || "An action needs your attention";
   }
@@ -1634,7 +1659,9 @@
 
   function renderPendingConfirmationNotice() {
     let notice = $("#pending-transaction-notice");
-    const pending = state.accountId ? pendingActionStore.list(state.accountId) : [];
+    const pending = state.accountId
+      ? pendingActionStore.list(state.accountId).filter((action) => !archivedActionAlertStore.has(action.id))
+      : [];
     const inlineCommunityStatus = appConfig.page === "community_fund"
       && pending.length > 0
       && pending.every((action) => action.methodName === "community_contribute_usdc");
@@ -1663,8 +1690,18 @@
     notice.innerHTML = `<div><strong>${escapeHtml(title)}</strong><span>${escapeHtml(message)}</span></div>`;
   }
 
-  async function reconcilePendingActions({ poll = false } = {}) {
-    if (!state.accountId || state.reconcilingPending) return [];
+  async function reconcilePendingActions(options = {}) {
+    if (!state.accountId) return [];
+    if (pendingReconciliationPromise) return pendingReconciliationPromise;
+    pendingReconciliationPromise = reconcilePendingActionsOnce(options);
+    try {
+      return await pendingReconciliationPromise;
+    } finally {
+      pendingReconciliationPromise = null;
+    }
+  }
+
+  async function reconcilePendingActionsOnce({ poll = false } = {}) {
     state.reconcilingPending = true;
     const pending = pendingActionStore.list(state.accountId);
     const remaining = [];
@@ -1789,6 +1826,18 @@
       state: "uncertain",
       message: result?.reason || "Finalized state is not available yet. The saved action remains protected and no transaction was resubmitted.",
     };
+  }
+
+  function archivePendingActionAlert(actionId) {
+    const action = pendingActionStore.list().find((item) => String(item.id) === String(actionId));
+    if (!action) return false;
+    archivedActionAlertStore.archive({ actionId: action.id, signerId: action.signerId });
+    renderPendingConfirmationNotice();
+    updateActionCenterCount();
+    renderDecisions();
+    const announcement = $("[data-action-center-announcement]", $("#decisions-root"));
+    if (announcement) announcement.textContent = "Alert archived. Automatic verification and duplicate protection continue.";
+    return true;
   }
 
   async function recoverIfTransactionBundleChanged() {
@@ -2409,16 +2458,26 @@
           : record.state === "unresolved"
             ? `We're checking your ${amount} request, but no submitted transaction is visible yet. It is not included in Awaiting confirmation.`
             : `We're checking your ${amount} payment. You don't need to pay again. This observed payment is included in the community awaiting total.`;
-      const statusClass = record.state === "confirmed" ? "status-funded" : "status-pending";
-      const check = record.actionId
+      const statusClass = record.state === "confirmed"
+        ? "status-funded"
+        : ["failed", "wallet-rejected", "wallet-failed"].includes(record.state)
+          ? "status-failed"
+          : "status-pending";
+      const primaryAction = record.actionId
         ? `<button class="button button-outline button-small" type="button" data-action="check-pending-actions" data-pending-action-id="${escapeHtml(record.actionId)}">Check payment status</button>`
         : record.state === "confirmed" && record.transactionHash
           ? communityExplorerLink(record.transactionHash, "View receipt")
           : "";
+      const dismiss = !previous && ["failed", "wallet-rejected", "wallet-failed"].includes(record.state)
+        ? `<button class="button button-outline button-small" type="button" data-action="dismiss-personal-contribution" data-contribution-outcome-id="${escapeHtml(record.id)}">Dismiss</button>`
+        : "";
+      const actions = primaryAction || dismiss
+        ? `<div class="personal-contribution-actions">${primaryAction}${dismiss}</div>`
+        : "";
       const transaction = record.transactionHash
         ? `<code>${escapeHtml(record.transactionHash)}</code>`
         : "Not returned by Meteor";
-      return `<article class="personal-contribution-row${previous ? " personal-contribution-previous" : ""}" data-personal-contribution><div class="personal-contribution-heading"><div>${previous ? "" : '<span class="personal-contribution-label">Your contribution</span>'}<strong>${escapeHtml(amount)}</strong><span class="status ${statusClass}"><span></span>${escapeHtml(status)}</span></div>${check}</div>${previous ? "" : `<p>${escapeHtml(message)}</p><details class="technical-details"><summary>Technical transaction details</summary><dl class="checkout-status-facts"><div><dt>Transaction</dt><dd>${transaction}</dd></div>${record.receiptId ? `<div><dt>Receipt</dt><dd><code>${escapeHtml(record.receiptId)}</code></dd></div>` : ""}</dl></details><p class="field-help" role="status" aria-live="polite" data-pending-check-result></p>`}</article>`;
+      return `<article class="personal-contribution-row${previous ? " personal-contribution-previous" : ""}" data-personal-contribution><div class="personal-contribution-heading"><div>${previous ? "" : '<span class="personal-contribution-label">Your contribution</span>'}<strong>${escapeHtml(amount)}</strong><span class="status ${statusClass}"><span></span>${escapeHtml(status)}</span></div>${actions}</div>${previous ? "" : `<p>${escapeHtml(message)}</p><details class="technical-details"><summary>Technical transaction details</summary><dl class="checkout-status-facts"><div><dt>Transaction</dt><dd>${transaction}</dd></div>${record.receiptId ? `<div><dt>Receipt</dt><dd><code>${escapeHtml(record.receiptId)}</code></dd></div>` : ""}</dl></details><p class="field-help" role="status" aria-live="polite" data-pending-check-result></p>`}</article>`;
     };
     const latest = records[0];
     const previousConfirmed = records.slice(1).filter((record) => record.state === "confirmed");
@@ -3278,19 +3337,21 @@
     return `<section class="action-center-section action-issues"><div class="action-issues-toolbar"><a class="button button-primary button-small" href="#raise-an-issue" data-action="show-raise-issue">Raise an Issue</a></div>${issuesMarkup}<div class="raise-issue-block" id="raise-an-issue" tabindex="-1" ${openRaiseForm ? "" : "hidden"}><div class="section-heading-inline"><div><h3>Raise an Issue</h3></div></div>${renderRaiseIssueForm()}</div></section>`;
   }
 
-  const ACTION_CENTER_TABS = ["pending", "history", "issues"];
+  const ACTION_CENTER_TABS = ["active", "archived", "history", "issues"];
 
   function actionCenterTabFromHash(hash = window.location.hash) {
+    if (hash === "#archived") return "archived";
     if (hash === "#history") return "history";
     if (hash === "#issues" || hash === "#raise-an-issue") return "issues";
-    return "pending";
+    return "active";
   }
 
-  function actionCenterTabsMarkup(activeTab, pendingCount) {
-    const labels = { pending: "Pending", history: "History", issues: "Issues" };
+  function actionCenterTabsMarkup(activeTab, activeCount, archivedCount) {
+    const labels = { active: "Active", archived: "Archived", history: "History", issues: "Issues" };
     return `<div class="action-center-tabs" role="tablist" aria-label="Action Center views">${ACTION_CENTER_TABS.map((tab) => {
       const selected = tab === activeTab;
-      const count = tab === "pending" ? `<span class="action-center-tab-count" aria-label="${pendingCount} pending">${pendingCount}</span>` : "";
+      const value = tab === "active" ? activeCount : tab === "archived" ? archivedCount : null;
+      const count = value === null ? "" : `<span class="action-center-tab-count" aria-label="${value} ${tab}">${value}</span>`;
       return `<button class="action-center-tab" id="action-tab-${tab}" type="button" role="tab" aria-selected="${selected}" aria-controls="action-panel-${tab}" tabindex="${selected ? "0" : "-1"}" data-action-center-tab="${tab}">${labels[tab]}${count}</button>`;
     }).join("")}</div>`;
   }
@@ -3300,7 +3361,7 @@
   }
 
   function activateActionCenterTab(tab, { updateHash = true, focus = false } = {}) {
-    const selectedTab = ACTION_CENTER_TABS.includes(tab) ? tab : "pending";
+    const selectedTab = ACTION_CENTER_TABS.includes(tab) ? tab : "active";
     $$('[role="tab"][data-action-center-tab]', $("#decisions-root")).forEach((button) => {
       const selected = button.dataset.actionCenterTab === selectedTab;
       button.setAttribute("aria-selected", String(selected));
@@ -3332,7 +3393,8 @@
     const root = $("#decisions-root");
     if (!root) return;
     const tasks = actionCenterTasks();
-    const cards = tasks.map((task) => {
+    const archivedTasks = actionCenterTasks({ scope: "archived" });
+    const renderTask = (task, { archived = false } = {}) => {
       if (["offer-vote", "fulfillment-vote"].includes(task.kind)) {
         const purchase = state.purchases.find((item) => String(item.id) === String(task.purchaseId));
         return purchase ? renderDecisionCard(purchase, task.kind === "offer-vote" ? "offer" : "fulfillment") : "";
@@ -3351,26 +3413,39 @@
         return purchase && commitment ? `<article class="decision-card action-card-priority" id="action-${escapeHtml(task.id)}"><div class="purchase-card-top">${statusPill(presentationState(purchase))}<span class="section-kicker">Deal #${escapeHtml(purchase.id)}</span></div><h3>Refund ready</h3><p>${escapeHtml(customerPaymentLabel(purchase, commitment.amount))} is available to the original buyer account.</p><div class="vote-actions"><button class="button button-primary" type="button" data-action="claim-refund" data-purchase-id="${escapeHtml(purchase.id)}">Claim refund</button><a class="button button-outline" href="/purchases/${encodeURIComponent(purchase.id)}">Review deal</a></div></article>` : "";
       }
       if (task.kind === "pending-transaction") {
-        const amount = task.methodName === "community_contribute_usdc" && /^\d+$/.test(String(task.amount || ""))
-          ? `${usdFromTokenUnits(task.amount, 6)} (${escapeHtml(task.amount)} base units)`
+        const isContribution = task.methodName === "community_contribute_usdc";
+        const amount = isContribution && /^\d+$/.test(String(task.amount || ""))
+          ? usdFromTokenUnits(task.amount, 6)
           : escapeHtml(String(task.amount || "Not applicable"));
         const hash = task.transactionHash
           ? communityExplorerLink(task.transactionHash, task.transactionHash)
           : "Not saved — Meteor did not return a hash to this page";
-        const missingHash = task.methodName === "community_contribute_usdc" && !task.transactionHash
-          ? "Meteor returned no hash. Check on-chain state to search for one unambiguous finalized transaction matching this signer, fund, amount, and saved action time. Do not contribute again."
-          : "HarvestPool will verify the exact signer, receiver, method, arguments, amount, and finalized receipts.";
-        return `<article class="decision-card" id="action-${escapeHtml(task.id)}"><span class="status status-pending"><span></span>Confirmation unresolved</span><h3>Check the submitted action</h3><p>${escapeHtml(missingHash)}</p><details class="technical-details"><summary>Saved action details</summary><dl class="checkout-status-facts"><div><dt>Signer</dt><dd><code>${escapeHtml(task.signerId)}</code></dd></div><div><dt>Token contract</dt><dd><code>${escapeHtml(task.receiverId)}</code></dd></div><div><dt>DAO</dt><dd><code>${escapeHtml(task.daoId || "Not applicable")}</code></dd></div><div><dt>Amount</dt><dd>${amount}</dd></div><div><dt>Transaction</dt><dd>${hash}</dd></div></dl></details><div class="vote-actions"><button class="button button-primary" type="button" data-action="check-pending-actions" data-pending-action-id="${escapeHtml(task.actionId)}">Check on-chain state</button></div><p class="field-help" role="status" aria-live="polite" data-pending-check-result></p></article>`;
+        const message = archived
+          ? "This alert is hidden from Active and the notification count. Automatic verification and duplicate protection continue."
+          : isContribution && !task.transactionHash
+            ? "No submitted transaction is identifiable yet. Checking status never sends another payment."
+            : "HarvestPool is checking the exact saved transaction. Checking status never resubmits it.";
+        const status = archived ? "Archived alert" : isContribution ? "Checking your payment" : "Checking status";
+        const heading = isContribution ? `Your contribution: ${amount}` : "Saved action under verification";
+        const archiveButton = archived
+          ? ""
+          : `<button class="button button-outline" type="button" data-action="archive-pending-alert" data-pending-action-id="${escapeHtml(task.actionId)}">Archive alert</button>`;
+        return `<article class="decision-card" id="action-${escapeHtml(task.id)}" ${archived ? 'data-archived-action="true"' : ""}><span class="status status-pending"><span></span>${escapeHtml(status)}</span><h3>${escapeHtml(heading)}</h3><p>${escapeHtml(message)}</p><details class="technical-details"><summary>Saved action details</summary><dl class="checkout-status-facts"><div><dt>Signer</dt><dd><code>${escapeHtml(task.signerId)}</code></dd></div><div><dt>Token contract</dt><dd><code>${escapeHtml(task.receiverId)}</code></dd></div><div><dt>DAO</dt><dd><code>${escapeHtml(task.daoId || "Not applicable")}</code></dd></div><div><dt>Amount</dt><dd>${amount}</dd></div><div><dt>Transaction</dt><dd>${hash}</dd></div></dl></details><div class="vote-actions"><button class="button button-primary" type="button" data-action="check-pending-actions" data-pending-action-id="${escapeHtml(task.actionId)}">Check status</button>${archiveButton}</div><p class="field-help" role="status" aria-live="polite" data-pending-check-result></p></article>`;
       }
       return "";
-    }).filter(Boolean);
+    };
+    const cards = tasks.map((task) => renderTask(task)).filter(Boolean);
+    const archivedCards = archivedTasks.map((task) => renderTask(task, { archived: true })).filter(Boolean);
     const active = cards.length
-      ? `<section class="action-center-active" aria-labelledby="active-actions-heading"><div class="section-heading-inline"><div><span class="section-kicker">Eligible now</span><h2 id="active-actions-heading">${cards.length} ${cards.length === 1 ? "action" : "actions"} need your attention</h2></div></div><div class="decision-grid">${cards.join("")}</div></section>`
+      ? `<section class="action-center-active" aria-labelledby="active-actions-heading"><div class="section-heading-inline"><div><span class="section-kicker">Active</span><h2 id="active-actions-heading">${cards.length} ${cards.length === 1 ? "action" : "actions"} need your attention</h2></div></div><div class="decision-grid">${cards.join("")}</div></section>`
       : state.accountId
         ? `<section class="action-center-section action-center-empty"><div class="empty-icon">${icon("shield")}</div><h2>Nothing needs attention</h2><p>No supplier proposal, vote, refund, or unresolved transaction is currently available to this account.</p></section>`
         : `<section class="action-center-section">${disconnectedAccountMarkup("Eligible votes, supplier responses, and refunds will appear here.")}</section>`;
+    const archived = archivedCards.length
+      ? `<section class="action-center-active" aria-labelledby="archived-actions-heading"><div class="section-heading-inline"><div><span class="section-kicker">Archived</span><h2 id="archived-actions-heading">${archivedCards.length} hidden ${archivedCards.length === 1 ? "alert" : "alerts"}</h2></div></div><div class="decision-grid">${archivedCards.join("")}</div></section>`
+      : `<section class="action-center-section action-center-empty"><div class="empty-icon">${icon("shield")}</div><h2>No archived alerts</h2><p>Archived unresolved alerts remain here while automatic verification continues.</p></section>`;
     const activeTab = actionCenterTabFromHash();
-    root.innerHTML = `${actionCenterTabsMarkup(activeTab, cards.length)}${actionCenterPanelMarkup("pending", activeTab, active.replace("Eligible now", "Pending"))}${actionCenterPanelMarkup("history", activeTab, renderDecisionHistory(state.purchases))}${actionCenterPanelMarkup("issues", activeTab, renderV3Dashboard())}`;
+    root.innerHTML = `<p class="sr-only" role="status" aria-live="polite" data-action-center-announcement></p>${actionCenterTabsMarkup(activeTab, cards.length, archivedCards.length)}${actionCenterPanelMarkup("active", activeTab, active)}${actionCenterPanelMarkup("archived", activeTab, archived)}${actionCenterPanelMarkup("history", activeTab, renderDecisionHistory(state.purchases))}${actionCenterPanelMarkup("issues", activeTab, renderV3Dashboard())}`;
   }
 
   function renderIssueFormPage() {
@@ -5114,9 +5189,23 @@
         await handleCheckV3Confirmation(actionButton);
         return;
       }
+      if (action === "archive-pending-alert") {
+        archivePendingActionAlert(actionButton.dataset.pendingActionId);
+        return;
+      }
+      if (action === "dismiss-personal-contribution") {
+        if (dismissPersonalContributionOutcome(actionButton.dataset.contributionOutcomeId)) {
+          renderCurrentPage();
+        }
+        return;
+      }
       if (action === "check-pending-actions") {
         const pendingActionId = actionButton.dataset.pendingActionId;
         const personalContribution = actionButton.closest("[data-personal-contribution]");
+        const checkedAction = pendingActionId
+          ? pendingActionStore.list().find((item) => String(item.id) === String(pendingActionId))
+          : null;
+        const suppressCommunityToast = checkedAction?.methodName === "community_contribute_usdc";
         const resultNode = (personalContribution || actionButton.closest(".decision-card"))?.querySelector("[data-pending-check-result]");
         setBusy(actionButton, true, "Checking state…");
         if (resultNode) resultNode.textContent = "Checking finalized Testnet state…";
@@ -5124,7 +5213,7 @@
           if (pendingActionId) {
             const result = await checkPendingAction(pendingActionId);
             if (resultNode?.isConnected) resultNode.textContent = result.message;
-            if (!personalContribution) {
+            if (!personalContribution && !suppressCommunityToast) {
               showToast(result.message, result.state === "confirmed" ? "success" : result.state === "failed" ? "error" : "");
             }
           } else {
@@ -5133,12 +5222,12 @@
               ? "Finalized state is still unavailable. The saved action remains protected and no retry was submitted."
               : "The submitted action is no longer pending.";
             if (resultNode?.isConnected) resultNode.textContent = message;
-            if (!personalContribution) showToast(message, remaining.length ? "" : "success");
+            if (!personalContribution && !suppressCommunityToast) showToast(message, remaining.length ? "" : "success");
           }
         } catch (error) {
           const message = `On-chain verification could not finish: ${String(error?.message || error)} The saved action was preserved and no transaction was submitted.`;
           if (resultNode?.isConnected) resultNode.textContent = message;
-          if (!personalContribution) showToast(message, "error");
+          if (!personalContribution && !suppressCommunityToast) showToast(message, "error");
         } finally {
           if (actionButton.isConnected) {
             setBusy(actionButton, false);

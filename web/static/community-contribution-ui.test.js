@@ -52,7 +52,7 @@ test("finalized contribution recovery uses durable exact receipt verification", 
 test("manual pending checks always explain hashless, unavailable, or confirmed state", () => {
   assert.match(appSource, /async function checkPendingAction/);
   assert.match(appSource, /Meteor returned no hash/);
-  assert.match(appSource, /one unambiguous finalized transaction/);
+  assert.match(appSource, /No submitted transaction is identifiable yet/);
   assert.match(appSource, /data-pending-check-result/);
   assert.match(appSource, /On-chain verification could not finish:/);
   assert.match(appSource, /pendingActionStore\.remove\(action\.id\)/);
@@ -124,6 +124,26 @@ test("automatic contribution reconciliation continues after the initial confirma
   assert.match(appSource, /fetchCommunityActivity\(false\)\.then/);
   assert.match(appSource, /wallet-unresponsive/);
   assert.match(appSource, /walletResponseTimedOut/);
+  assert.match(appSource, /if \(pendingReconciliationPromise\) return pendingReconciliationPromise/);
+});
+
+test("archiving a legacy contribution alert preserves verification and duplicate protection", () => {
+  assert.match(appSource, /archivedActionAlertStore = actionCenterTools\.archivedAlertStore/);
+  assert.match(appSource, /pendingActionStore\.list\(state\.accountId\)\.filter\(\(action\) => !archivedActionAlertStore\.has\(action\.id\)\)/);
+  assert.match(appSource, /function archivePendingActionAlert/);
+  assert.match(appSource, /archivedActionAlertStore\.archive/);
+  assert.match(appSource, /data-action="archive-pending-alert"/);
+  assert.match(appSource, /actionCenterTasks\(\{ scope: "archived" \}\)/);
+  assert.match(appSource, /const existingPending = pendingActionStore\.list\(action\.signerId\)/);
+  assert.match(appSource, /scheduleCommunityReconciliation\(remaining\)/);
+  assert.match(appSource, /savePersonalContributionOutcome\(action, result\)[\s\S]*pendingActionStore\.remove\(action\.id\)/);
+});
+
+test("failed pre-submission contribution outcomes can be dismissed without changing payment evidence", () => {
+  assert.match(appSource, /function dismissPersonalContributionOutcome/);
+  assert.match(appSource, /data-action="dismiss-personal-contribution"/);
+  assert.match(appSource, /\["failed", "wallet-rejected", "wallet-failed"\]\.includes\(record\.state\)/);
+  assert.match(appSource, /HarvestPool has no evidence that money was submitted or received/);
 });
 
 test("goal review warns that known pending payments can overfund concurrently", () => {

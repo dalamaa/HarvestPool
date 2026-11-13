@@ -31,6 +31,7 @@
 }
 
 * { box-sizing: border-box; }
+.sr-only { position: absolute !important; width: 1px !important; height: 1px !important; padding: 0 !important; margin: -1px !important; overflow: hidden !important; clip: rect(0, 0, 0, 0) !important; white-space: nowrap !important; border: 0 !important; }
 
 html { scroll-behavior: smooth; }
 :target { scroll-margin-top: 92px; }
@@ -807,6 +808,8 @@ h3 { margin-bottom: 10px; font-size: 21px; line-height: 1.1; }
   .quantity-total { grid-template-columns: 1fr; gap: 6px; }
   .quantity-total strong { text-align: left; }
   .vote-actions { flex-direction: column; }
+  .action-center-tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); overflow: visible; }
+  .action-center-tab { width: 100%; min-width: 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1119,6 +1122,7 @@ h3 { margin-bottom: 10px; font-size: 21px; line-height: 1.1; }
 .personal-contribution-row { padding: 16px; border: 1px solid #b9d8c8; border-radius: 9px; background: var(--white); }
 .personal-contribution-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .personal-contribution-heading > div { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; min-width: 0; }
+.personal-contribution-actions { justify-content: flex-end; }
 .personal-contribution-label { flex-basis: 100%; color: var(--muted); font-size: 12px; font-weight: 600; }
 .personal-contribution-heading strong { color: var(--pine); font-size: 20px; font-variant-numeric: tabular-nums; }
 .personal-contribution-row > p { margin: 10px 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
@@ -1230,6 +1234,7 @@ h3 { margin-bottom: 10px; font-size: 21px; line-height: 1.1; }
   .goal-summary-figures dd { font-size: clamp(17px, 5vw, 21px); }
   .goal-progress-label { align-items: flex-start; flex-direction: column; gap: 3px; }
   .personal-contribution-heading { align-items: flex-start; flex-direction: column; }
+  .personal-contribution-actions { width: 100%; }
   .personal-contribution-heading .button { width: 100%; }
   .fund-stat-grid > div { min-height: 0; }
   .fund-proposal-actions .button, .fund-action-card > .button { width: 100%; }

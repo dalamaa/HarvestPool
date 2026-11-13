@@ -14,6 +14,39 @@
     return issues.find((issue) => String(issue.id) === String(decision?.issue_id)) || null;
   }
 
+  function archivedAlertStore(storage, key = "harvestpool:archived-action-alerts:v1") {
+    function read() {
+      try {
+        const value = JSON.parse(storage?.getItem(key) || "[]");
+        return Array.isArray(value) ? value : [];
+      } catch (_error) {
+        return [];
+      }
+    }
+    function write(records) {
+      try { storage?.setItem(key, JSON.stringify(records.slice(-200))); } catch (_error) { /* storage unavailable */ }
+    }
+    return {
+      list(signerId = null) {
+        return read().filter((record) => !signerId || String(record.signerId) === String(signerId));
+      },
+      has(actionId) {
+        return read().some((record) => String(record.actionId) === String(actionId));
+      },
+      archive(action) {
+        const actionId = String(action?.actionId || action?.id || "");
+        if (!actionId) return null;
+        const record = {
+          actionId,
+          signerId: String(action?.signerId || ""),
+          archivedAt: Number(action?.archivedAt || Date.now()),
+        };
+        write([...read().filter((item) => String(item.actionId) !== actionId), record]);
+        return record;
+      },
+    };
+  }
+
   function eligibleTasks({ accountId, purchases = [], issues = [], decisions = [], votes = new Map(), pending = [], isMember = false, includeSavedPending = false }) {
     const tasks = [];
     if (accountId) purchases.forEach((purchase) => {
@@ -70,10 +103,11 @@
         receiverId: action.receiverId,
         daoId: action.context?.daoId || "",
         amount: action.args?.amount || "",
+        phase: action.phase || "unresolved",
       });
     });
     return tasks;
   }
 
-  return { commitmentFor, eligibleTasks, issueForDecision };
+  return { archivedAlertStore, commitmentFor, eligibleTasks, issueForDecision };
 }));

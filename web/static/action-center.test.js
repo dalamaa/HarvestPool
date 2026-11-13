@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { eligibleTasks } = require("./action-center.js");
+const { archivedAlertStore, eligibleTasks } = require("./action-center.js");
 
 test("returns only account-eligible active actions", () => {
   const tasks = eligibleTasks({
@@ -78,6 +78,44 @@ test("an unresolved contribution exposes the exact saved verification fields", (
   assert.equal(task.daoId, action.context.daoId);
   assert.equal(task.amount, action.args.amount);
   assert.equal(task.transactionHash, null);
+});
+
+test("archived alerts persist without changing the underlying payment attempt", () => {
+  const values = new Map();
+  const storage = {
+    getItem: (key) => values.get(key) || null,
+    setItem: (key, value) => values.set(key, value),
+  };
+  const payment = {
+    id: "garden-contribution",
+    signerId: "dalamaa.testnet",
+    receiverId: "usdc.testnet",
+    methodName: "community_contribute_usdc",
+    args: { amount: "500000" },
+  };
+  const first = archivedAlertStore(storage);
+  first.archive({ actionId: payment.id, signerId: payment.signerId, archivedAt: 123 });
+  const restarted = archivedAlertStore(storage);
+  assert.equal(restarted.has(payment.id), true);
+  assert.deepEqual(restarted.list(payment.signerId), [{
+    actionId: payment.id,
+    signerId: payment.signerId,
+    archivedAt: 123,
+  }]);
+  assert.equal(payment.methodName, "community_contribute_usdc");
+  assert.equal(payment.args.amount, "500000");
+});
+
+test("late callback identity remains archived after the saved action gains a hash", () => {
+  const values = new Map();
+  const storage = {
+    getItem: (key) => values.get(key) || null,
+    setItem: (key, value) => values.set(key, value),
+  };
+  const store = archivedAlertStore(storage);
+  store.archive({ actionId: "same-action", signerId: "dalamaa.testnet" });
+  const lateAction = { id: "same-action", transactionHash: "late-hash", phase: "confirming" };
+  assert.equal(store.has(lateAction.id), true);
 });
 
 test("supplier invitations are eligible only for the named supplier", () => {
