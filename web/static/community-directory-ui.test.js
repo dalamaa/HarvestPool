@@ -20,6 +20,14 @@ test("verified fund cards render first and hydrate finalized activity independen
   assert.match(source, /activity\?\.complete/);
   assert.match(source, /last-verified/);
   assert.match(source, /fund\.activityUrl/);
+  assert.match(source, /verificationPromise/);
+});
+
+test("failed verification shows an explicit bounded retry action", () => {
+  assert.match(source, /data-retry-fund-verification/);
+  assert.match(source, /Retry verification/);
+  assert.match(source, /refresh=1/);
+  assert.match(source, /verificationState = "error"/);
 });
 
 test("directory never presents unavailable verification as a zero balance", () => {

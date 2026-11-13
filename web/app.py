@@ -157,6 +157,12 @@ def _community_goal_config():
 COMMUNITY_GOAL = _community_goal_config()
 COMMUNITY_EVIDENCE = _community_evidence_config()
 COMMUNITY_GARDEN_DAO_ID = "harvestpool-community-garden.sputnikv2.testnet"
+COMMUNITY_GARDEN_EVIDENCE = {
+    "contributionHash": "5beGJJRw2fdwiCfaVqU4Npu5rA2iV5Q1enyf6qnYfdNJ",
+    "contributor": "dalamaa.testnet",
+    "contributionAmount": "100000",
+    "minimumTreasuryBalance": "100000",
+}
 COMMUNITY_GARDEN_GOAL = {
     "configured": True,
     "title": "Community Garden",
@@ -193,7 +199,7 @@ def _configured_community_funds():
             "slug": "community-garden",
             "daoId": COMMUNITY_GARDEN_DAO_ID,
             "goal": COMMUNITY_GARDEN_GOAL,
-            "evidence": {},
+            "evidence": COMMUNITY_GARDEN_EVIDENCE,
             "category": "Neighborhood improvement",
         },
     }
@@ -435,6 +441,24 @@ def _transaction_timestamp(result):
     return timestamp
 
 
+def _finalized_ft_balance(token_id, account_id):
+    args = base64.b64encode(json.dumps({"account_id": account_id}).encode()).decode()
+    result = _community_rpc("query", {
+        "request_type": "call_function",
+        "finality": "final",
+        "account_id": token_id,
+        "method_name": "ft_balance_of",
+        "args_base64": args,
+    })
+    try:
+        balance = json.loads(bytes(result["result"]).decode())
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise ValueError("Finalized treasury balance response was invalid") from error
+    if not str(balance).isdigit():
+        raise ValueError("Finalized treasury balance was not an exact integer")
+    return str(balance)
+
+
 def _known_community_activity(dao_id, token_id, goal, evidence):
     """Verify configured public hashes against finalized RPC without trusting an indexer list."""
     if not evidence or evidence.get("error"):
@@ -470,38 +494,68 @@ def _known_community_activity(dao_id, token_id, goal, evidence):
         dao_id,
         evidence["contributionAmount"],
     )
+    minimum_balance = str(evidence.get("minimumTreasuryBalance") or "")
+    treasury_balance = None
+    if minimum_balance:
+        if not minimum_balance.isdigit():
+            raise ValueError("Configured minimum treasury balance was invalid")
+        treasury_balance = _finalized_ft_balance(token_id, dao_id)
+        if int(treasury_balance) < int(minimum_balance):
+            raise ValueError("Finalized treasury balance was below the verified evidence minimum")
 
-    payment = _community_rpc(
-        "tx",
-        {
-            "tx_hash": evidence["paymentHash"],
-            "sender_account_id": evidence["paymentSigner"],
-            "wait_until": "FINAL",
-        },
+    payment_keys = (
+        "paymentHash", "paymentSigner", "paymentProposalId", "paymentReceiptId", "paymentAmount"
     )
-    if not _successful_execution(payment):
-        raise ValueError("Configured payment transaction did not finalize successfully")
-    payment_tx = payment.get("transaction") or {}
-    _payment_call, payment_args = _function_call(payment_tx, "act_proposal")
-    if (
-        payment_tx.get("hash") != evidence["paymentHash"]
-        or payment_tx.get("signer_id") != evidence["paymentSigner"]
-        or payment_tx.get("receiver_id") != dao_id
-        or str(payment_args.get("id")) != evidence["paymentProposalId"]
-        or payment_args.get("action") != "VoteApprove"
+    if any(evidence.get(key) for key in payment_keys) and not all(
+        evidence.get(key) for key in payment_keys
     ):
-        raise ValueError("Configured payment transaction does not match this DAO proposal")
-    payment_receipt = _successful_nep141_transfer(
-        payment,
-        token_id,
-        dao_id,
-        goal.get("recipient"),
-        evidence["paymentAmount"],
-        evidence["paymentReceiptId"],
-    )
+        raise ValueError("Configured payment evidence was incomplete")
+    has_payment = all(evidence.get(key) for key in payment_keys)
+    proposal_transactions = {}
+    if has_payment:
+        payment = _community_rpc(
+            "tx",
+            {
+                "tx_hash": evidence["paymentHash"],
+                "sender_account_id": evidence["paymentSigner"],
+                "wait_until": "FINAL",
+            },
+        )
+        if not _successful_execution(payment):
+            raise ValueError("Configured payment transaction did not finalize successfully")
+        payment_tx = payment.get("transaction") or {}
+        _payment_call, payment_args = _function_call(payment_tx, "act_proposal")
+        if (
+            payment_tx.get("hash") != evidence["paymentHash"]
+            or payment_tx.get("signer_id") != evidence["paymentSigner"]
+            or payment_tx.get("receiver_id") != dao_id
+            or str(payment_args.get("id")) != evidence["paymentProposalId"]
+            or payment_args.get("action") != "VoteApprove"
+        ):
+            raise ValueError("Configured payment transaction does not match this DAO proposal")
+        payment_receipt = _successful_nep141_transfer(
+            payment,
+            token_id,
+            dao_id,
+            goal.get("recipient"),
+            evidence["paymentAmount"],
+            evidence["paymentReceiptId"],
+        )
+        proposal_transactions[evidence["paymentProposalId"]] = [{
+            "action": "VoteApprove",
+            "signer": evidence["paymentSigner"],
+            "timestamp": _transaction_timestamp(payment),
+            "transactionHash": evidence["paymentHash"],
+            "transfers": [{
+                "amount": evidence["paymentAmount"],
+                "receiver": goal.get("recipient"),
+                "receiptId": payment_receipt,
+                "tokenId": token_id,
+            }],
+        }]
 
     return {
-        "complete": True,
+        "complete": has_payment,
         "boundedEvidence": True,
         "contributions": [
             {
@@ -513,29 +567,13 @@ def _known_community_activity(dao_id, token_id, goal, evidence):
                 "tokenId": token_id,
             }
         ],
-        "proposalTransactions": {
-            evidence["paymentProposalId"]: [
-                {
-                    "action": "VoteApprove",
-                    "signer": evidence["paymentSigner"],
-                    "timestamp": _transaction_timestamp(payment),
-                    "transactionHash": evidence["paymentHash"],
-                    "transfers": [
-                        {
-                            "amount": evidence["paymentAmount"],
-                            "receiver": goal.get("recipient"),
-                            "receiptId": payment_receipt,
-                            "tokenId": token_id,
-                        }
-                    ],
-                }
-            ]
-        },
+        "proposalTransactions": proposal_transactions,
         "source": "Finalized NEAR Testnet RPC evidence",
         "sourceUrl": f"https://testnet.nearblocks.io/address/{dao_id}",
         "tokenId": token_id,
         "verifiedAt": datetime.now(timezone.utc).isoformat(),
         "stale": False,
+        **({"treasuryBalance": treasury_balance} if treasury_balance is not None else {}),
     }
 
 
@@ -1055,6 +1093,7 @@ def _verified_fund_directory_item(fund, *, cached_only=False):
         return None
     contributed = None
     contributor_count = None
+    verification_state = "pending"
     try:
         activity = (
             _peek_community_activity_cache(dao_id, goal.get("tokenId", ""))
@@ -1073,6 +1112,11 @@ def _verified_fund_directory_item(fund, *, cached_only=False):
                 for item in contributions
                 if item.get("contributor") or item.get("account")
             })
+            verification_state = (
+                "last-verified"
+                if activity.get("stale") or (activity.get("boundedEvidence") and not activity.get("complete"))
+                else "current"
+            )
     except (OSError, URLError, RuntimeError, ValueError, TypeError, json.JSONDecodeError):
         pass
     target = int(goal.get("targetUnits") or goal.get("targetYocto") or "0")
@@ -1103,7 +1147,7 @@ def _verified_fund_directory_item(fund, *, cached_only=False):
         "detailUrl": f"/community-funds/{fund['slug']}",
         "activityUrl": f"/api/community-funds/{fund['slug']}/activity",
         "decimals": decimals,
-        "verificationState": "pending" if contributed is None else "current",
+        "verificationState": verification_state,
     }
 
 

@@ -73,7 +73,10 @@
     const progressAttributes = progress === null
       ? 'aria-label="Funding progress is being verified" aria-busy="true"'
       : `role="progressbar" aria-label="Amount raised toward goal" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progress}"`;
-    return `<article class="community-directory-card">${image}<div class="community-card-body"><div class="community-card-top"><span class="status ${statusClass(fund.status)}"><span></span>${escapeHtml(displayStatus(fund.status))}</span>${fund.isVerifiedFund ? '<span class="verified-label">Verified Testnet fund</span>' : ""}</div><h3>${escapeHtml(fund.title)}</h3><p class="community-card-location">${escapeHtml(fund.location)}</p><p class="community-card-description">${escapeHtml(fund.description)}</p><div class="community-card-progress"><div class="goal-progress" ${progressAttributes}><span style="width:${progress ?? 0}%"></span></div><div><strong>${escapeHtml(progressLabel)}</strong><span>${escapeHtml(raisedCopy)} · ${money(fund.targetAmount)} goal</span><small class="community-verification-copy">${escapeHtml(verificationCopy)}</small></div></div><dl class="community-card-meta"><div><dt>Contributors</dt><dd>${escapeHtml(contributorCopy)}</dd></div><div><dt>Deadline</dt><dd>${escapeHtml(readableDate(fund.contribution_deadline))}</dd></div></dl><a class="button button-outline" href="${escapeHtml(fund.detailUrl)}">View fund</a></div></article>`;
+    const retry = fund.verificationState === "error"
+      ? `<button class="button button-outline button-small" type="button" data-retry-fund-verification="${escapeHtml(fund.slug)}">Retry verification</button>`
+      : "";
+    return `<article class="community-directory-card">${image}<div class="community-card-body"><div class="community-card-top"><span class="status ${statusClass(fund.status)}"><span></span>${escapeHtml(displayStatus(fund.status))}</span>${fund.isVerifiedFund ? '<span class="verified-label">Verified Testnet fund</span>' : ""}</div><h3>${escapeHtml(fund.title)}</h3><p class="community-card-location">${escapeHtml(fund.location)}</p><p class="community-card-description">${escapeHtml(fund.description)}</p><div class="community-card-progress"><div class="goal-progress" ${progressAttributes}><span style="width:${progress ?? 0}%"></span></div><div><strong>${escapeHtml(progressLabel)}</strong><span>${escapeHtml(raisedCopy)} · ${money(fund.targetAmount)} goal</span><small class="community-verification-copy">${escapeHtml(verificationCopy)}</small>${retry}</div></div><dl class="community-card-meta"><div><dt>Contributors</dt><dd>${escapeHtml(contributorCopy)}</dd></div><div><dt>Deadline</dt><dd>${escapeHtml(readableDate(fund.contribution_deadline))}</dd></div></dl><a class="button button-outline" href="${escapeHtml(fund.detailUrl)}">View fund</a></div></article>`;
   }
 
   function applyVerifiedActivity(fund, activity, verificationState = null) {
@@ -88,7 +91,8 @@
     fund.verifiedContributorIds = directoryTools.verifiedContributors(contributions);
     fund.contributorsCount = fund.verifiedContributorIds.length;
     fund.status = total >= BigInt(String(fund.targetUnits || "0")) ? "Goal reached" : "Open for contributions";
-    fund.verificationState = verificationState || (activity.stale ? "last-verified" : "current");
+    fund.verificationState = verificationState
+      || (activity.stale || (activity.boundedEvidence && !activity.complete) ? "last-verified" : "current");
     return true;
   }
 
@@ -118,20 +122,32 @@
     return applyVerifiedActivity(fund, cached.activity, "last-verified");
   }
 
-  async function hydrateVerifiedFunds(funds, render) {
-    await Promise.allSettled(funds.filter((fund) => fund.isVerifiedFund && fund.activityUrl).map(async (fund) => {
+  async function hydrateVerifiedFund(fund, render, { force = false } = {}) {
+    if (fund.verificationPromise) return fund.verificationPromise;
+    fund.verificationPromise = (async () => {
       try {
-        const response = await fetch(fund.activityUrl, { headers: { Accept: "application/json" } });
+        const separator = fund.activityUrl.includes("?") ? "&" : "?";
+        const url = force ? `${fund.activityUrl}${separator}refresh=1` : fund.activityUrl;
+        const response = await fetch(url, { headers: { Accept: "application/json" } });
         const activity = await response.json();
         if (!response.ok) throw new Error(activity.error || "Verified activity is unavailable.");
         if (!applyVerifiedActivity(fund, activity)) throw new Error("Verified activity was incomplete.");
         writeVerifiedCache(fund.slug, activity);
         render();
-      } catch (_error) {
+      } catch (error) {
+        fund.verificationError = String(error?.message || error);
         if (fund.raisedAmount === null || fund.raisedAmount === undefined) fund.verificationState = "error";
         render();
+      } finally {
+        fund.verificationPromise = null;
       }
-    }));
+    })();
+    return fund.verificationPromise;
+  }
+
+  async function hydrateVerifiedFunds(funds, render) {
+    await Promise.allSettled(funds.filter((fund) => fund.isVerifiedFund && fund.activityUrl)
+      .map((fund) => hydrateVerifiedFund(fund, render)));
   }
 
   function bindImageFallbacks(root) {
@@ -169,6 +185,15 @@
         : `<div class="empty-state community-empty"><h2>${escapeHtml(emptyTitle)}</h2><p>${escapeHtml(emptyMessage)}</p>${active === "all" ? '<a class="button button-outline" href="/community-funds/start">Start a Community Fund</a>' : ""}</div>`;
       bindImageFallbacks(root);
     };
+    root.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-retry-fund-verification]");
+      if (!button) return;
+      const fund = funds.find((item) => item.slug === button.dataset.retryFundVerification);
+      if (!fund || fund.verificationPromise) return;
+      fund.verificationState = "pending";
+      render();
+      hydrateVerifiedFund(fund, render, { force: true }).catch(() => null);
+    });
     window.addEventListener("harvestpool:wallet-account", (event) => {
       accountId = String(event.detail?.accountId || "");
       render();

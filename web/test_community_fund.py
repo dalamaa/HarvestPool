@@ -234,8 +234,108 @@ class CommunityFundActivityTests(unittest.TestCase):
         args, kwargs = read.call_args
         self.assertEqual(args[0], "harvestpool-community-garden.sputnikv2.testnet")
         self.assertEqual(args[1], web_app.CANONICAL_USDC_TOKEN_ID)
-        self.assertEqual(kwargs["evidence"], {})
+        self.assertEqual(kwargs["evidence"], web_app.COMMUNITY_GARDEN_EVIDENCE)
         self.assertEqual(kwargs["goal"]["targetUnits"], "100000000")
+
+    def test_garden_uses_strict_finalized_rpc_evidence_when_nearblocks_is_rate_limited(self):
+        evidence = web_app.COMMUNITY_GARDEN_EVIDENCE
+        token_id = web_app.CANONICAL_USDC_TOKEN_ID
+        dao_id = web_app.COMMUNITY_GARDEN_DAO_ID
+        args = base64.b64encode(json.dumps({
+            "receiver_id": dao_id,
+            "amount": evidence["contributionAmount"],
+            "memo": "Contribution toward Community Garden",
+        }).encode()).decode()
+        transaction = {
+            "final_execution_status": "FINAL",
+            "status": {"SuccessValue": ""},
+            "transaction": {
+                "hash": evidence["contributionHash"],
+                "signer_id": evidence["contributor"],
+                "receiver_id": token_id,
+                "actions": [{"FunctionCall": {
+                    "method_name": "ft_transfer", "args": args, "deposit": "1",
+                }}],
+            },
+            "transaction_outcome": {"block_hash": "garden-block"},
+            "receipts_outcome": [{
+                "id": "garden-receipt",
+                "outcome": {
+                    "executor_id": token_id,
+                    "status": {"SuccessValue": ""},
+                    "logs": ["EVENT_JSON:" + json.dumps({
+                        "standard": "nep141", "event": "ft_transfer", "data": [{
+                            "old_owner_id": evidence["contributor"],
+                            "new_owner_id": dao_id,
+                            "amount": evidence["contributionAmount"],
+                        }],
+                    })],
+                },
+            }],
+        }
+
+        def rpc(method, params):
+            if method == "tx":
+                return transaction
+            if method == "block":
+                return {"header": {"timestamp_nanosec": "1794566800000000000"}}
+            if method == "query":
+                return {"result": list(json.dumps("100000").encode())}
+            raise AssertionError((method, params))
+
+        rate_limit = HTTPError("nearblocks", 429, "rate limited", {}, None)
+        with (
+            patch.object(web_app, "_community_rpc", side_effect=rpc),
+            patch.object(web_app, "_community_activity", side_effect=rate_limit),
+        ):
+            result = web_app._cached_community_activity(
+                dao_id, token_id, goal=web_app.COMMUNITY_GARDEN_GOAL, evidence=evidence
+            )
+
+        self.assertFalse(result["complete"])
+        self.assertTrue(result["boundedEvidence"])
+        self.assertEqual(result["treasuryBalance"], "100000")
+        self.assertEqual(result["contributions"][0]["transactionHash"], evidence["contributionHash"])
+
+    def test_garden_activity_returns_503_when_rpc_and_indexer_both_fail(self):
+        with (
+            patch.object(web_app, "_known_community_activity", side_effect=URLError("rpc unavailable")),
+            patch.object(web_app, "_community_activity", side_effect=HTTPError("nearblocks", 429, "rate limited", {}, None)),
+        ):
+            response = web_app.app.test_client().get(
+                "/api/community-funds/community-garden/activity"
+            )
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("rpc unavailable", response.get_json()["error"])
+
+    def test_garden_activity_recovers_after_a_total_upstream_failure(self):
+        bounded = {
+            "complete": False, "boundedEvidence": True,
+            "contributions": [{"transactionHash": "known", "amount": "100000"}],
+            "proposalTransactions": {}, "stale": False,
+        }
+        indexed = {
+            "complete": True,
+            "contributions": [
+                {"transactionHash": "known", "amount": "100000"},
+                {"transactionHash": "new", "amount": "10000"},
+            ],
+            "proposalTransactions": {}, "stale": False,
+        }
+        with (
+            patch.object(web_app, "_known_community_activity", side_effect=[URLError("rpc unavailable"), bounded]),
+            patch.object(web_app, "_community_activity", return_value=indexed) as indexer,
+        ):
+            with self.assertRaises(URLError):
+                web_app._cached_community_activity(
+                    "garden.testnet", "usdc.testnet", goal={"currency": "USDC"}, evidence={"known": True}
+                )
+            recovered = web_app._cached_community_activity(
+                "garden.testnet", "usdc.testnet", goal={"currency": "USDC"}, evidence={"known": True}
+            )
+        self.assertTrue(recovered["complete"])
+        self.assertEqual(indexer.call_count, 1)
+        self.assertEqual({item["transactionHash"] for item in recovered["contributions"]}, {"known", "new"})
 
     def test_directory_maps_two_verified_funds_to_independent_daos(self):
         payload = {"complete": True, "contributions": [], "proposalTransactions": {}}
