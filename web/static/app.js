@@ -173,6 +173,8 @@
   const EXPLORE_REFRESH_INTERVAL_MS = 15_000;
   const CREATE_SUBMITTED_KEY = "harvestpool:create-submitted:v1";
   let exploreRefreshTimer = null;
+  let communityReconciliationTimer = null;
+  const manualPaymentCheckTimers = new WeakMap();
   let walletInitializationAttempt = 0;
 
   const $ = (selector, root = document) => root.querySelector(selector);
@@ -1633,7 +1635,10 @@
   function renderPendingConfirmationNotice() {
     let notice = $("#pending-transaction-notice");
     const pending = state.accountId ? pendingActionStore.list(state.accountId) : [];
-    if (!pending.length) {
+    const inlineCommunityStatus = appConfig.page === "community_fund"
+      && pending.length > 0
+      && pending.every((action) => action.methodName === "community_contribute_usdc");
+    if (!pending.length || inlineCommunityStatus) {
       notice?.remove();
       return;
     }
@@ -1677,11 +1682,15 @@
           if (["create_purchase", "create_open_purchase", "create_supplier_offer", "create_purchase_request"].includes(action.methodName) && result.record) {
             state.recoveredCreateRecord = result.record;
           }
-          showToast(actionSuccessCopy(action.methodName), "success");
+          if (action.methodName !== "community_contribute_usdc") {
+            showToast(actionSuccessCopy(action.methodName), "success");
+          }
         } else if (result?.state === "failed") {
           savePersonalContributionOutcome(action, result);
           pendingActionStore.remove(action.id);
-          showToast("That action did not complete. Your saved information is unchanged.", "error");
+          if (action.methodName !== "community_contribute_usdc") {
+            showToast("That action did not complete. Your saved information is unchanged.", "error");
+          }
         } else {
           const unresolved = poll ? pendingActionStore.save({ ...action, phase: "unresolved" }) : action;
           remaining.push(unresolved);
@@ -1690,7 +1699,7 @@
       if (pending.length) {
         await Promise.allSettled([
           appConfig.page === "community_fund"
-            ? loadCommunityFundData({ refreshActivity: true })
+            ? fetchCommunityActivity(false).then((activity) => applyCommunityActivity(activity))
             : loadBaseData(),
         ]);
         if (["details", "agreement", "issue_form", "supplier_invitation"].includes(appConfig.page)) {
@@ -1700,10 +1709,53 @@
         renderCurrentPage();
       }
       renderPendingConfirmationNotice();
+      scheduleCommunityReconciliation(remaining);
       return remaining;
     } finally {
       state.reconcilingPending = false;
     }
+  }
+
+  function scheduleCommunityReconciliation(actions = null) {
+    if (communityReconciliationTimer !== null) window.clearTimeout(communityReconciliationTimer);
+    communityReconciliationTimer = null;
+    const pending = actions || (state.accountId ? pendingActionStore.list(state.accountId) : []);
+    if (!pending.some((action) => action.methodName === "community_contribute_usdc")) return;
+    communityReconciliationTimer = window.setTimeout(async () => {
+      communityReconciliationTimer = null;
+      if (document.visibilityState !== "visible") {
+        scheduleCommunityReconciliation();
+        return;
+      }
+      const remaining = await reconcilePendingActions().catch(() => pending);
+      scheduleCommunityReconciliation(remaining);
+    }, 5000);
+  }
+
+  function startManualPaymentCheckCooldown(button, seconds = 5) {
+    const existing = manualPaymentCheckTimers.get(button);
+    if (existing) window.clearInterval(existing);
+    const original = button.dataset.originalLabel || button.innerHTML || "Check payment status";
+    button.dataset.originalLabel = original;
+    const readyAt = Date.now() + seconds * 1000;
+    const update = () => {
+      const remaining = Math.max(0, Math.ceil((readyAt - Date.now()) / 1000));
+      if (!button.isConnected || remaining === 0) {
+        window.clearInterval(manualPaymentCheckTimers.get(button));
+        manualPaymentCheckTimers.delete(button);
+        if (button.isConnected) {
+          button.disabled = false;
+          button.removeAttribute("aria-disabled");
+          button.innerHTML = original;
+        }
+        return;
+      }
+      button.disabled = true;
+      button.setAttribute("aria-disabled", "true");
+      button.textContent = `Check again in ${remaining}s`;
+    };
+    update();
+    manualPaymentCheckTimers.set(button, window.setInterval(update, 250));
   }
 
   async function checkPendingAction(actionId) {
@@ -2079,7 +2131,7 @@
       "Review the request in your wallet…",
       "Approve only after checking the account, amount, and action.",
     );
-    showToast("Review the request in your wallet.");
+    if (!options.suppressToast) showToast("Review the request in your wallet.");
     try {
       const walletWait = await confirmationTools.waitForWalletResult(
         Promise.resolve().then(action),
@@ -2093,11 +2145,11 @@
       if (walletWait.state === "rejected") throw walletWait.error;
       const walletResult = walletWait.value;
       options.onPhase?.("submitted", "Your request was submitted.", "We’re checking the result now.");
-      showToast("Request sent. Checking the result.");
+      if (!options.suppressToast) showToast("Request sent. Checking the result.");
       const outcome = confirmedTransaction(walletResult);
       if (options.confirmOnReturn !== false) {
         options.onPhase?.("confirmed", options.confirmedTitle || "Action confirmed", successMessage);
-        showToast(successMessage, "success");
+        if (!options.suppressToast) showToast(successMessage, "success");
       }
       return outcome;
     } catch (error) {
@@ -2116,7 +2168,7 @@
             : ["failed", "Transaction failed", "The contract did not confirm this action. Your draft is safe."];
       options.onPhase?.(...phaseCopy);
       options.onError?.(message, error);
-      showToast(message, error?.transactionState === "pending" ? "" : "error");
+      if (!options.suppressToast) showToast(message, error?.transactionState === "pending" ? "" : "error");
       return null;
     } finally {
       setBusy(button, false);
@@ -2292,8 +2344,12 @@
         receiptId: record.receiptId,
         updatedAt: Number(record.timestamp || 0) / 1_000_000,
       }));
+    const confirmedHashes = new Set(confirmed.map((record) => String(record.transactionHash || "")));
+    const visiblePending = pending.filter((action) =>
+      !action.transactionHash || !confirmedHashes.has(String(action.transactionHash))
+    );
     const seen = new Set([
-      ...pending.map((action) => String(action.transactionHash || action.id)),
+      ...visiblePending.map((action) => String(action.transactionHash || action.id)),
       ...confirmed.map((record) => String(record.transactionHash || record.id)),
     ]);
     const resolved = personalContributionOutcomes().filter((record) => {
@@ -2303,7 +2359,7 @@
       return true;
     });
     const records = [
-      ...pending.map((action) => ({
+      ...visiblePending.map((action) => ({
         id: action.id,
         actionId: action.id,
         amount: String(action.args?.amount || "0"),
@@ -2325,22 +2381,24 @@
             ? "Outcome unresolved"
             : "Awaiting confirmation";
       const message = record.state === "confirmed"
-        ? `Your ${amount} payment has one exact finalized transfer receipt.`
+        ? `Your ${amount} payment is confirmed.`
         : record.state === "failed"
           ? `Your ${amount} transaction reached a final outcome without a verified contribution.`
           : record.state === "unresolved"
             ? `Meteor returned no transaction hash for your ${amount} payment. It remains protected from duplicate submission but is not included in the community awaiting total.`
-            : `We haven't confirmed your ${amount} payment yet. Please don't pay again while we check its status.`;
+            : `We're checking your ${amount} payment. You don't need to pay again. This observed payment is included in the community awaiting total.`;
       const statusClass = record.state === "confirmed" ? "status-funded" : "status-pending";
       const check = record.actionId
         ? `<button class="button button-outline button-small" type="button" data-action="check-pending-actions" data-pending-action-id="${escapeHtml(record.actionId)}">Check payment status</button>`
-        : "";
+        : record.state === "confirmed" && record.transactionHash
+          ? communityExplorerLink(record.transactionHash, "View receipt")
+          : "";
       const transaction = record.transactionHash
         ? `<code>${escapeHtml(record.transactionHash)}</code>`
         : "Not returned by Meteor";
-      return `<article class="personal-contribution-row" data-personal-contribution><div class="personal-contribution-heading"><div><strong>${escapeHtml(amount)}</strong><span class="status ${statusClass}"><span></span>${escapeHtml(status)}</span></div>${check}</div><p>${escapeHtml(message)}</p><details class="technical-details"><summary>Technical transaction details</summary><dl class="checkout-status-facts"><div><dt>Transaction</dt><dd>${transaction}</dd></div>${record.receiptId ? `<div><dt>Receipt</dt><dd><code>${escapeHtml(record.receiptId)}</code></dd></div>` : ""}</dl></details><p class="field-help" role="status" aria-live="polite" data-pending-check-result></p></article>`;
+      return `<article class="personal-contribution-row" data-personal-contribution><div class="personal-contribution-heading"><div><span class="personal-contribution-label">Your contribution</span><strong>${escapeHtml(amount)}</strong><span class="status ${statusClass}"><span></span>${escapeHtml(status)}</span></div>${check}</div><p>${escapeHtml(message)}</p><details class="technical-details"><summary>Technical transaction details</summary><dl class="checkout-status-facts"><div><dt>Transaction</dt><dd>${transaction}</dd></div>${record.receiptId ? `<div><dt>Receipt</dt><dd><code>${escapeHtml(record.receiptId)}</code></dd></div>` : ""}</dl></details><p class="field-help" role="status" aria-live="polite" data-pending-check-result></p></article>`;
     }).join("");
-    return `<section class="personal-contribution-card" aria-labelledby="personal-contribution-heading"><span class="section-kicker">Payment status</span><h3 id="personal-contribution-heading">Your contribution</h3><div class="personal-contribution-list">${rows}</div></section>`;
+    return `<section class="personal-contribution-card" aria-labelledby="personal-contribution-heading"><span class="section-kicker">Payment status</span><h3 id="personal-contribution-heading">What happened to your payment</h3><div class="personal-contribution-list">${rows}</div></section>`;
   }
 
   function persistedCommunityFundMarkup(fund, goal) {
@@ -2439,12 +2497,13 @@
     const connectMarkup = !state.accountId
       ? '<button class="button button-dark" type="button" data-connect-wallet>Connect wallet to contribute or vote</button>'
       : `<div class="fund-membership ${isMemberAccount ? "is-member" : ""}"><strong>${isMemberAccount ? "You can contribute and vote" : "You can contribute · voting is for members"}</strong><span><code>${escapeHtml(state.accountId)}</code>${isMemberAccount ? " is one of the fixed DAO members." : " is not in the fixed voting group."}</span></div>`;
+    const personalContribution = personalContributionMarkup(fund, goal);
     const registrationAction = isUsdc && safety.ready && state.accountId && !fund.asset?.daoStorage
       ? `<div class="fund-action-card"><span class="section-kicker">One-time setup</span><h2>Register the treasury for USDC</h2><p>The DAO must be registered with the USDC contract before it can receive tokens. This uses the token contract’s exact minimum storage deposit and transfers no USDC.</p><button class="button button-primary" type="button" data-community-action="register-token">Review registration</button></div>`
       : "";
     const contributionForm = safety.ready && assetReady && state.accountId && goalSnapshot
       && (!goal.uiContributionCap || !contributionLimit.reached)
-      ? `<form class="fund-action-card fund-contribution-card" id="community-contribution-form" data-community-contribution novalidate><span class="section-kicker">Support this fund</span><h2>Contribute</h2><p>Choose an amount to support this fund.</p><label for="fund-contribution-amount">${isUsdc ? "Amount ($)" : `Amount in ${assetLabel}`}</label><input id="fund-contribution-amount" name="amount" type="number" inputmode="decimal" min="0.000001" step="0.000001" aria-describedby="fund-contribution-help fund-contribution-terms" required><p class="field-help" id="fund-contribution-help">Small amounts such as $0.01 or $0.10 are supported. The wallet review identifies ${escapeHtml(assetLabel)}, the recipient, and the exact amount.</p>${goal.contributionTerms ? `<p class="fund-contribution-terms" id="fund-contribution-terms"><strong>Contribution terms:</strong> ${escapeHtml(goal.contributionTerms)}</p>` : '<p class="fund-contribution-terms" id="fund-contribution-terms">This public Testnet contribution cannot be personally withdrawn or automatically refunded.</p>'}<div class="form-error-summary" tabindex="-1" role="alert" hidden></div><button class="button button-primary" type="submit">Contribute</button></form>`
+      ? `<form class="fund-action-card fund-contribution-card" id="community-contribution-form" data-community-contribution novalidate><span class="section-kicker">Support this fund</span><h2>Contribute</h2><p>Choose an amount to support this fund.</p><label for="fund-contribution-amount">${isUsdc ? "Amount ($)" : `Amount in ${assetLabel}`}</label><input id="fund-contribution-amount" name="amount" type="number" inputmode="decimal" min="0.000001" step="0.000001" aria-describedby="fund-contribution-help fund-contribution-terms" required><p class="field-help" id="fund-contribution-help">Small amounts such as $0.01 or $0.10 are supported. The wallet review identifies ${escapeHtml(assetLabel)}, the recipient, and the exact amount.</p>${goal.contributionTerms ? `<p class="fund-contribution-terms" id="fund-contribution-terms"><strong>Contribution terms:</strong> ${escapeHtml(goal.contributionTerms)}</p>` : '<p class="fund-contribution-terms" id="fund-contribution-terms">This public Testnet contribution cannot be personally withdrawn or automatically refunded.</p>'}<div class="form-error-summary" tabindex="-1" role="alert" hidden></div><button class="button button-primary" type="submit">Contribute</button>${personalContribution}</form>`
       : "";
     const goalReachedNotice = goal.uiContributionCap && contributionLimit.reached
       ? `<div class="fund-action-card fund-contribution-card" id="community-contribution-panel" tabindex="-1"><span class="section-kicker">Goal reached</span><h2>Contributions are closed in HarvestPool</h2><p>The ${escapeHtml(communityAmount(targetUnits, goal))} goal has been reached. This is an application-level restriction; the blockchain contracts do not enforce the fundraising goal.</p></div>`
@@ -2456,6 +2515,7 @@
       ? '<aside class="fund-action-card fund-contribution-card" id="community-contribution-panel" tabindex="-1"><span class="section-kicker">Contribution status</span><h2>Contributions unavailable</h2><p>HarvestPool has not completed every treasury and token verification required to enable this action.</p></aside>'
       : "";
     const primaryContributionAction = registrationAction || contributionForm || goalReachedNotice || connectContribution || contributionUnavailable;
+    const contributionColumn = `<div class="community-contribution-column">${primaryContributionAction}${contributionForm ? "" : personalContribution}</div>`;
     const proposalForm = safety.ready && assetReady && canPropose && activityComplete && goalSnapshot
       && sections.open.length === 0
       ? `<form class="fund-action-card" data-community-proposal novalidate><span class="section-kicker">Request payment</span><h2>Ask members to approve</h2><div class="goal-fixed-recipient"><span>Intended recipient</span><code>${escapeHtml(goal.recipient)}</code><small>HarvestPool fixes this recipient in its request form. SputnikDAO itself relies on members checking and approving the recipient written into the request.</small></div><div class="field"><label for="fund-allocation-amount">${isUsdc ? "Amount ($)" : `Amount in ${assetLabel}`}</label><input id="fund-allocation-amount" name="amount" type="number" inputmode="decimal" min="0.000001" step="0.000001" required></div><div class="field"><label for="fund-allocation-reason">Why is this payment needed?</label><textarea id="fund-allocation-reason" name="reason" maxlength="500" rows="3" required></textarea></div><p class="field-help">This public request uses a ${communityFundTools.formatNear(fund.policy.proposal_bond)} Testnet NEAR proposal bond. The payment is sent only after the required approvals.</p><div class="form-error-summary" tabindex="-1" role="alert" hidden></div><button class="button button-primary" type="submit">Request payment</button></form>`
@@ -2476,8 +2536,7 @@
     const progressCopy = goalSnapshot
       ? `<div class="goal-progress-label"><strong>${communityProgressPercent(goalSnapshot.contributed, goalSnapshot.target)}% confirmed</strong><span>${escapeHtml(communityAmount(remaining, goal))} left to reach the goal</span></div>`
       : "";
-    const goalCard = `<section class="community-goal-card" aria-labelledby="community-goal-heading"><div class="goal-card-top"><div><span class="section-kicker">Fundraising progress</span><h2 id="community-goal-heading">${escapeHtml(goal.title)}</h2></div><span class="status ${goalStatusClass}"><span></span>${escapeHtml(goalSnapshot?.status || "Verification incomplete")}</span></div><p class="goal-purpose">${escapeHtml(goal.purpose)}</p><dl class="goal-summary-figures"><div><dt>Goal</dt><dd>${escapeHtml(communityAmount(targetUnits, goal))}</dd></div><div><dt>Confirmed</dt><dd>${escapeHtml(confirmedDisplay)}</dd></div><div><dt>Awaiting confirmation</dt><dd>${escapeHtml(communityAmount(awaitingConfirmation, goal))}</dd></div></dl>${goalProgress}${progressCopy}${goalSnapshot && !contributionLimit.reached ? '<button class="button button-primary goal-summary-action" type="button" data-community-action="support">Support this fund</button>' : ""}<p class="goal-testnet-note">Last exact receipt verification: ${escapeHtml(communityVerificationTime(fund.activity))} · Testnet only. Confirmed is the durable finalized receipt sum. Awaiting confirmation includes only reported payments whose exact transaction was observed; hashless or provider-unseen actions are excluded. Current treasury and payments remain in the financial details below.</p></section>`;
-    const personalContribution = personalContributionMarkup(fund, goal);
+    const goalCard = `<section class="community-goal-card" aria-labelledby="community-goal-heading"><div class="goal-card-top"><div><span class="section-kicker">Fundraising progress</span><h2 id="community-goal-heading">${escapeHtml(goal.title)}</h2></div><span class="status ${goalStatusClass}"><span></span>${escapeHtml(goalSnapshot?.status || "Verification incomplete")}</span></div><p class="goal-purpose">${escapeHtml(goal.purpose)}</p><dl class="goal-summary-figures"><div><dt>Goal</dt><dd>${escapeHtml(communityAmount(targetUnits, goal))}</dd></div><div><dt>Confirmed</dt><dd>${escapeHtml(confirmedDisplay)}</dd></div><div><dt>Awaiting confirmation</dt><dd>${escapeHtml(communityAmount(awaitingConfirmation, goal))}</dd></div></dl>${goalProgress}${progressCopy}<p class="goal-testnet-note">Last exact receipt verification: ${escapeHtml(communityVerificationTime(fund.activity))} · Testnet only. Confirmed is the durable finalized receipt sum. Awaiting confirmation includes every reliably observed pending contribution, including yours when an exact submitted transaction is known. Hashless or provider-unseen actions are excluded until discovered. Current treasury and payments remain in the financial details below.</p></section>`;
     const activeTab = state.communityFund.activeTab || requestedCommunityTab();
     state.communityFund.activeTab = activeTab;
     const countLabel = (count) => count === null ? "" : ` <span>(${count})</span>`;
@@ -2509,7 +2568,7 @@
     } else {
       panelMarkup = `<section class="fund-history" id="community-panel-activity" role="tabpanel" aria-labelledby="community-tab-activity"><div class="section-heading-inline"><div><span class="section-kicker">Public transaction record</span><h2>Money in and out</h2></div><a class="text-link" href="${escapeHtml(fund.activity?.sourceUrl || `https://testnet.nearblocks.io/address/${appConfig.communityDaoId}`)}" target="_blank" rel="noopener noreferrer">Open NearBlocks <span aria-hidden="true">↗</span></a></div>${communityHistoryMarkup(fund, allocations, goal)}</section>`;
     }
-    root.innerHTML = `<div class="community-fund-primary"><div class="community-summary-column">${goalCard}${personalContribution}</div>${primaryContributionAction}</div>${tabMarkup}${panelMarkup}`;
+    root.innerHTML = `<div class="community-fund-primary"><div class="community-summary-column">${goalCard}</div>${contributionColumn}</div>${tabMarkup}${panelMarkup}`;
   }
 
   function renderCurrentPage() {
@@ -3929,7 +3988,12 @@
     const existingPending = pendingActionStore.list(action.signerId).find((item) => item.id === actionKey);
     if (existingPending) {
       renderPendingConfirmationNotice();
-      showToast(`${actionProgressCopy(methodName)} We’ll update this page automatically.`);
+      if (methodName === "community_contribute_usdc") {
+        renderCurrentPage();
+        scheduleCommunityReconciliation();
+      } else {
+        showToast(`${actionProgressCopy(methodName)} We’ll update this page automatically.`);
+      }
       return null;
     }
 
@@ -3953,7 +4017,9 @@
       const updated = confirmationTools.persistTransactionHash(pendingActionStore, saved, lateResult.value);
       if (!updated) return null;
       renderPendingConfirmationNotice();
-      showToast("Meteor returned the transaction. Checking finalized on-chain state.");
+      if (methodName !== "community_contribute_usdc") {
+        showToast("Meteor returned the transaction. Checking finalized on-chain state.");
+      }
       window.setTimeout(() => reconcilePendingActions({ poll: true }).catch(() => null), 0);
       return updated;
     };
@@ -3970,6 +4036,7 @@
       successMessage,
       {
         confirmOnReturn: false,
+        suppressToast: methodName === "community_contribute_usdc",
         onLateResult: captureLateWalletResult,
         failureMessage: options.failureMessage || "We couldn't complete this action. Your selection is safe. Please check its status before trying again.",
         onPhase: options.onPhase,
@@ -3998,6 +4065,11 @@
       phase: "confirming",
       transactionHash: transactionHash || latestSaved.transactionHash || null,
     });
+    if (methodName === "community_contribute_usdc") {
+      // Paint the personal outcome immediately, including hashless Meteor returns,
+      // while strict discovery/finalized receipt verification continues below.
+      renderCurrentPage();
+    }
     const result = await waitForActionConfirmation(submittedAction, {
       attempts: options.confirmationAttempts,
       delayMs: options.confirmationDelayMs,
@@ -4007,9 +4079,16 @@
     if (result?.state === "confirmed") {
       savePersonalContributionOutcome(submittedAction, result);
       pendingActionStore.remove(submittedAction.id);
-      await refreshLiveData({ force: true });
+      if (methodName === "community_contribute_usdc") {
+        renderCurrentPage();
+        loadCommunityFundData({ refreshActivity: false })
+          .then(() => renderCurrentPage())
+          .catch(() => null);
+      } else {
+        await refreshLiveData({ force: true });
+      }
       renderPendingConfirmationNotice();
-      showToast(successMessage, "success");
+      if (methodName !== "community_contribute_usdc") showToast(successMessage, "success");
       return result;
     }
     if (result?.state === "failed") {
@@ -4017,7 +4096,8 @@
       pendingActionStore.remove(submittedAction.id);
       if (button) delete button.dataset.submissionLock;
       renderPendingConfirmationNotice();
-      showToast("The contract rejected this action. No retry was submitted.", "error");
+      if (methodName === "community_contribute_usdc") renderCurrentPage();
+      else showToast("The contract rejected this action. No retry was submitted.", "error");
       return result;
     }
     const stillPending = pendingActionStore.list(submittedAction.signerId).find((item) => item.id === submittedAction.id);
@@ -4030,7 +4110,8 @@
     renderPendingConfirmationNotice();
     if (methodName === "community_contribute_usdc") renderCurrentPage();
     if (button) setBusy(button, true, actionProgressCopy(methodName));
-    showToast(`${actionProgressCopy(methodName)} We’ll update this page automatically.`);
+    if (methodName === "community_contribute_usdc") scheduleCommunityReconciliation();
+    else showToast(`${actionProgressCopy(methodName)} We’ll update this page automatically.`);
     return null;
   }
 
@@ -4607,16 +4688,13 @@
       return;
     }
     const preflightButton = $("button[type='submit']", form);
-    setBusy(preflightButton, true, "Refreshing fund totals…");
+    setBusy(preflightButton, true, "Checking contribution total…");
     try {
-      const [freshActivity, freshTreasury] = await Promise.allSettled([
-        fetchCommunityActivity(true),
-        isUsdc ? viewOnContract(goal.tokenId, "ft_balance_of", { account_id: appConfig.communityDaoId }) : Promise.resolve(null),
-      ]);
-      if (freshActivity.status === "fulfilled" && !freshActivity.value?.error) applyCommunityActivity(freshActivity.value);
-      if (freshTreasury.status === "fulfilled" && freshTreasury.value !== null) {
-        state.communityFund.asset.daoBalance = String(freshTreasury.value || "0");
-      }
+      // This endpoint reads the durable local receipt/attempt ledger only. A forced
+      // indexer crawl and a DAO balance RPC do not make this direct token transfer
+      // safer, and previously delayed the review dialog by many seconds.
+      const freshActivity = await fetchCommunityActivity(false);
+      if (!freshActivity?.error) applyCommunityActivity(freshActivity);
     } finally {
       setBusy(preflightButton, false);
     }
@@ -4942,19 +5020,6 @@
       if (communityButton) {
         event.preventDefault();
         const action = communityButton.dataset.communityAction;
-        if (action === "support") {
-          const panel = $("#community-contribution-form, #community-contribution-panel");
-          const focusTarget = $("#fund-contribution-amount", panel) || $("[data-connect-wallet]", panel) || panel;
-          if (panel) {
-            panel.classList.add("is-highlighted");
-            panel.scrollIntoView({
-              behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
-              block: "center",
-            });
-            focusTarget?.focus({ preventScroll: true });
-            window.setTimeout(() => panel.classList.remove("is-highlighted"), 1200);
-          }
-        }
         if (action === "refresh") await refreshLiveData({ force: true });
         if (action === "refresh-history") {
           await loadCommunityFundData({ refreshActivity: true });
@@ -5005,28 +5070,34 @@
       }
       if (action === "check-pending-actions") {
         const pendingActionId = actionButton.dataset.pendingActionId;
-        const resultNode = actionButton.closest("[data-personal-contribution], .decision-card")?.querySelector("[data-pending-check-result]");
+        const personalContribution = actionButton.closest("[data-personal-contribution]");
+        const resultNode = (personalContribution || actionButton.closest(".decision-card"))?.querySelector("[data-pending-check-result]");
         setBusy(actionButton, true, "Checking state…");
         if (resultNode) resultNode.textContent = "Checking finalized Testnet state…";
         try {
           if (pendingActionId) {
             const result = await checkPendingAction(pendingActionId);
             if (resultNode?.isConnected) resultNode.textContent = result.message;
-            showToast(result.message, result.state === "confirmed" ? "success" : result.state === "failed" ? "error" : "");
+            if (!personalContribution) {
+              showToast(result.message, result.state === "confirmed" ? "success" : result.state === "failed" ? "error" : "");
+            }
           } else {
             const remaining = await reconcilePendingActions({ poll: true });
             const message = remaining.length
               ? "Finalized state is still unavailable. The saved action remains protected and no retry was submitted."
               : "The submitted action is no longer pending.";
             if (resultNode?.isConnected) resultNode.textContent = message;
-            showToast(message, remaining.length ? "" : "success");
+            if (!personalContribution) showToast(message, remaining.length ? "" : "success");
           }
         } catch (error) {
           const message = `On-chain verification could not finish: ${String(error?.message || error)} The saved action was preserved and no transaction was submitted.`;
           if (resultNode?.isConnected) resultNode.textContent = message;
-          showToast(message, "error");
+          if (!personalContribution) showToast(message, "error");
         } finally {
-          if (actionButton.isConnected) setBusy(actionButton, false);
+          if (actionButton.isConnected) {
+            setBusy(actionButton, false);
+            if (personalContribution) startManualPaymentCheckCooldown(actionButton, 5);
+          }
         }
         return;
       }

@@ -27,8 +27,7 @@ test("Community Fund summary uses the customer-facing goal hierarchy", () => {
   assert.doesNotMatch(appSource, /class="goal-details"/);
   assert.match(appSource, /community-fund-primary/);
   assert.match(appSource, /id="community-contribution-form"/);
-  assert.match(appSource, /data-community-action="support"/);
-  assert.match(appSource, /scrollIntoView/);
+  assert.doesNotMatch(appSource, /data-community-action="support"/);
   assert.match(appSource, /fund-contribution-amount/);
 });
 
@@ -59,6 +58,7 @@ test("manual pending checks always explain hashless, unavailable, or confirmed s
   assert.match(appSource, /pendingActionStore\.remove\(action\.id\)/);
   assert.match(appSource, /data-pending-action-id/);
   assert.match(appSource, /waitForActionConfirmation[\s\S]*community_contribute_usdc[\s\S]*!action\.transactionHash[\s\S]*return readActionConfirmation\(action\)/);
+  assert.match(appSource, /Paint the personal outcome immediately[\s\S]*renderCurrentPage\(\);[\s\S]*waitForActionConfirmation/);
 });
 
 test("Community Fund progress rendering never passes a BigInt to Math.floor", () => {
@@ -100,7 +100,26 @@ test("personal contribution status checks strict state without resubmitting", ()
   assert.match(appSource, /Technical transaction details/);
   assert.match(appSource, /data-pending-action-id/);
   assert.match(appSource, /savePersonalContributionOutcome/);
-  assert.match(appSource, /hashless or provider-unseen actions are excluded/);
+  assert.match(appSource, /confirmedHashes[\s\S]*visiblePending/);
+  assert.match(appSource, /Hashless or provider-unseen actions are excluded until discovered/);
+  assert.match(appSource, /included in the community awaiting total/);
+  assert.match(appSource, /<button class="button button-primary" type="submit">Contribute<\/button>\$\{personalContribution\}/);
+  assert.match(appSource, /startManualPaymentCheckCooldown\(actionButton, 5\)/);
+  assert.match(appSource, /Check again in \$\{remaining\}s/);
+});
+
+test("contribution review uses the durable local summary instead of slow forced RPC fan-out", () => {
+  assert.match(appSource, /Checking contribution total…/);
+  assert.match(appSource, /const freshActivity = await fetchCommunityActivity\(false\)/);
+  assert.doesNotMatch(appSource, /Refreshing fund totals…/);
+  assert.match(appSource, /suppressToast: methodName === "community_contribute_usdc"/);
+});
+
+test("automatic contribution reconciliation continues after the initial confirmation window", () => {
+  assert.match(appSource, /function scheduleCommunityReconciliation/);
+  assert.match(appSource, /scheduleCommunityReconciliation\(remaining\)/);
+  assert.match(appSource, /}, 5000\)/);
+  assert.match(appSource, /fetchCommunityActivity\(false\)\.then/);
 });
 
 test("goal review warns that known pending payments can overfund concurrently", () => {
