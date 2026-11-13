@@ -11,14 +11,24 @@ if [ "${1:-}" = "--web-only" ]; then
     STOP_FINALIZER=false
 fi
 
-if ! v5_load_and_validate_environment; then
+if ! v5_load_and_validate_environment || ! v5_resolve_python; then
     exit 1
 fi
 
 web_status=0
 
+if [ ! -e "$V5_PID_FILE" ]; then
+    v5_recover_pid_file || true
+fi
+
 if [ ! -f "$V5_PID_FILE" ]; then
-    printf 'HarvestPool V5 is not running (no managed PID file found).\n'
+    if [ -n "$(v5_listener_pids)" ]; then
+        v5_error "Port $V5_PORT has a listener that does not match the canonical HarvestPool V5 fingerprint; it was not terminated."
+        v5_show_listeners >&2
+        web_status=1
+    else
+        printf 'HarvestPool V5 is not running (no managed PID file found).\n'
+    fi
 else
     pid="$(v5_read_pid || true)"
     case "$pid" in
@@ -61,9 +71,6 @@ else
 fi
 
 if $STOP_FINALIZER; then
-    if ! v5_resolve_python; then
-        exit 1
-    fi
     if ! v5_stop_finalizer; then
         exit 1
     fi

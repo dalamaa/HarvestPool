@@ -34,6 +34,10 @@ class StatusScriptTests(unittest.TestCase):
             }
             v5_pid_is_owned() { [ "$MOCK_WEB_OWNED" = true ]; }
             v5_finalizer_pid_is_owned() { [ "$MOCK_FINALIZER_OWNED" = true ]; }
+            v5_recover_pid_file() {
+                [ "$MOCK_RECOVER_PID" = true ] || return 1
+                printf '111\n' > "$V5_PID_FILE"
+            }
             v5_http_status() { printf '%s\n' "$MOCK_WEB_HTTP"; }
             v5_http_is_healthy() { [ "$MOCK_WEB_HTTP" = 200 ]; }
             v5_finalizer_http_status() { printf '%s\n' "$MOCK_FINALIZER_HTTP"; }
@@ -55,6 +59,7 @@ class StatusScriptTests(unittest.TestCase):
             "MOCK_FINALIZER_ALIVE": "true",
             "MOCK_FINALIZER_OWNED": "true",
             "MOCK_FINALIZER_HTTP": "200",
+            "MOCK_RECOVER_PID": "false",
             "MOCK_HEALTH_REPORT": 'True\t1\t180\tFalse\tnone\t{"confirmed":3}',
         }
 
@@ -88,6 +93,13 @@ class StatusScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("PID FILE POINTS TO AN UNOWNED LIVE PROCESS", result.stdout)
         self.assertIn("not controlled by the V5 PID file", result.stdout)
+
+    def test_missing_pid_file_is_recovered_before_status(self):
+        (self.project / ".v5.pid").unlink()
+        result = self.run_status(MOCK_RECOVER_PID="true", MOCK_FINALIZER_ENABLED="false")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Process: MANAGED", result.stdout)
+        self.assertEqual((self.project / ".v5.pid").read_text(encoding="utf-8"), "111\n")
 
     def test_unowned_finalizer_fails_without_mislabeling_web(self):
         result = self.run_status(MOCK_FINALIZER_OWNED="false")

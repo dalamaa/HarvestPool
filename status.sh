@@ -13,6 +13,10 @@ if ! v5_load_and_validate_environment || ! v5_resolve_python; then
     exit 2
 fi
 
+if [ ! -e "$V5_PID_FILE" ]; then
+    v5_recover_pid_file || true
+fi
+
 pid=""
 if [ -f "$V5_PID_FILE" ]; then
     pid="$(v5_read_pid || true)"

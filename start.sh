@@ -14,6 +14,10 @@ if ! v5_finalizer_validate_activation; then
     exit 1
 fi
 
+if [ ! -e "$V5_PID_FILE" ]; then
+    v5_recover_pid_file || true
+fi
+
 if [ -f "$V5_PID_FILE" ]; then
     pid="$(v5_read_pid || true)"
     case "$pid" in
@@ -67,7 +71,11 @@ nohup "$V5_PYTHON_BIN" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], s
     >"$V5_LOG_FILE" 2>&1 < /dev/null &
 server_pid=$!
 
-printf '%s\n' "$server_pid" > "$V5_PID_FILE"
+if ! v5_write_pid "$server_pid"; then
+    v5_error "Could not atomically write the V5 PID ownership record: $V5_PID_FILE"
+    kill -TERM -"$server_pid" 2>/dev/null || true
+    exit 1
+fi
 
 attempt=1
 while [ "$attempt" -le 30 ]; do

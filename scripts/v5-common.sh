@@ -138,6 +138,23 @@ v5_read_pid() {
     tr -d '[:space:]' < "$V5_PID_FILE"
 }
 
+v5_write_pid() {
+    local pid="$1" temporary
+    case "$pid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    temporary="${V5_PID_FILE}.tmp.$$"
+    umask 077
+    if ! printf '%s\n' "$pid" > "$temporary"; then
+        rm -f "$temporary"
+        return 1
+    fi
+    if ! mv -f "$temporary" "$V5_PID_FILE"; then
+        rm -f "$temporary"
+        return 1
+    fi
+}
+
 v5_pid_is_alive() {
     local pid="$1"
     kill -0 "$pid" 2>/dev/null
@@ -168,6 +185,75 @@ v5_pid_is_owned() {
 
     process_group="$(ps -p "$pid" -o pgid= 2>/dev/null | tr -d '[:space:]' || true)"
     [ "$process_group" = "$pid" ]
+}
+
+v5_process_cwd() {
+    local pid="$1"
+    lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1
+}
+
+v5_process_executable() {
+    local pid="$1"
+    lsof -a -p "$pid" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1
+}
+
+v5_process_fd_path() {
+    local pid="$1" descriptor="$2"
+    lsof -a -p "$pid" -d "$descriptor" -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1
+}
+
+v5_realpath() {
+    "$V5_PYTHON_BIN" -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$1" 2>/dev/null
+}
+
+v5_python_executable_realpath() {
+    "$V5_PYTHON_BIN" -c 'import os, sys; print(os.path.realpath(sys.executable))' 2>/dev/null
+}
+
+# A missing ownership record can be rebuilt only for the exact canonical daemon:
+# one listener, same user, command/process-group fingerprint, project cwd, Python,
+# /dev/null stdin, and the configured launcher log on stdout/stderr.
+v5_pid_is_canonical_instance() {
+    local pid="$1" listener_pids process_uid current_uid process_cwd expected_python \
+        process_executable expected_log stdin_path stdout_path stderr_path
+
+    v5_pid_is_alive "$pid" || return 1
+    v5_pid_is_owned "$pid" || return 1
+
+    listener_pids="$(v5_listener_pids)"
+    [ "$listener_pids" = "$pid" ] || return 1
+
+    process_uid="$(ps -p "$pid" -o uid= 2>/dev/null | tr -d '[:space:]' || true)"
+    current_uid="$(id -u)"
+    [ -n "$process_uid" ] && [ "$process_uid" = "$current_uid" ] || return 1
+
+    process_cwd="$(v5_process_cwd "$pid")"
+    [ "$process_cwd" = "$PROJECT_DIR" ] || return 1
+
+    expected_python="$(v5_python_executable_realpath)"
+    process_executable="$(v5_realpath "$(v5_process_executable "$pid")")"
+    [ -n "$expected_python" ] && [ "$process_executable" = "$expected_python" ] || return 1
+
+    expected_log="$(v5_realpath "$V5_LOG_FILE")"
+    stdin_path="$(v5_process_fd_path "$pid" 0)"
+    stdout_path="$(v5_realpath "$(v5_process_fd_path "$pid" 1)")"
+    stderr_path="$(v5_realpath "$(v5_process_fd_path "$pid" 2)")"
+    [ "$stdin_path" = "/dev/null" ] || return 1
+    [ -n "$expected_log" ] && [ "$stdout_path" = "$expected_log" ] && [ "$stderr_path" = "$expected_log" ]
+}
+
+v5_recover_pid_file() {
+    local listener_pids pid
+    [ ! -e "$V5_PID_FILE" ] || return 1
+    command -v lsof >/dev/null 2>&1 || return 1
+    listener_pids="$(v5_listener_pids)"
+    case "$listener_pids" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    pid="$listener_pids"
+    v5_pid_is_canonical_instance "$pid" || return 1
+    v5_write_pid "$pid" || return 1
+    printf 'Recovered canonical HarvestPool V5 PID ownership record for PID %s.\n' "$pid" >&2
 }
 
 v5_finalizer_read_pid() {
