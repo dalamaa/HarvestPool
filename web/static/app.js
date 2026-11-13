@@ -39,6 +39,8 @@
   if (!communityFundTools) throw new Error("HarvestPool Community Fund helpers did not load.");
   const walletInitializationTools = window.HarvestPoolWalletInitialization;
   if (!walletInitializationTools) throw new Error("HarvestPool wallet initialization helpers did not load.");
+  const rpcReadTools = window.HarvestPoolRpcReads;
+  if (!rpcReadTools) throw new Error("HarvestPool RPC read helpers did not load.");
   const pendingActionStore = confirmationTools.pendingStore(window.localStorage);
   const submissionGate = confirmationTools.actionGate();
   const state = {
@@ -55,6 +57,7 @@
     memberStatus: null,
     fundedMembership: new Map(),
     dataLoaded: false,
+    liveDataError: null,
     walletError: null,
     currentPurchase: null,
     contributionStatus: null,
@@ -213,7 +216,7 @@
       if (isCreateForm && savedDraft && !surface.dataset.draftRestored && !$(".draft-restoration", surface)) {
         const actions = $(".draft-actions", surface);
         const anchor = $(".form-intro", surface) || actions;
-        anchor?.insertAdjacentHTML(anchor === actions ? "beforebegin" : "afterend", '<div class="draft-restoration" role="status"><div><strong>Saved draft available</strong><span>Your last unfinished deal is kept on this device.</span></div><button class="button button-outline button-small" type="button" data-action="restore-draft">Restore saved draft</button></div>');
+        anchor?.insertAdjacentHTML(anchor === actions ? "beforebegin" : "afterend", '<div class="draft-restoration" role="status"><div><strong>Saved draft available</strong><span>Your last unfinished deal is kept on this device.</span></div><div class="draft-restoration-actions"><button class="button button-outline button-small" type="button" data-action="restore-draft">Restore saved draft</button><button class="button button-outline button-small" type="button" data-action="discard-draft">Discard draft</button></div></div>');
       }
       if (pendingForDraft(draftReference(surface))) {
         surface.dataset.v3ConfirmationUncertain = "true";
@@ -375,6 +378,7 @@
     $(".form-error-summary", target)?.setAttribute("hidden", "");
     delete target.dataset.draftRestored;
     $(".draft-restored-note", target)?.remove();
+    $(".draft-restoration", target)?.remove();
     const discard = $("[data-action='discard-draft']", target);
     if (discard) discard.textContent = "Start fresh";
     showToast("Started a clean form. This action's saved draft was removed.");
@@ -958,7 +962,16 @@
           "Wallet session restoration timed out.",
         );
       } catch (error) {
-        console.info("Meteor has no restorable wallet session.", error);
+        console.info("Meteor wallet session restoration is retrying after a temporary failure.", error);
+        try {
+          accounts = await walletInitializationTools.withTimeout(
+            state.wallet.getAccounts(),
+            WALLET_SESSION_RESTORE_TIMEOUT_MS,
+            "Wallet session restoration timed out.",
+          );
+        } catch (retryError) {
+          console.info("Meteor has no restorable wallet session.", retryError);
+        }
       }
       await applyWalletAccounts(accounts);
       state.selector.store?.observable?.subscribe(() => syncWalletAccount());
@@ -1004,8 +1017,7 @@
     try {
       await applyWalletAccounts(await state.wallet.getAccounts());
     } catch (_error) {
-      state.accountId = null;
-      state.walletStatus = "disconnected";
+      state.walletStatus = state.accountId ? "connected" : "disconnected";
       updateWalletUi();
     }
   }
@@ -1019,7 +1031,7 @@
 
   async function viewOnContract(contractId, methodName, args = {}) {
     if (!state.near) throw new Error("The testnet connection is not ready.");
-    const response = await fetch(state.near.nodeUrl, {
+    const payload = await rpcReadTools.fetchJsonWithRetry(fetch, state.near.nodeUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -1028,9 +1040,7 @@
         method: "query",
         params: { request_type: "call_function", finality: "final", account_id: contractId, method_name: methodName, args_base64: encodeArgs(args) },
       }),
-    });
-    if (!response.ok) throw new Error(`The testnet read returned HTTP ${response.status}.`);
-    const payload = await response.json();
+    }, { retryPayload: rpcReadTools.transientRpcPayload });
     if (payload.error) throw new Error(payload.error.message || "The testnet read failed.");
     const raw = new TextDecoder().decode(new Uint8Array(payload.result.result));
     return JSON.parse(raw);
@@ -1038,13 +1048,11 @@
 
   async function queryRpc(params) {
     if (!state.near) throw new Error("The testnet connection is not ready.");
-    const response = await fetch(state.near.nodeUrl, {
+    const payload = await rpcReadTools.fetchJsonWithRetry(fetch, state.near.nodeUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ jsonrpc: "2.0", id: "harvestpool-community-fund", method: "query", params }),
-    });
-    if (!response.ok) throw new Error(`The testnet read returned HTTP ${response.status}.`);
-    const payload = await response.json();
+    }, { retryPayload: rpcReadTools.transientRpcPayload });
     if (payload.error) throw new Error(payload.error.message || "The testnet read failed.");
     return payload.result;
   }
@@ -1161,8 +1169,12 @@
       updateSupplierSelection();
     }
     const count = Math.min(Number(countValue || 0), 500);
-    const purchases = await Promise.all(Array.from({ length: count }, (_, id) => view("get_purchase", { purchase_id: String(id) })));
-    state.purchases = purchases.filter(Boolean).reverse();
+    const purchaseReads = await Promise.allSettled(Array.from({ length: count }, (_, id) => view("get_purchase", { purchase_id: String(id) })));
+    const purchases = purchaseReads.filter((result) => result.status === "fulfilled" && result.value).map((result) => result.value);
+    const failedReads = purchaseReads.filter((result) => result.status === "rejected").length;
+    if (count > 0 && purchases.length === 0) throw purchaseReads.find((result) => result.status === "rejected")?.reason || new Error("Purchase reads failed.");
+    state.purchases = purchases.reverse();
+    state.liveDataError = failedReads ? new Error(`${failedReads} deal ${failedReads === 1 ? "record is" : "records are"} temporarily unavailable.`) : null;
     state.dataLoaded = true;
     await loadWalletState();
     await loadV3Data();
@@ -1192,7 +1204,11 @@
       updateWalletUi();
       if (render) renderCurrentPage();
       return true;
-    })().finally(() => { state.refreshingLiveData = null; });
+    })().catch((error) => {
+      state.liveDataError = error;
+      if (render) renderCurrentPage();
+      throw error;
+    }).finally(() => { state.refreshingLiveData = null; });
     return state.refreshingLiveData;
   }
 
@@ -1212,9 +1228,6 @@
   }
 
   async function loadV3Data() {
-    state.issues = [];
-    state.decisions = [];
-    state.v3Config = null;
     state.v3Available = false;
     state.v3Error = null;
     if (!appConfig.v3ContractId) return false;
@@ -1562,7 +1575,7 @@
         }
       }));
       state.fundedMembership = new Map(fundedEntries);
-      state.recordedVotes = new Map();
+      const previousVotes = state.recordedVotes;
       const voteTypes = usesOpenMembership ? [["fulfillment", "get_fulfillment_vote"]] : [["offer", "get_offer_vote"], ["fulfillment", "get_fulfillment_vote"]];
       const voteEntries = await Promise.all(state.purchases.flatMap((purchase) => voteTypes.map(async ([type, methodName]) => {
         try {
@@ -1570,7 +1583,8 @@
           return [voteStateKey(purchase.id, type), vote === null ? null : { approve: Boolean(vote) }];
         } catch (_error) {
           // Older deployed V2 accounts may not expose the additive per-voter view yet.
-          return [voteStateKey(purchase.id, type), null];
+          const key = voteStateKey(purchase.id, type);
+          return [key, previousVotes.get(key) || null];
         }
       })));
       voteEntries.forEach(([key, vote]) => {
@@ -2288,7 +2302,10 @@
       ? liveVisible.length ? liveVisible.map(renderPurchaseCard).join("") : `<div class="lane-empty"><h3>No ${escapeHtml(filterLabel)} yet.</h3><p>When a purchase is open, its terms and contribution action will appear here.</p><a class="button button-outline button-small" href="/create">Start a purchase</a></div>`
       : `<div class="live-unavailable"><span class="status status-pending"><span></span>Purchases are temporarily unavailable</span><p>We could not read the available purchase list right now. No membership, vote, or payment is shown until the purchase data is confirmed.</p><button class="button button-outline button-small" type="button" data-action="reload-live-data">Try again</button></div>`;
     const totalVisible = visiblePurchases.length;
-    grid.innerHTML = `<section class="purchase-source live-source"><div class="source-heading source-heading-compact"><strong>${totalVisible} ${totalVisible === 1 ? "deal" : "deals"}</strong><span class="live-source-label"><span class="live-pulse"></span>Authoritative Testnet state</span></div><div class="purchase-grid purchase-grid-live">${liveContent}</div></section>`;
+    const degraded = state.liveDataError
+      ? `<div class="live-read-warning" role="status"><strong>Some live deal data could not be refreshed.</strong><span>${escapeHtml(state.liveDataError.message)} The deals below were confirmed in this read; unavailable records are not shown.</span><button class="button button-outline button-small" type="button" data-action="retry-live-data">Retry</button></div>`
+      : "";
+    grid.innerHTML = `<section class="purchase-source live-source">${degraded}<div class="source-heading source-heading-compact"><strong>${totalVisible} ${totalVisible === 1 ? "deal" : "deals"}</strong><span class="live-source-label"><span class="live-pulse"></span>Authoritative Testnet state</span></div><div class="purchase-grid purchase-grid-live">${liveContent}</div></section>`;
     if (empty) {
       empty.hidden = !state.dataLoaded || totalVisible !== 0;
       const heading = $("h2", empty);
@@ -2712,8 +2729,10 @@
       root.innerHTML = disconnectedAccountMarkup("Your confirmed contributions and posted deals will appear here.");
       return;
     }
-    const joinedDeals = state.purchases.filter((purchase) => commitmentFor(purchase));
-    const createdDeals = state.purchases.filter((purchase) => String(purchase.proposer || "") === String(state.accountId));
+    const activeDashboardFilter = root.dataset.dashboardFilter || "all";
+    const matchesDashboardFilter = (purchase) => activeDashboardFilter === "all" || filterTools.dashboardCategory(purchase) === activeDashboardFilter;
+    const joinedDeals = state.purchases.filter((purchase) => commitmentFor(purchase)).filter(matchesDashboardFilter);
+    const createdDeals = state.purchases.filter((purchase) => String(purchase.proposer || "") === String(state.accountId)).filter(matchesDashboardFilter);
     const joinedCard = (purchase) => {
       const commitment = commitmentFor(purchase);
       const funded = commitment.state === "Active" && isFundedMember(purchase);
@@ -2736,7 +2755,9 @@
     const joinedSection = joinedDeals.length ? `<section class="dashboard-group"><div class="section-heading-inline"><div><span class="section-kicker">Deals you joined</span><h2>Your secured group buys</h2></div></div><div class="dashboard-grid">${joinedDeals.map(joinedCard).join("")}</div></section>` : `<section class="dashboard-group"><div class="dashboard-empty"><h2>No joined deals yet.</h2><p>When a contribution is confirmed, your quantity, supplier, progress, and deadlines will appear here.</p><a class="button button-primary" href="/deals">Explore Deals</a></div></section>`;
     const createdSection = createdDeals.length ? `<section class="dashboard-group"><div class="section-heading-inline"><div><span class="section-kicker">Deals you created</span><h2>Your posted Group Deals</h2></div></div><div class="dashboard-grid">${createdDeals.map(createdCard).join("")}</div></section>` : `<section class="dashboard-group"><div class="dashboard-empty"><h2>No posted deals yet.</h2><p>Post a Group Deal when you are ready to organize an order or publish a supplier offer.</p><a class="button button-outline" href="/create">Post a Group Deal</a></div></section>`;
     const relevantTasks = actionCenterTasks().filter((task) => task.kind !== "supplier-consent");
-    root.innerHTML = `<div class="dashboard-toolbar"><div><span class="section-kicker">Connected wallet</span><h2>My Group Buys</h2></div><span class="wallet-caption">${escapeHtml(shortAccount(state.accountId))}</span></div>${actionAlertsMarkup(relevantTasks)}${joinedSection}${createdSection}`;
+    const filterLabels = [["all", "All"], ["active", "Active"], ["completed", "Completed"], ["unsuccessful", "Unsuccessful"]];
+    const filters = `<div class="dashboard-filters filter-tabs" role="group" aria-label="Filter My Group Buys">${filterLabels.map(([value, label]) => `<button class="filter-tab ${activeDashboardFilter === value ? "active" : ""}" type="button" data-dashboard-filter="${value}" aria-pressed="${activeDashboardFilter === value}">${label}</button>`).join("")}</div>`;
+    root.innerHTML = `<div class="dashboard-toolbar"><div><span class="section-kicker">Connected wallet</span><h2>My Group Buys</h2></div><span class="wallet-caption">${escapeHtml(shortAccount(state.accountId))}</span></div>${filters}${actionAlertsMarkup(relevantTasks)}${joinedSection}${createdSection}`;
   }
 
   function renderDecisionCard(purchase, type) {
@@ -2770,10 +2791,14 @@
       if (!vote || ["Open", "AwaitingSupplier"].includes(decision.state)) return;
       rows.push("<div class=\"decision-history-row\"><div><strong>" + escapeHtml(decision.proposal) + "</strong><span>" + escapeHtml(decisionStateLabel(decision.state)) + " · your choice: " + escapeHtml(decision.options[vote.option] || "Choice") + "</span></div><a href=\"/purchases/" + encodeURIComponent(decision.purchase_id) + "\">Open purchase <span aria-hidden=\"true\">↗</span></a></div>");
     });
+    const dataUnavailable = Boolean((!state.v3Available && state.v3Error) || state.liveDataError);
     const historyContent = rows.length
       ? "<div class=\"decision-history-list\">" + rows.join("") + "</div>"
-      : "<div class=\"issues-empty\"><p>No completed actions yet.</p><span>Confirmed votes and resolved actions will appear here.</span></div>";
-    return `<section class="action-center-section action-history">${historyContent}</section>`;
+      : dataUnavailable ? "" : "<div class=\"issues-empty\"><p>No completed actions yet.</p><span>Confirmed votes and resolved actions will appear here.</span></div>";
+    const readWarning = dataUnavailable
+      ? `<div class="issues-unavailable"><p>Latest issue and decision data could not be refreshed. Previously confirmed history is labeled below; retry before relying on current status.</p><button class="button button-outline button-small" type="button" data-action="retry-live-data">Retry</button></div>`
+      : "";
+    return `<section class="action-center-section action-history">${readWarning}${historyContent}</section>`;
   }
 
   function renderRaiseIssueForm(selectedPurchaseId = "") {
@@ -2791,7 +2816,7 @@
       return `<section class="action-center-section action-issues"><div class="issues-unavailable"><p>Member issues are not turned on for this community yet.</p></div></section>`;
     }
     if (!state.v3Available) {
-      return `<section class="action-center-section action-issues"><div class="action-issues-toolbar"><a class="button button-primary button-small" href="#raise-an-issue" data-action="show-raise-issue">Raise an Issue</a></div><div class="issues-unavailable"><p>Issues are temporarily unavailable. Refresh to check the latest issue status.</p></div></section>`;
+      return `<section class="action-center-section action-issues"><div class="action-issues-toolbar"><a class="button button-primary button-small" href="#raise-an-issue" data-action="show-raise-issue">Raise an Issue</a></div><div class="issues-unavailable"><p>Issues are temporarily unavailable. Previously confirmed records have not been replaced by an empty result.</p><button class="button button-outline button-small" type="button" data-action="retry-live-data">Retry</button></div></section>`;
     }
     const seenIssueIds = new Set();
     const visibleIssues = state.issues.filter((issue) => {
@@ -4542,6 +4567,18 @@
         if (restoreDraftForSurface(surface)) showToast("Saved draft restored.", "success");
         return;
       }
+      if (action === "retry-live-data") {
+        setBusy(actionButton, true, "Retrying…");
+        try {
+          await refreshLiveData({ force: true });
+          showToast("Live Testnet data refreshed.", "success");
+        } catch (_error) {
+          showToast("Live Testnet data is still unavailable. No transaction was submitted.", "error");
+        } finally {
+          if (actionButton.isConnected) setBusy(actionButton, false);
+        }
+        return;
+      }
       if (action === "reload-live-data") {
         try {
           await loadBaseData();
@@ -4603,6 +4640,14 @@
       if (!link) return;
       event.preventDefault();
       focusCreateErrorLink(link);
+    });
+    document.addEventListener("click", (event) => {
+      const button = event.target.closest?.("[data-dashboard-filter]");
+      if (!button) return;
+      const root = $("#dashboard-root");
+      if (!root) return;
+      root.dataset.dashboardFilter = button.dataset.dashboardFilter;
+      renderDashboard();
     });
     document.addEventListener("keydown", (event) => {
       const communityCurrent = event.target.closest?.('[role="tab"][data-community-tab]');
@@ -4714,10 +4759,11 @@
     document.body.classList.remove("wallet-session-loading");
     renderCurrentPage();
     window.setInterval(loadNearPrice, 60_000);
-    window.addEventListener("pageshow", () => {
+    window.addEventListener("pageshow", async () => {
       clearSubmittedCreateReturn();
       if (document.visibilityState === "visible") {
-        refreshLiveData().catch(() => null);
+        if (state.wallet) await syncWalletAccount().catch(() => null);
+        await refreshLiveData({ force: true }).catch(() => null);
         scheduleExploreRefresh();
       }
     });
@@ -4736,6 +4782,13 @@
       if (window.location.hash === "#raise-an-issue") showRaiseIssueForm({ focus: false });
       else $("#raise-an-issue")?.setAttribute("hidden", "");
     });
+    window.addEventListener("popstate", async () => {
+      if (appConfig.page !== "decisions") return;
+      const tab = actionCenterTabFromHash();
+      activateActionCenterTab(tab, { updateHash: false });
+      if (state.wallet) await syncWalletAccount().catch(() => null);
+      await refreshLiveData({ force: true }).catch(() => renderDecisions());
+    });
     scheduleExploreRefresh();
     if (["details", "agreement", "issue_form", "supplier_invitation"].includes(appConfig.page)) {
       if (state.currentPurchase) {
@@ -4746,7 +4799,7 @@
         decorateMoneyText();
       } else {
         const target = $("#details-content") || $("#agreement-content") || $("#supplier-invitation-content");
-        showError(target, "Live deal data is unavailable", "This page only acts on the contract returned by NEAR Testnet. No mock deal, membership, vote, or payment is shown as successful.", '<a class="button button-outline" href="/deals">Back to Explore</a>');
+        showError(target, "Live deal data is unavailable", "This page only acts on the contract returned by NEAR Testnet. No mock deal, membership, vote, or payment is shown as successful.", '<button class="button button-primary" type="button" data-action="retry-live-data">Retry live data</button> <a class="button button-outline" href="/deals">Back to Explore</a>');
       }
     }
   }

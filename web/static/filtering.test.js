@@ -3,9 +3,18 @@ const assert = require("node:assert/strict");
 
 const {
   contributionEligibility,
+  dashboardCategory,
   marketplaceCategory,
   filterPurchases,
 } = require("./filtering.js");
+
+test("dashboard categories preserve exact states while grouping local filters", () => {
+  assert.equal(dashboardCategory({ state: "Open", deadline_ns: "3000000000" }, { nowNs: NOW_NS }), "active");
+  assert.equal(dashboardCategory({ state: "Funded" }, { nowNs: NOW_NS }), "active");
+  assert.equal(dashboardCategory({ state: "Completed" }, { nowNs: NOW_NS }), "completed");
+  assert.equal(dashboardCategory({ state: "Failed" }, { nowNs: NOW_NS }), "unsuccessful");
+  assert.equal(dashboardCategory({ state: "Open", deadline_ns: "1000000000" }, { nowNs: NOW_NS }), "unsuccessful");
+});
 
 const NOW_NS = "2000000000";
 const purchases = [

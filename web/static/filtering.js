@@ -111,6 +111,14 @@
     ));
   }
 
+  function dashboardCategory(purchase, options = {}) {
+    const status = purchaseStatus(purchase);
+    if (status === "completed") return "completed";
+    if (["failed", "declined", "cancelled", "canceled", "expired", "refunded"].includes(status)) return "unsuccessful";
+    if (status === "open" && deadlineHasPassed(purchase, options.nowNs)) return "unsuccessful";
+    return "active";
+  }
+
   function contributionEligibility(purchase, options = {}) {
     const accountId = String(options.accountId || "");
     const activeCommitment = options.commitment && options.commitment.state === "Active";
@@ -146,6 +154,7 @@
 
   return {
     contributionEligibility,
+    dashboardCategory,
     deadlineHasPassed,
     filterPurchases,
     isAvailable,

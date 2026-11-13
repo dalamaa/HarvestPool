@@ -93,6 +93,7 @@ test("create forms start empty and offer explicit draft restoration", () => {
   assert.doesNotMatch(templateSource, /name="cancellation_and_refund_terms"[^>]*>Members receive/);
   assert.match(appSource, /isCreateForm && savedDraft/);
   assert.match(appSource, /data-action="restore-draft"/);
+  assert.match(appSource, /Saved draft available[\s\S]*data-action="discard-draft"/);
   assert.match(appSource, /CREATE_SUBMITTED_KEY/);
   assert.match(appSource, /window\.sessionStorage\.setItem\(CREATE_SUBMITTED_KEY, "true"\)/);
 });
@@ -116,11 +117,22 @@ test("Action Center uses accessible hash-aware tabs and deduplicates issues", ()
   assert.match(appSource, /\["ArrowLeft", "ArrowRight", "Home", "End"\]/);
   assert.match(appSource, /hash === "#issues" \|\| hash === "#raise-an-issue"/);
   assert.match(appSource, /window\.addEventListener\("hashchange"/);
+  assert.match(appSource, /window\.addEventListener\("popstate"/);
+  assert.match(appSource, /popstate[\s\S]*syncWalletAccount\(\)[\s\S]*refreshLiveData\(\{ force: true \}\)/);
+  assert.match(appSource, /Previously confirmed records have not been replaced by an empty result/);
   assert.match(appSource, /seenIssueIds\.has\(id\)/);
   assert.doesNotMatch(appSource, /Confirmed records/);
   assert.doesNotMatch(appSource, /Pending, history, and issues/);
   assert.match(appSource, /No active funded purchases are currently eligible for a new issue/);
   assert.match(appSource, /href="\/dashboard">My Group Buys/);
+});
+
+test("small manual-test usability fixes stay local to the frontend", () => {
+  assert.match(templateSource, /Who will receive the funds\? For example, the veterinary clinic, supplier, or person responsible for the expense\./);
+  assert.match(templateSource, /Use a direct public HTTPS image URL, not a webpage URL/);
+  assert.match(stylesSource, /\.nav-link \{[^}]*white-space: nowrap/);
+  assert.match(appSource, /data-dashboard-filter="\$\{value\}"/);
+  assert.match(appSource, /\["all", "All"\][\s\S]*\["active", "Active"\][\s\S]*\["completed", "Completed"\][\s\S]*\["unsuccessful", "Unsuccessful"\]/);
 });
 
 test("normal views keep wallet and transaction internals out of the main reading path", () => {

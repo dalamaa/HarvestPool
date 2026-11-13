@@ -45,8 +45,16 @@
     const contributorCopy = fund.contributorsCount === null || fund.contributorsCount === undefined
       ? "Contributor count unavailable"
       : `${fund.contributorsCount} contributor${fund.contributorsCount === 1 ? "" : "s"}`;
-    const image = fund.cover_image_url ? `<img class="community-card-image" src="${escapeHtml(fund.cover_image_url)}" alt="" loading="lazy">` : "";
+    const image = fund.cover_image_url ? `<div class="community-card-media"><img class="community-card-image" src="${escapeHtml(fund.cover_image_url)}" alt="" loading="lazy"><div class="community-image-placeholder" role="img" aria-label="Cover image unavailable"><span aria-hidden="true">◇</span><strong>Image unavailable</strong></div></div>` : "";
     return `<article class="community-directory-card">${image}<div class="community-card-body"><div class="community-card-top"><span class="status ${statusClass(fund.status)}"><span></span>${escapeHtml(fund.status)}</span>${fund.isVerifiedFund ? '<span class="verified-label">Verified Testnet example</span>' : ""}</div><h3>${escapeHtml(fund.title)}</h3><p class="community-card-location">${escapeHtml(fund.location)}</p><p class="community-card-description">${escapeHtml(fund.description)}</p><div class="community-card-progress"><div class="goal-progress" role="progressbar" aria-label="Amount raised toward target" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progress}"><span style="width:${progress}%"></span></div><div><strong>${money(fund.raisedAmount)} raised</strong><span>of ${money(fund.targetAmount)}</span></div></div><dl class="community-card-meta"><div><dt>Contributors</dt><dd>${escapeHtml(contributorCopy)}</dd></div><div><dt>Deadline</dt><dd>${escapeHtml(readableDate(fund.contribution_deadline))}</dd></div></dl><a class="button button-outline" href="${escapeHtml(fund.detailUrl)}">View Fund</a></div></article>`;
+  }
+
+  function bindImageFallbacks(root) {
+    root.querySelectorAll(".community-card-image").forEach((image) => {
+      const fallback = () => image.closest(".community-card-media")?.classList.add("image-unavailable");
+      image.addEventListener("error", fallback, { once: true });
+      if (image.complete && image.naturalWidth === 0) fallback();
+    });
   }
 
   async function initDirectory() {
@@ -59,6 +67,7 @@
       root.innerHTML = visible.length
         ? visible.map(fundCard).join("")
         : `<div class="empty-state community-empty"><h2>No funds match this view.</h2><p>${active === "mine" ? "Fund requests started in this browser will appear here." : "Try another filter or start a fund request for your community."}</p><a class="button button-outline" href="/community-funds/start">Start a Community Fund</a></div>`;
+      bindImageFallbacks(root);
     };
     document.querySelectorAll("[data-community-filter]").forEach((button) => button.addEventListener("click", () => {
       active = button.dataset.communityFilter;

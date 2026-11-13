@@ -75,8 +75,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .brand { display: inline-flex; align-items: center; gap: 9px; color: var(--pine); font-family: "Space Grotesk", sans-serif; font-size: 20px; font-weight: 700; letter-spacing: -.06em; text-decoration: none; white-space: nowrap; }
 .brand-mark { width: 32px; height: 32px; color: var(--pine); }
 .brand-pool { color: var(--coral); }
-.site-nav { display: flex; align-items: center; gap: 24px; margin-right: auto; }
-.nav-link { position: relative; color: #5c6b65; font-size: 14px; font-weight: 600; text-decoration: none; transition: color .2s var(--ease); }
+.site-nav { display: flex; align-items: center; gap: clamp(14px, 1.6vw, 24px); margin-right: auto; }
+.nav-link { position: relative; color: #5c6b65; font-size: 14px; font-weight: 600; text-decoration: none; white-space: nowrap; transition: color .2s var(--ease); }
 .nav-link::after { content: ""; position: absolute; right: 0; bottom: -8px; left: 0; height: 2px; background: var(--coral); transform: scaleX(0); transform-origin: left; transition: transform .2s var(--ease); }
 .nav-link:hover, .nav-link.active { color: var(--pine); }
 .nav-link.active::after { transform: scaleX(1); }
@@ -545,9 +545,14 @@ h3 { margin-bottom: 10px; font-size: 21px; line-height: 1.1; }
 .draft-restored-note { padding: 10px 12px; margin: 16px 0 0; border-left: 3px solid var(--sun); background: var(--sun-soft); color: var(--pine); font-size: 12px; }
 .draft-restoration { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 14px; margin-top: 18px; border: 1px solid #e4d69f; border-radius: 8px; background: var(--sun-soft); }
 .draft-restoration > div { display: grid; gap: 3px; }
+.draft-restoration .draft-restoration-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .draft-restoration strong { color: var(--pine); font-size: 13px; }
 .draft-restoration span { color: var(--muted); font-size: 12px; }
 .dashboard-group { padding-top: 46px; }
+.dashboard-filters { margin-top: 20px; }
+.live-read-warning { display: flex; align-items: center; gap: 10px 16px; flex-wrap: wrap; padding: 13px 14px; margin-bottom: 18px; border: 1px solid #e4d69f; border-radius: 8px; background: var(--sun-soft); }
+.live-read-warning strong { color: var(--pine); font-size: 13px; }
+.live-read-warning span { flex: 1 1 420px; color: var(--muted); font-size: 12px; }
 .dashboard-group + .dashboard-group { margin-top: 46px; border-top: 1px solid var(--line); }
 .member-purchase-card, .decision-card, .farmer-card { padding: 24px; border: 1px solid var(--line); border-radius: 11px; background: var(--white); }
 .member-purchase-card h3, .decision-card h3, .farmer-card h3 { margin: 18px 0 7px; font-size: 23px; }
@@ -973,7 +978,13 @@ h3 { margin-bottom: 10px; font-size: 21px; line-height: 1.1; }
 .community-filter-tabs .filter-tab { flex: 0 0 auto; min-height: 44px; white-space: nowrap; }
 .community-fund-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
 .community-directory-card { min-width: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 13px; background: var(--white); box-shadow: var(--shadow); }
+.community-card-media { position: relative; height: 180px; background: linear-gradient(135deg, var(--mist), var(--leaf-soft)); }
 .community-card-image { display: block; width: 100%; height: 180px; object-fit: cover; background: var(--mist); }
+.community-image-placeholder { position: absolute; inset: 0; display: none; place-content: center; justify-items: center; gap: 8px; color: var(--pine); }
+.community-image-placeholder span { font-size: 34px; line-height: 1; }
+.community-image-placeholder strong { font-size: 13px; }
+.community-card-media.image-unavailable .community-card-image { display: none; }
+.community-card-media.image-unavailable .community-image-placeholder { display: grid; }
 .community-card-body { padding: 24px; }
 .community-card-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .verified-label { color: var(--success); font-size: 12px; font-weight: 700; }
