@@ -205,6 +205,23 @@ test("finalized USDC contribution proof requires the exact signer, token, DAO, a
   assert.equal(fund.verifyTokenContributionOutcome({ ...outcome, status: { Failure: {} } }, expected).state, "failed");
 });
 
+test("complete non-stale indexed activity safely reconciles only the exact finalized contribution", () => {
+  const expected = {
+    transactionHash: "tx-hash",
+    signerId: "donor.testnet",
+    tokenId: "usdc.testnet",
+    amount: "100000",
+  };
+  const record = { transactionHash: "tx-hash", contributor: "donor.testnet", tokenId: "usdc.testnet", amount: "100000" };
+  const activity = { complete: true, stale: false, contributions: [record] };
+  assert.equal(fund.verifiedContributionRecord(activity, expected), record);
+  assert.equal(fund.verifiedContributionRecord({ ...activity, stale: true }, expected), null);
+  assert.equal(fund.verifiedContributionRecord({ ...activity, complete: false }, expected), null);
+  assert.equal(fund.verifiedContributionRecord(activity, { ...expected, amount: "100001" }), null);
+  assert.equal(fund.verifiedContributionRecord(activity, { ...expected, signerId: "other.testnet" }), null);
+  assert.equal(fund.verifiedContributionRecord(activity, { ...expected, transactionHash: "other-hash" }), null);
+});
+
 test("USDC payment proof requires the configured token receipt", () => {
   const allocation = { id: 8, receiverId: "recipient.testnet", amount: "200000", tokenId: "usdc.testnet" };
   const activity = { proposalTransactions: { 8: [{

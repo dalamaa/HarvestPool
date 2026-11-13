@@ -256,6 +256,16 @@
     };
   }
 
+  function verifiedContributionRecord(activity, expected = {}) {
+    if (!activity?.complete || activity.stale || activity.error) return null;
+    return (activity.contributions || []).find((record) =>
+      String(record.transactionHash || "") === String(expected.transactionHash || "")
+      && String(record.contributor || record.account || "") === String(expected.signerId || "")
+      && String(record.tokenId || activity.tokenId || "") === String(expected.tokenId || "")
+      && String(record.amount || "") === String(expected.amount || "")
+    ) || null;
+  }
+
   function allocationFromProposal(proposal, tokenId = "") {
     const transfer = proposal?.kind?.Transfer;
     if (!transfer || String(transfer.token_id || "") !== String(tokenId || "")) return null;
@@ -377,6 +387,7 @@
     totalContributions,
     transferProposal,
     verifyTokenContributionOutcome,
+    verifiedContributionRecord,
     verifiedPayment,
   };
 }));

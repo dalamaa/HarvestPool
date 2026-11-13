@@ -241,11 +241,11 @@ class CommunityFundActivityTests(unittest.TestCase):
         payload = {"complete": True, "contributions": [], "proposalTransactions": {}}
         seen = []
 
-        def activity(dao_id, _token_id="", **_kwargs):
+        def activity(dao_id, _token_id=""):
             seen.append(dao_id)
             return payload
 
-        with patch.object(web_app, "_cached_community_activity", side_effect=activity):
+        with patch.object(web_app, "_peek_community_activity_cache", side_effect=activity):
             directory = web_app.app.test_client().get("/api/community-funds").get_json()["funds"]
         verified = {item["slug"]: item for item in directory if item["isVerifiedFund"]}
         self.assertEqual(verified["community-garden"]["targetAmount"], "100.00")
@@ -256,6 +256,18 @@ class CommunityFundActivityTests(unittest.TestCase):
         self.assertIn("harvestpool-community-garden.sputnikv2.testnet", seen)
         if "shared-community-equipment" in verified:
             self.assertIn(web_app.COMMUNITY_DAO_ID, seen)
+
+    def test_directory_shell_never_starts_blocking_activity_reads(self):
+        with (
+            patch.object(web_app, "_peek_community_activity_cache", return_value=None),
+            patch.object(web_app, "_cached_community_activity") as blocking_read,
+        ):
+            directory = web_app.app.test_client().get("/api/community-funds").get_json()["funds"]
+        blocking_read.assert_not_called()
+        garden = next(item for item in directory if item.get("slug") == "community-garden")
+        self.assertIsNone(garden["raisedAmount"])
+        self.assertEqual(garden["activityUrl"], "/api/community-funds/community-garden/activity")
+        self.assertEqual(garden["decimals"], 6)
 
     def test_directory_does_not_treat_nonpayment_proposals_as_spending(self):
         fund = web_app._configured_community_funds()["community-garden"]

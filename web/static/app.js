@@ -90,6 +90,7 @@
       accessKeys: null,
       codeHash: null,
       activity: null,
+      activityPromise: null,
       recentContributions: [],
       safety: null,
       activeTab: null,
@@ -128,7 +129,7 @@
   const YOCTO_PER_NEAR = 10n ** 24n;
   const PRICE_SCALE = 1_000_000n;
   const RECONCILIATION_MAX_AGE_MS = 5 * 60_000;
-  const TRANSACTION_BUNDLE_VERSION = "2026-11-10.2";
+  const TRANSACTION_BUNDLE_VERSION = "2026-11-13.1";
   const WALLET_RESULT_TIMEOUT_MS = 15_000;
   const EXPLORE_REFRESH_INTERVAL_MS = 15_000;
   const CREATE_SUBMITTED_KEY = "harvestpool:create-submitted:v1";
@@ -1004,8 +1005,8 @@
       const accountChanged = String(previousAccountId || "") !== String(state.accountId || "");
       if (accountChanged || !editableSurfaceOpen()) renderCurrentPage();
       else restoreDraftsInDom();
-    } else if (appConfig.page === "community_fund") {
-      await loadCommunityFundData();
+    } else if (appConfig.page === "community_fund" && state.communityFund.loaded) {
+      await loadCommunityAccountAsset();
       updateWalletUi();
       renderCurrentPage();
     }
@@ -1063,7 +1064,43 @@
     return rpcRequest("query", params);
   }
 
-  async function loadCommunityFundData({ refreshActivity = false } = {}) {
+  async function fetchCommunityActivity(refreshActivity = false) {
+    return fetch(`${appConfig.communityActivityUrl || "/api/community-fund/activity"}${refreshActivity ? "?refresh=1" : ""}`, {
+      headers: { Accept: "application/json" },
+    }).then(async (response) => {
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "Transaction history is unavailable.");
+      return payload;
+    }).catch((error) => ({ error: String(error?.message || error) }));
+  }
+
+  function applyCommunityActivity(activityResult) {
+    const fund = state.communityFund;
+    const indexedContributions = activityResult.contributions || [];
+    const recentContributions = fund.recentContributions.filter((recent) =>
+      !indexedContributions.some((item) => item.transactionHash === recent.transactionHash)
+    );
+    fund.activity = activityResult.error ? activityResult : {
+      ...activityResult,
+      contributions: [...indexedContributions, ...recentContributions],
+    };
+    return fund.activity;
+  }
+
+  async function loadCommunityAccountAsset() {
+    const fund = state.communityFund;
+    const goal = appConfig.communityGoal || {};
+    if (goal.currency !== "USDC" || !fund.asset) return;
+    const tokenId = String(goal.tokenId || "");
+    const [accountStorage, accountBalance] = await Promise.all([
+      state.accountId ? viewOnContract(tokenId, "storage_balance_of", { account_id: state.accountId }) : Promise.resolve(null),
+      state.accountId ? viewOnContract(tokenId, "ft_balance_of", { account_id: state.accountId }) : Promise.resolve("0"),
+    ]);
+    fund.asset.accountStorage = accountStorage;
+    fund.asset.accountBalance = String(accountBalance || "0");
+  }
+
+  async function loadCommunityFundData({ refreshActivity = false, deferActivity = false } = {}) {
     const fund = state.communityFund;
     if (!appConfig.communityDaoId) {
       fund.loaded = true;
@@ -1072,7 +1109,9 @@
     }
     try {
       const daoId = appConfig.communityDaoId;
-      const [config, policy, factoryInfo, version, availableAmount, lastProposalId, accessKeyResult, accountResult, activityResult] = await Promise.all([
+      const activityPromise = fetchCommunityActivity(refreshActivity);
+      fund.activityPromise = activityPromise;
+      const [config, policy, factoryInfo, version, availableAmount, lastProposalId, accessKeyResult, accountResult] = await Promise.all([
         viewOnContract(daoId, "get_config"),
         viewOnContract(daoId, "get_policy"),
         viewOnContract(daoId, "get_factory_info"),
@@ -1081,11 +1120,6 @@
         viewOnContract(daoId, "get_last_proposal_id"),
         queryRpc({ request_type: "view_access_key_list", finality: "final", account_id: daoId }),
         queryRpc({ request_type: "view_account", finality: "final", account_id: daoId }),
-        fetch(`${appConfig.communityActivityUrl || "/api/community-fund/activity"}${refreshActivity ? "?refresh=1" : ""}`, { headers: { Accept: "application/json" } }).then(async (response) => {
-          const payload = await response.json();
-          if (!response.ok) throw new Error(payload.error || "Transaction history is unavailable.");
-          return payload;
-        }).catch((error) => ({ error: String(error?.message || error) })),
       ]);
       const proposalCount = Number(lastProposalId || 0);
       const proposalLimit = Math.min(proposalCount, 500);
@@ -1106,14 +1140,6 @@
       fund.proposalsComplete = proposalCount <= 500;
       fund.accessKeys = accessKeyResult?.keys || [];
       fund.codeHash = String(accountResult?.code_hash || "");
-      const indexedContributions = activityResult.contributions || [];
-      const recentContributions = fund.recentContributions.filter((recent) =>
-        !indexedContributions.some((item) => item.transactionHash === recent.transactionHash)
-      );
-      fund.activity = activityResult.error ? activityResult : {
-        ...activityResult,
-        contributions: [...indexedContributions, ...recentContributions],
-      };
       const goal = appConfig.communityGoal || {};
       if (goal.currency === "USDC") {
         const tokenId = String(goal.tokenId || "");
@@ -1147,6 +1173,15 @@
         version,
       });
       fund.error = null;
+      if (deferActivity) {
+        activityPromise.then((activityResult) => {
+          if (fund.activityPromise !== activityPromise) return;
+          applyCommunityActivity(activityResult);
+          renderCurrentPage();
+        });
+      } else {
+        applyCommunityActivity(await activityPromise);
+      }
     } catch (error) {
       fund.error = error;
     }
@@ -1339,25 +1374,37 @@
     const { methodName, args = {}, signerId, receiverId } = action;
     if (methodName === "community_contribute_usdc") {
       if (!action.transactionHash) return { state: "uncertain" };
-      const outcome = await rpcRequest("tx", {
-        tx_hash: action.transactionHash,
-        sender_account_id: signerId,
-        wait_until: "FINAL",
-      });
-      const verified = communityFundTools.verifyTokenContributionOutcome(outcome, {
+      if (String(action.context?.daoId || "") !== String(appConfig.communityDaoId || "")) return { state: "failed" };
+      const expected = {
         transactionHash: action.transactionHash,
         signerId,
         tokenId: receiverId,
         daoId: action.context?.daoId,
         amount: args.amount,
-      });
-      if (verified.state !== "confirmed") return verified;
+      };
+      let verified = { state: "uncertain" };
+      try {
+        const outcome = await rpcRequest("tx", {
+          tx_hash: action.transactionHash,
+          sender_account_id: signerId,
+          wait_until: "FINAL",
+        });
+        verified = communityFundTools.verifyTokenContributionOutcome(outcome, expected);
+      } catch (_error) {
+        // A finalized, exact indexer record may reconcile a temporary transaction-RPC failure.
+      }
+      if (verified.state === "failed") return verified;
+      if (verified.state !== "confirmed" && state.communityFund.activityPromise) {
+        applyCommunityActivity(await state.communityFund.activityPromise);
+      }
+      const indexedRecord = communityFundTools.verifiedContributionRecord(state.communityFund.activity, expected);
+      if (verified.state !== "confirmed" && !indexedRecord) return { state: "uncertain" };
       const balance = await viewOnContract(receiverId, "ft_balance_of", { account_id: action.context?.daoId });
       const expectedMinimum = BigInt(String(action.context?.previousTreasuryBalance || "0")) + BigInt(String(args.amount));
       if (BigInt(String(balance || "0")) < expectedMinimum) return { state: "uncertain" };
       const record = {
-        ...verified.record,
-        timestamp: (BigInt(Date.now()) * 1_000_000n).toString(),
+        ...(verified.record || indexedRecord),
+        timestamp: verified.record?.timestamp || indexedRecord?.timestamp || (BigInt(Date.now()) * 1_000_000n).toString(),
       };
       if (!state.communityFund.recentContributions.some((item) => item.transactionHash === record.transactionHash)) {
         state.communityFund.recentContributions.push(record);
@@ -2120,7 +2167,7 @@
         activityComplete = false;
       }
     }
-    const spent = fund.proposalsComplete
+    const spent = fund.proposalsComplete && (allocations.length === 0 || activityComplete)
       ? verifiedPayments.reduce((total, allocation) => total + BigInt(allocation.amount), 0n).toString()
       : null;
     const historyContributed = activityComplete
@@ -2153,11 +2200,18 @@
       : "";
     const contributionForm = safety.ready && assetReady && state.accountId && goalSnapshot
       && (!goal.uiContributionCap || !contributionLimit.reached)
-      ? `<form class="fund-action-card" data-community-contribution novalidate><span class="section-kicker">Support this fund</span><h2>Contribute</h2><p>Choose an amount to support this fund. This public Testnet contribution cannot be personally withdrawn or automatically refunded.</p><label for="fund-contribution-amount">${isUsdc ? "Amount ($)" : `Amount in ${assetLabel}`}</label><input id="fund-contribution-amount" name="amount" type="number" inputmode="decimal" min="0.000001" step="0.000001" aria-describedby="fund-contribution-help" required><p class="field-help" id="fund-contribution-help">Small amounts such as $0.01 or $0.10 are supported. Before approval, the wallet review shows the exact token, network, recipient, and amount.</p><div class="form-error-summary" tabindex="-1" role="alert" hidden></div><button class="button button-primary" type="submit">Contribute</button></form>`
+      ? `<form class="fund-action-card fund-contribution-card" id="community-contribution-form" data-community-contribution novalidate><span class="section-kicker">Support this fund</span><h2>Contribute</h2><p>Choose an amount to support this fund.</p><label for="fund-contribution-amount">${isUsdc ? "Amount ($)" : `Amount in ${assetLabel}`}</label><input id="fund-contribution-amount" name="amount" type="number" inputmode="decimal" min="0.000001" step="0.000001" aria-describedby="fund-contribution-help fund-contribution-terms" required><p class="field-help" id="fund-contribution-help">Small amounts such as $0.01 or $0.10 are supported. The wallet review identifies ${escapeHtml(assetLabel)}, the recipient, and the exact amount.</p>${goal.contributionTerms ? `<p class="fund-contribution-terms" id="fund-contribution-terms"><strong>Contribution terms:</strong> ${escapeHtml(goal.contributionTerms)}</p>` : '<p class="fund-contribution-terms" id="fund-contribution-terms">This public Testnet contribution cannot be personally withdrawn or automatically refunded.</p>'}<div class="form-error-summary" tabindex="-1" role="alert" hidden></div><button class="button button-primary" type="submit">Contribute</button></form>`
       : "";
     const goalReachedNotice = goal.uiContributionCap && contributionLimit.reached
-      ? `<div class="fund-action-card"><span class="section-kicker">Goal reached</span><h2>Contributions are closed in HarvestPool</h2><p>The ${escapeHtml(communityAmount(targetUnits, goal))} goal has been reached. This is an application-level restriction; the blockchain contracts do not enforce the fundraising goal.</p></div>`
+      ? `<div class="fund-action-card fund-contribution-card" id="community-contribution-panel" tabindex="-1"><span class="section-kicker">Goal reached</span><h2>Contributions are closed in HarvestPool</h2><p>The ${escapeHtml(communityAmount(targetUnits, goal))} goal has been reached. This is an application-level restriction; the blockchain contracts do not enforce the fundraising goal.</p></div>`
       : "";
+    const connectContribution = !state.accountId && !contributionLimit.reached
+      ? `<aside class="fund-action-card fund-contribution-card" id="community-contribution-panel" tabindex="-1"><span class="section-kicker">Support this fund</span><h2>Contribute</h2><p>Connect an eligible Testnet wallet to choose an amount and review the exact token transaction before approval.</p><button class="button button-dark" type="button" data-connect-wallet>Connect wallet</button>${goal.contributionTerms ? `<p class="fund-contribution-terms"><strong>Contribution terms:</strong> ${escapeHtml(goal.contributionTerms)}</p>` : ""}</aside>`
+      : "";
+    const contributionUnavailable = state.accountId && !registrationAction && !contributionForm && !goalReachedNotice
+      ? '<aside class="fund-action-card fund-contribution-card" id="community-contribution-panel" tabindex="-1"><span class="section-kicker">Contribution status</span><h2>Contributions unavailable</h2><p>HarvestPool has not completed every treasury and token verification required to enable this action.</p></aside>'
+      : "";
+    const primaryContributionAction = registrationAction || contributionForm || goalReachedNotice || connectContribution || contributionUnavailable;
     const proposalForm = safety.ready && assetReady && canPropose && activityComplete && goalSnapshot
       && sections.open.length === 0
       ? `<form class="fund-action-card" data-community-proposal novalidate><span class="section-kicker">Request payment</span><h2>Ask members to approve</h2><div class="goal-fixed-recipient"><span>Intended recipient</span><code>${escapeHtml(goal.recipient)}</code><small>HarvestPool fixes this recipient in its request form. SputnikDAO itself relies on members checking and approving the recipient written into the request.</small></div><div class="field"><label for="fund-allocation-amount">${isUsdc ? "Amount ($)" : `Amount in ${assetLabel}`}</label><input id="fund-allocation-amount" name="amount" type="number" inputmode="decimal" min="0.000001" step="0.000001" required></div><div class="field"><label for="fund-allocation-reason">Why is this payment needed?</label><textarea id="fund-allocation-reason" name="reason" maxlength="500" rows="3" required></textarea></div><p class="field-help">This public request uses a ${communityFundTools.formatNear(fund.policy.proposal_bond)} Testnet NEAR proposal bond. The payment is sent only after the required approvals.</p><div class="form-error-summary" tabindex="-1" role="alert" hidden></div><button class="button button-primary" type="submit">Request payment</button></form>`
@@ -2172,7 +2226,7 @@
         : "0")
       : null;
     const goalStatusClass = goalSnapshot?.status === "Goal reached" ? "status-funded" : goalSnapshot ? "status-open" : "status-pending";
-    const goalCard = `<section class="community-goal-card" aria-labelledby="community-goal-heading"><div class="goal-card-top"><div><span class="section-kicker">Fundraising progress</span><h2 id="community-goal-heading">${escapeHtml(goal.title)}</h2></div><span class="status ${goalStatusClass}"><span></span>${escapeHtml(goalSnapshot?.status || "Verification unavailable")}</span></div><p class="goal-purpose">${escapeHtml(goal.purpose)}</p>${goal.contributionTerms ? `<p class="goal-boundary-note"><strong>Contribution terms:</strong> ${escapeHtml(goal.contributionTerms)}</p>` : ""}<dl class="goal-summary-figures"><div><dt>Goal</dt><dd>${escapeHtml(communityAmount(targetUnits, goal))}</dd></div><div><dt>Raised</dt><dd>${goalSnapshot ? escapeHtml(communityAmount(goalSnapshot.contributed, goal)) : "Unavailable"}</dd></div><div><dt>Remaining</dt><dd>${remaining === null ? "Unavailable" : escapeHtml(communityAmount(remaining, goal))}</dd></div></dl>${goalProgress}${goalSnapshot && !contributionLimit.reached ? '<button class="button button-primary goal-summary-action" type="button" data-community-tab="overview">Support this fund</button>' : ""}<p class="goal-testnet-note">Testnet only · Figures use verified public contributions and are not real-dollar balances.</p></section>`;
+    const goalCard = `<section class="community-goal-card" aria-labelledby="community-goal-heading"><div class="goal-card-top"><div><span class="section-kicker">Fundraising progress</span><h2 id="community-goal-heading">${escapeHtml(goal.title)}</h2></div><span class="status ${goalStatusClass}"><span></span>${escapeHtml(goalSnapshot?.status || "Verification unavailable")}</span></div><p class="goal-purpose">${escapeHtml(goal.purpose)}</p><dl class="goal-summary-figures"><div><dt>Goal</dt><dd>${escapeHtml(communityAmount(targetUnits, goal))}</dd></div><div><dt>Raised</dt><dd>${goalSnapshot ? escapeHtml(communityAmount(goalSnapshot.contributed, goal)) : "Unavailable"}</dd></div><div><dt>Remaining</dt><dd>${remaining === null ? "Unavailable" : escapeHtml(communityAmount(remaining, goal))}</dd></div></dl>${goalProgress}${goalSnapshot && !contributionLimit.reached ? '<button class="button button-primary goal-summary-action" type="button" data-community-action="support">Support this fund</button>' : ""}<p class="goal-testnet-note">Testnet only · Figures use verified public contributions and are not real-dollar balances.</p></section>`;
     const activeTab = state.communityFund.activeTab || requestedCommunityTab();
     state.communityFund.activeTab = activeTab;
     const countLabel = (count) => count === null ? "" : ` <span>(${count})</span>`;
@@ -2188,7 +2242,7 @@
     const tabMarkup = `<div class="fund-tabs" role="tablist" aria-label="Community Goal sections">${tabs.map(([id, label, count]) => `<button class="fund-tab" id="community-tab-${id}" type="button" role="tab" aria-selected="${activeTab === id}" aria-controls="community-panel-${id}" tabindex="${activeTab === id ? "0" : "-1"}" data-community-tab="${id}">${label}${countLabel(count)}</button>`).join("")}</div>`;
     let panelMarkup = "";
     if (activeTab === "overview") {
-      panelMarkup = `<section class="fund-overview" id="community-panel-overview" role="tabpanel" aria-labelledby="community-tab-overview"><div class="fund-overview-heading"><div><span class="section-kicker">Take part</span><h2>Contribute or review the goal</h2><p><code>${escapeHtml(appConfig.communityDaoId)}</code></p></div>${connectMarkup}</div><div class="fund-stat-grid compact"><div><span>Paid</span><strong>${spent === null ? "Unavailable" : escapeHtml(communityAmount(spent, goal))}</strong><small>Only successful transfer receipts count</small></div><div><span>Needs approval</span><strong>${pending === null ? "Unavailable" : escapeHtml(communityAmount(pending, goal))}</strong><small>Open payment requests</small></div>${approvedUnverified !== "0" ? `<div><span>Confirmation pending</span><strong>${approvedUnverified === null ? "Unavailable" : escapeHtml(communityAmount(approvedUnverified, goal))}</strong><small>Not counted as paid</small></div>` : ""}</div><p class="fund-public-note">Any registered Testnet wallet can contribute. Only the fixed DAO members can request or approve payments.</p>${safetyMarkup}${registrationAction || contributionForm || goalReachedNotice ? `<div class="fund-action-grid single">${registrationAction}${contributionForm}${goalReachedNotice}</div>` : ""}</section>`;
+      panelMarkup = `<section class="fund-overview" id="community-panel-overview" role="tabpanel" aria-labelledby="community-tab-overview"><div class="fund-overview-heading"><div><span class="section-kicker">Fund details</span><h2>Verified treasury and governance</h2><p><code>${escapeHtml(appConfig.communityDaoId)}</code></p></div>${connectMarkup}</div><div class="fund-stat-grid compact"><div><span>Paid</span><strong>${spent === null ? "Unavailable" : escapeHtml(communityAmount(spent, goal))}</strong><small>Only successful transfer receipts count</small></div><div><span>Needs approval</span><strong>${pending === null ? "Unavailable" : escapeHtml(communityAmount(pending, goal))}</strong><small>Open payment requests</small></div>${approvedUnverified !== "0" ? `<div><span>Confirmation pending</span><strong>${approvedUnverified === null ? "Unavailable" : escapeHtml(communityAmount(approvedUnverified, goal))}</strong><small>Not counted as paid</small></div>` : ""}</div><p class="fund-public-note">Any registered Testnet wallet can contribute. Only the fixed DAO members can request or approve payments.</p>${safetyMarkup}</section>`;
     } else if (activeTab === "contributions") {
       panelMarkup = `<section class="fund-history" id="community-panel-contributions" role="tabpanel" aria-labelledby="community-tab-contributions"><div class="section-heading-inline"><div><span class="section-kicker">Verified transfers in</span><h2>Contributions</h2></div></div>${communityHistoryMarkup(fund, [], goal, "contributions")}</section>`;
     } else if (activeTab === "votes") {
@@ -2204,7 +2258,7 @@
     } else {
       panelMarkup = `<section class="fund-history" id="community-panel-activity" role="tabpanel" aria-labelledby="community-tab-activity"><div class="section-heading-inline"><div><span class="section-kicker">Public transaction record</span><h2>Money in and out</h2></div><a class="text-link" href="${escapeHtml(fund.activity?.sourceUrl || `https://testnet.nearblocks.io/address/${appConfig.communityDaoId}`)}" target="_blank" rel="noopener noreferrer">Open NearBlocks <span aria-hidden="true">↗</span></a></div>${communityHistoryMarkup(fund, allocations, goal)}</section>`;
     }
-    root.innerHTML = `${goalCard}${tabMarkup}${panelMarkup}`;
+    root.innerHTML = `<div class="community-fund-primary">${goalCard}${primaryContributionAction}</div>${tabMarkup}${panelMarkup}`;
   }
 
   function renderCurrentPage() {
@@ -4598,6 +4652,19 @@
       if (communityButton) {
         event.preventDefault();
         const action = communityButton.dataset.communityAction;
+        if (action === "support") {
+          const panel = $("#community-contribution-form, #community-contribution-panel");
+          const focusTarget = $("#fund-contribution-amount", panel) || $("[data-connect-wallet]", panel) || panel;
+          if (panel) {
+            panel.classList.add("is-highlighted");
+            panel.scrollIntoView({
+              behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+              block: "center",
+            });
+            focusTarget?.focus({ preventScroll: true });
+            window.setTimeout(() => panel.classList.remove("is-highlighted"), 1200);
+          }
+        }
         if (action === "refresh") await refreshLiveData({ force: true });
         if (action === "refresh-history") {
           await loadCommunityFundData({ refreshActivity: true });
@@ -4831,12 +4898,20 @@
     updateCreationModeCopy();
     updateCreatePricePreview();
     try {
-      await setupNear();
+      const walletPromise = setupNear();
+      if (appConfig.page === "community_fund") {
+        await Promise.allSettled([
+          loadCommunityFundData({ deferActivity: true }),
+          loadNearPrice(),
+        ]);
+        document.body.classList.remove("wallet-session-loading");
+        renderCurrentPage();
+        await walletPromise;
+      } else {
+        await walletPromise;
+        await Promise.allSettled([loadBaseData(), loadNearPrice()]);
+      }
       captureWalletCallbackHash();
-      await Promise.allSettled([
-        appConfig.page === "community_fund" ? loadCommunityFundData() : loadBaseData(),
-        loadNearPrice(),
-      ]);
       state.lastLiveRefreshAt = Date.now();
       if (["details", "agreement", "issue_form", "supplier_invitation"].includes(appConfig.page)) {
         const id = $("[data-purchase-id]")?.dataset.purchaseId;
@@ -4859,6 +4934,10 @@
       if (document.visibilityState === "visible") {
         if (state.wallet) await syncWalletAccount().catch(() => null);
         await refreshLiveData({ force: true }).catch(() => null);
+        const remaining = await reconcilePendingActions().catch(() => []);
+        if (remaining.length) {
+          window.setTimeout(() => reconcilePendingActions({ poll: true }).catch(() => null), 250);
+        }
         scheduleExploreRefresh();
       }
     });

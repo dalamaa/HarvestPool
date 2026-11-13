@@ -13,3 +13,11 @@ test("failed external cover images become a designed placeholder", () => {
   assert.match(styles, /\.community-card-media\.image-unavailable \.community-card-image \{ display: none/);
   assert.match(styles, /\.community-card-media\.image-unavailable \.community-image-placeholder \{ display: grid/);
 });
+
+test("verified fund cards render first and hydrate finalized activity independently", () => {
+  assert.match(source, /hydrateVerifiedFunds/);
+  assert.match(source, /Promise\.allSettled/);
+  assert.match(source, /activity\?\.complete/);
+  assert.match(source, /activity\.stale/);
+  assert.match(source, /fund\.activityUrl/);
+});

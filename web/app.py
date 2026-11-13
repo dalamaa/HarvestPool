@@ -825,6 +825,17 @@ def _cached_community_activity(
     return dict(payload)
 
 
+def _peek_community_activity_cache(dao_id, token_id=""):
+    """Return only fresh, already-verified activity without starting an indexer read."""
+    cache_key = (dao_id, token_id)
+    now = time.monotonic()
+    with _community_activity_cache_lock:
+        cached = _community_activity_cache.get(cache_key)
+        if cached and now - cached["cached_at"] < COMMUNITY_ACTIVITY_CACHE_SECONDS:
+            return dict(cached["payload"])
+    return None
+
+
 @app.get("/api/community-fund/activity")
 def community_fund_activity():
     if not COMMUNITY_DAO_ID:
@@ -1027,7 +1038,7 @@ def close_db(_error):
         db.close()
 
 
-def _verified_fund_directory_item(fund):
+def _verified_fund_directory_item(fund, *, cached_only=False):
     """Return one verified treasury without mixing its activity with another fund."""
     dao_id = fund["daoId"]
     goal = fund["goal"]
@@ -1036,9 +1047,15 @@ def _verified_fund_directory_item(fund):
     contributed = None
     contributor_count = None
     try:
-        activity = _cached_community_activity(
-            dao_id, goal.get("tokenId", ""), goal=goal, evidence=fund["evidence"]
+        activity = (
+            _peek_community_activity_cache(dao_id, goal.get("tokenId", ""))
+            if cached_only
+            else _cached_community_activity(
+                dao_id, goal.get("tokenId", ""), goal=goal, evidence=fund["evidence"]
+            )
         )
+        if activity is None:
+            raise RuntimeError("Verified activity is not cached yet.")
         if activity.get("complete") or activity.get("boundedEvidence"):
             contributions = activity.get("contributions", [])
             contributed = sum(int(item.get("amount", "0")) for item in contributions)
@@ -1073,6 +1090,8 @@ def _verified_fund_directory_item(fund):
         "isVerifiedFund": True,
         "isMine": False,
         "detailUrl": f"/community-funds/{fund['slug']}",
+        "activityUrl": f"/api/community-funds/{fund['slug']}/activity",
+        "decimals": decimals,
     }
 
 
@@ -1084,7 +1103,9 @@ def list_community_funds():
     ).fetchall()
     items = []
     for fund in _configured_community_funds().values():
-        verified = _verified_fund_directory_item(fund)
+        # The directory shell must never wait serially for third-party indexer reads. Each
+        # verified card hydrates its own finalized activity after this response is rendered.
+        verified = _verified_fund_directory_item(fund, cached_only=True)
         if verified:
             items.append(verified)
     for row in rows:

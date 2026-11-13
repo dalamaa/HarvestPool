@@ -56,6 +56,28 @@
     return `<article class="community-directory-card">${image}<div class="community-card-body"><div class="community-card-top"><span class="status ${statusClass(fund.status)}"><span></span>${escapeHtml(displayStatus(fund.status))}</span>${fund.isVerifiedFund ? '<span class="verified-label">Verified Testnet fund</span>' : ""}</div><h3>${escapeHtml(fund.title)}</h3><p class="community-card-location">${escapeHtml(fund.location)}</p><p class="community-card-description">${escapeHtml(fund.description)}</p><div class="community-card-progress"><div class="goal-progress" role="progressbar" aria-label="Amount raised toward goal" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progress}"><span style="width:${progress}%"></span></div><div><strong>${progress}% funded</strong><span>${money(fund.raisedAmount)} raised · ${money(fund.targetAmount)} goal</span></div></div><dl class="community-card-meta"><div><dt>Contributors</dt><dd>${escapeHtml(contributorCopy)}</dd></div><div><dt>Deadline</dt><dd>${escapeHtml(readableDate(fund.contribution_deadline))}</dd></div></dl><a class="button button-outline" href="${escapeHtml(fund.detailUrl)}">View fund</a></div></article>`;
   }
 
+  function applyVerifiedActivity(fund, activity) {
+    if (!fund?.isVerifiedFund || !activity?.complete || activity.stale || activity.error) return false;
+    const contributions = activity.contributions || [];
+    const total = contributions.reduce((sum, item) => sum + BigInt(String(item.amount || "0")), 0n);
+    const scale = 10n ** BigInt(Number(fund.decimals ?? 6));
+    const whole = total / scale;
+    const fraction = (total % scale).toString().padStart(Number(fund.decimals ?? 6), "0").slice(0, 2).padEnd(2, "0");
+    fund.raisedAmount = `${whole}.${fraction}`;
+    fund.contributorsCount = new Set(contributions.map((item) => item.contributor || item.account).filter(Boolean)).size;
+    fund.status = Number(fund.raisedAmount) >= Number(fund.targetAmount) ? "Goal reached" : "Open for contributions";
+    return true;
+  }
+
+  async function hydrateVerifiedFunds(funds, render) {
+    await Promise.allSettled(funds.filter((fund) => fund.isVerifiedFund && fund.activityUrl).map(async (fund) => {
+      const response = await fetch(fund.activityUrl, { headers: { Accept: "application/json" } });
+      const activity = await response.json();
+      if (!response.ok) throw new Error(activity.error || "Verified activity is unavailable.");
+      if (applyVerifiedActivity(fund, activity)) render();
+    }));
+  }
+
   function bindImageFallbacks(root) {
     root.querySelectorAll(".community-card-image").forEach((image) => {
       const fallback = () => image.closest(".community-card-media")?.classList.add("image-unavailable");
@@ -91,6 +113,7 @@
       if (!response.ok) throw new Error(payload.error || "Community funds could not be loaded.");
       funds = payload.funds || [];
       render();
+      hydrateVerifiedFunds(funds, render).catch(() => null);
     } catch (error) {
       root.innerHTML = `<div class="error-card"><h2>Community funds are unavailable</h2><p>${escapeHtml(error.message)}</p><button class="button button-outline" type="button" onclick="window.location.reload()">Retry</button></div>`;
     }

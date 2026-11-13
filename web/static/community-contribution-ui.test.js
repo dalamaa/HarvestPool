@@ -23,6 +23,25 @@ test("Community Fund summary uses the customer-facing goal hierarchy", () => {
   assert.match(appSource, /% funded/);
   assert.match(appSource, />Support this fund</);
   assert.doesNotMatch(appSource, /class="goal-details"/);
+  assert.match(appSource, /community-fund-primary/);
+  assert.match(appSource, /id="community-contribution-form"/);
+  assert.match(appSource, /data-community-action="support"/);
+  assert.match(appSource, /scrollIntoView/);
+  assert.match(appSource, /fund-contribution-amount/);
+});
+
+test("Community Fund public reads render before wallet restoration and history hydration", () => {
+  assert.match(appSource, /loadCommunityFundData\(\{ deferActivity: true \}\)/);
+  assert.match(appSource, /document\.body\.classList\.remove\("wallet-session-loading"\);[\s\S]*renderCurrentPage\(\);[\s\S]*await walletPromise/);
+  assert.match(appSource, /activityPromise/);
+});
+
+test("finalized contribution recovery requires exact indexed evidence and treasury balance", () => {
+  assert.match(appSource, /verifiedContributionRecord/);
+  assert.match(appSource, /action\.context\?\.daoId/);
+  assert.match(appSource, /expectedMinimum/);
+  assert.match(appSource, /pendingActionStore\.remove\(action\.id\)/);
+  assert.match(appSource, /addEventListener\("pageshow",[\s\S]*reconcilePendingActions\(\)/);
 });
 
 test("Community Fund progress rendering never passes a BigInt to Math.floor", () => {
