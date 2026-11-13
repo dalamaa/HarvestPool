@@ -5,7 +5,7 @@
   "use strict";
 
   function matchesFilter(fund, filter) {
-    if (filter === "open") return fund?.status === "Open for Contributions";
+    if (filter === "open") return ["Open for contributions", "Open for Contributions"].includes(fund?.status);
     if (filter === "vote") return fund?.needsVote === true;
     if (filter === "completed") return fund?.status === "Completed";
     if (filter === "mine") return fund?.isMine === true;

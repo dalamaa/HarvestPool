@@ -7,10 +7,22 @@ const appSource = fs.readFileSync(path.join(__dirname, "app.js"), "utf8");
 const directorySource = fs.readFileSync(path.join(__dirname, "community-directory.js"), "utf8");
 
 test("Community Garden closes its contribution action at the application target", () => {
-  assert.match(appSource, /Goal Reached\. HarvestPool has disabled additional contributions/);
-  assert.match(appSource, />Contribute USDC</);
+  assert.match(appSource, /Goal reached\. HarvestPool has disabled additional contributions/);
+  assert.match(appSource, />Contribute</);
+  assert.match(appSource, /Amount \(\$\)/);
+  assert.match(appSource, /Small amounts such as \$0\.01 or \$0\.10 are supported/);
   assert.match(appSource, /This contribution exceeds the remaining/);
   assert.match(appSource, /application-level restriction/);
+});
+
+test("Community Fund summary uses the customer-facing goal hierarchy", () => {
+  assert.match(appSource, /goal-summary-figures/);
+  assert.match(appSource, /<dt>Goal<\/dt>/);
+  assert.match(appSource, /<dt>Raised<\/dt>/);
+  assert.match(appSource, /<dt>Remaining<\/dt>/);
+  assert.match(appSource, /% funded/);
+  assert.match(appSource, />Support this fund</);
+  assert.doesNotMatch(appSource, /class="goal-details"/);
 });
 
 test("Community Fund progress rendering never passes a BigInt to Math.floor", () => {

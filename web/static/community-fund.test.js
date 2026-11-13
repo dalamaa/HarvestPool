@@ -305,7 +305,7 @@ test("one-goal progress uses verified direct contributions and matching recipien
   assert.equal(snapshot.contributed, "1250");
   assert.equal(snapshot.progressBasisPoints, 10000);
   assert.equal(snapshot.spent, "600");
-  assert.equal(snapshot.status, "Goal Reached");
+  assert.equal(snapshot.status, "Goal reached");
   assert.equal(fund.goalSnapshot(goal, null, allocations, activity), null);
 });
 
@@ -316,38 +316,39 @@ test("USDC goal progress uses targetUnits without a NEAR target", () => {
   assert.equal(snapshot.progressBasisPoints, 2500);
 });
 
-test("a 0.01 USDC contribution is exactly ten percent of the Community Garden target", () => {
+test("a $0.01 contribution remains valid against the $100 Community Garden goal", () => {
   const snapshot = fund.goalSnapshot(
-    { configured: true, recipient: "recipient.testnet", targetUnits: "100000" },
+    { configured: true, recipient: "recipient.testnet", targetUnits: "100000000" },
     "10000",
     [],
     {},
   );
-  assert.equal(snapshot.progressBasisPoints, 1000);
-  assert.equal(Math.floor(snapshot.progressBasisPoints / 100), 10);
+  assert.equal(snapshot.progressBasisPoints, 1);
+  assert.equal(Math.floor(snapshot.progressBasisPoints / 100), 0);
+  assert.equal(fund.contributionLimit({ uiContributionCap: true, targetUnits: "100000000" }, "0", "10000").allowed, true);
 });
 
 test("goal progress caps only the bar and keeps actual over-target totals", () => {
   const snapshot = fund.goalSnapshot({ configured: true, recipient: "recipient.testnet", targetUnits: "1000000" }, "1250000", [], {});
   assert.equal(snapshot.contributed, "1250000");
   assert.equal(snapshot.progressBasisPoints, 10000);
-  assert.equal(snapshot.status, "Goal Reached");
+  assert.equal(snapshot.status, "Goal reached");
 });
 
-test("application target cap allows the remaining amount and blocks overshoot or repeats", () => {
-  const goal = { uiContributionCap: true, targetUnits: "100000" };
+test("application target cap allows small amounts and blocks overshoot or repeats at $100", () => {
+  const goal = { uiContributionCap: true, targetUnits: "100000000" };
   assert.deepEqual(fund.contributionLimit(goal, "0", "10000"), {
     allowed: true,
     reached: false,
-    remaining: "100000",
+    remaining: "100000000",
   });
-  assert.deepEqual(fund.contributionLimit(goal, "90000", "10000"), {
+  assert.deepEqual(fund.contributionLimit(goal, "99990000", "10000"), {
     allowed: true,
     reached: false,
     remaining: "10000",
   });
-  assert.equal(fund.contributionLimit(goal, "90000", "10001").allowed, false);
-  assert.deepEqual(fund.contributionLimit(goal, "100000", "1"), {
+  assert.equal(fund.contributionLimit(goal, "99990000", "10001").allowed, false);
+  assert.deepEqual(fund.contributionLimit(goal, "100000000", "1"), {
     allowed: false,
     reached: true,
     remaining: "0",

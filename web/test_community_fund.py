@@ -219,7 +219,7 @@ class CommunityFundActivityTests(unittest.TestCase):
         page = response.get_data(as_text=True)
         self.assertEqual(response.status_code, 200)
         self.assertIn("harvestpool-community-garden.sputnikv2.testnet", page)
-        self.assertIn('"targetUnits": "100000"', page)
+        self.assertIn('"targetUnits": "100000000"', page)
         self.assertIn('"communityActivityUrl": "/api/community-funds/community-garden/activity"', page)
         self.assertIn("Community Garden", page)
         self.assertNotIn("community-garden-deploy", page)
@@ -235,7 +235,7 @@ class CommunityFundActivityTests(unittest.TestCase):
         self.assertEqual(args[0], "harvestpool-community-garden.sputnikv2.testnet")
         self.assertEqual(args[1], web_app.CANONICAL_USDC_TOKEN_ID)
         self.assertEqual(kwargs["evidence"], {})
-        self.assertEqual(kwargs["goal"]["targetUnits"], "100000")
+        self.assertEqual(kwargs["goal"]["targetUnits"], "100000000")
 
     def test_directory_maps_two_verified_funds_to_independent_daos(self):
         payload = {"complete": True, "contributions": [], "proposalTransactions": {}}
@@ -248,7 +248,7 @@ class CommunityFundActivityTests(unittest.TestCase):
         with patch.object(web_app, "_cached_community_activity", side_effect=activity):
             directory = web_app.app.test_client().get("/api/community-funds").get_json()["funds"]
         verified = {item["slug"]: item for item in directory if item["isVerifiedFund"]}
-        self.assertEqual(verified["community-garden"]["targetAmount"], "0.10")
+        self.assertEqual(verified["community-garden"]["targetAmount"], "100.00")
         self.assertEqual(
             verified["community-garden"]["detailUrl"],
             "/community-funds/community-garden",
@@ -266,20 +266,20 @@ class CommunityFundActivityTests(unittest.TestCase):
         }
         with patch.object(web_app, "_cached_community_activity", return_value=activity):
             item = web_app._verified_fund_directory_item(fund)
-        self.assertEqual(item["status"], "Open for Contributions")
+        self.assertEqual(item["status"], "Open for contributions")
         self.assertEqual(item["raisedAmount"], "0.00")
 
     def test_directory_keeps_goal_reached_after_verified_payments(self):
         fund = web_app._configured_community_funds()["community-garden"]
         activity = {
             "complete": True,
-            "contributions": [{"amount": "100000", "contributor": "alice.testnet"}],
+            "contributions": [{"amount": "100000000", "contributor": "alice.testnet"}],
             "proposalTransactions": {"1": [{"transfers": [{"amount": "80000"}]}]},
         }
         with patch.object(web_app, "_cached_community_activity", return_value=activity):
             item = web_app._verified_fund_directory_item(fund)
-        self.assertEqual(item["status"], "Fully Funded")
-        self.assertEqual(item["raisedAmount"], "0.10")
+        self.assertEqual(item["status"], "Goal reached")
+        self.assertEqual(item["raisedAmount"], "100.00")
 
     def test_goal_configuration_is_all_or_nothing_and_uses_exact_yocto(self):
         complete = {

@@ -1075,20 +1075,24 @@ h3 { margin-bottom: 10px; font-size: 21px; line-height: 1.1; }
 .fund-safety-blocked { border: 1px solid #e7b9ad; border-left: 5px solid var(--danger); background: var(--coral-soft); }
 .fund-safety-blocked p { margin: 5px 0; }
 .fund-safety-blocked ul { margin: 8px 0 0; padding-left: 20px; }
-.community-goal-card { margin-bottom: 16px; padding: 24px; border: 1px solid #b9d8c8; border-radius: 13px; background: linear-gradient(135deg, #f4faf5 0%, var(--white) 70%); box-shadow: var(--shadow); }
+.community-goal-card { margin-bottom: 16px; padding: clamp(22px, 4vw, 36px); border: 1px solid #b9d8c8; border-radius: 13px; background: linear-gradient(135deg, #f4faf5 0%, var(--white) 70%); box-shadow: var(--shadow); }
 .goal-card-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
 .goal-card-top h2 { max-width: 28ch; margin: 5px 0 0; font-size: clamp(27px, 3vw, 38px); line-height: 1.08; }
-.goal-purpose { max-width: 70ch; margin: 12px 0 16px; color: var(--ink); font-size: 15px; line-height: 1.55; white-space: pre-wrap; }
+.goal-purpose { max-width: 70ch; margin: 12px 0 8px; color: var(--ink); font-size: 15px; line-height: 1.55; white-space: pre-wrap; }
 .goal-progress { height: 14px; overflow: hidden; border: 1px solid #b9d8c8; border-radius: 999px; background: #e3eee7; }
 .goal-progress > span { display: block; height: 100%; border-radius: inherit; background: var(--success); }
 .goal-progress-label { display: flex; justify-content: space-between; gap: 16px; margin-top: 9px; color: var(--muted); font-size: 13px; }
 .goal-progress-label strong { color: var(--pine); }
 .goal-progress-unavailable { padding: 14px 16px; border: 1px dashed var(--line); border-radius: 8px; background: var(--mist); color: var(--muted); font-size: 13px; }
-.goal-details { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; margin: 17px 0 0; padding: 1px; overflow: hidden; border: 1px solid var(--line); border-radius: 9px; background: var(--line); }
-.goal-details > div { min-width: 0; padding: 14px; background: var(--white); }
-.goal-details dt { color: var(--muted); font-size: 11px; text-transform: uppercase; }
-.goal-details dd { margin: 5px 0 0; color: var(--pine); font-size: 14px; font-weight: 700; overflow-wrap: anywhere; }
-.goal-boundary-note { margin: 12px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
+.goal-summary-figures { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 24px 0 20px; padding: 18px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.goal-summary-figures > div { min-width: 0; padding: 0 20px; }
+.goal-summary-figures > div:first-child { padding-left: 0; }
+.goal-summary-figures > div + div { border-left: 1px solid var(--line); }
+.goal-summary-figures dt { color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.goal-summary-figures dd { margin: 6px 0 0; color: var(--pine); font-family: "Space Grotesk", sans-serif; font-size: clamp(20px, 3vw, 28px); font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.1; overflow-wrap: anywhere; }
+.goal-boundary-note { max-width: 75ch; margin: 8px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
+.goal-summary-action { margin-top: 18px; }
+.goal-testnet-note { margin: 18px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
 .goal-fixed-recipient { display: grid; gap: 5px; margin: 15px 0 17px; padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--mist); }
 .goal-fixed-recipient > span { color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
 .goal-fixed-recipient code { color: var(--pine); overflow-wrap: anywhere; }
@@ -1164,7 +1168,6 @@ h3 { margin-bottom: 10px; font-size: 21px; line-height: 1.1; }
 
 @media (max-width: 1100px) {
   .fund-stat-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .goal-details { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .fund-history-row { grid-template-columns: 1fr 1fr; }
   .fund-history-row > .text-link, .fund-history-row > .fund-reference-missing { grid-column: 1 / -1; }
 }
@@ -1181,7 +1184,9 @@ h3 { margin-bottom: 10px; font-size: 21px; line-height: 1.1; }
   .community-fund-section { padding-bottom: 74px; }
   .community-goal-card, .fund-overview, .fund-proposals, .fund-history, .fund-action-card, .fund-setup-state { padding: 18px; }
   .goal-card-top, .fund-overview-heading, .fund-proposal-top, .fund-payment-reference { align-items: flex-start; flex-direction: column; }
-  .goal-details, .fund-stat-grid, .fund-action-grid, .fund-proposal-details, .fund-history-row { grid-template-columns: 1fr; }
+  .fund-stat-grid, .fund-action-grid, .fund-proposal-details, .fund-history-row { grid-template-columns: 1fr; }
+  .goal-summary-figures > div { padding: 0 10px; }
+  .goal-summary-figures dd { font-size: clamp(18px, 5vw, 22px); }
   .goal-progress-label { align-items: flex-start; flex-direction: column; gap: 3px; }
   .fund-stat-grid > div { min-height: 0; }
   .fund-proposal-actions .button, .fund-action-card > .button { width: 100%; }

@@ -34,8 +34,15 @@
 
   function statusClass(status) {
     if (status === "Completed") return "status-funded";
-    if (["Open for Contributions", "Fully Funded", "In Progress"].includes(status)) return "status-open";
+    if (status === "Goal reached" || status === "Fully Funded") return "status-funded";
+    if (["Open for contributions", "Open for Contributions", "In Progress"].includes(status)) return "status-open";
     return "status-pending";
+  }
+
+  function displayStatus(status) {
+    if (status === "Fully Funded") return "Goal reached";
+    if (status === "Open for Contributions") return "Open for contributions";
+    return status;
   }
 
   function fundCard(fund) {
@@ -46,7 +53,7 @@
       ? "Contributor count unavailable"
       : `${fund.contributorsCount} contributor${fund.contributorsCount === 1 ? "" : "s"}`;
     const image = fund.cover_image_url ? `<div class="community-card-media"><img class="community-card-image" src="${escapeHtml(fund.cover_image_url)}" alt="" loading="lazy"><div class="community-image-placeholder" role="img" aria-label="Cover image unavailable"><span aria-hidden="true">◇</span><strong>Image unavailable</strong></div></div>` : "";
-    return `<article class="community-directory-card">${image}<div class="community-card-body"><div class="community-card-top"><span class="status ${statusClass(fund.status)}"><span></span>${escapeHtml(fund.status)}</span>${fund.isVerifiedFund ? '<span class="verified-label">Verified Testnet example</span>' : ""}</div><h3>${escapeHtml(fund.title)}</h3><p class="community-card-location">${escapeHtml(fund.location)}</p><p class="community-card-description">${escapeHtml(fund.description)}</p><div class="community-card-progress"><div class="goal-progress" role="progressbar" aria-label="Amount raised toward target" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progress}"><span style="width:${progress}%"></span></div><div><strong>${money(fund.raisedAmount)} raised</strong><span>of ${money(fund.targetAmount)}</span></div></div><dl class="community-card-meta"><div><dt>Contributors</dt><dd>${escapeHtml(contributorCopy)}</dd></div><div><dt>Deadline</dt><dd>${escapeHtml(readableDate(fund.contribution_deadline))}</dd></div></dl><a class="button button-outline" href="${escapeHtml(fund.detailUrl)}">View Fund</a></div></article>`;
+    return `<article class="community-directory-card">${image}<div class="community-card-body"><div class="community-card-top"><span class="status ${statusClass(fund.status)}"><span></span>${escapeHtml(displayStatus(fund.status))}</span>${fund.isVerifiedFund ? '<span class="verified-label">Verified Testnet fund</span>' : ""}</div><h3>${escapeHtml(fund.title)}</h3><p class="community-card-location">${escapeHtml(fund.location)}</p><p class="community-card-description">${escapeHtml(fund.description)}</p><div class="community-card-progress"><div class="goal-progress" role="progressbar" aria-label="Amount raised toward goal" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progress}"><span style="width:${progress}%"></span></div><div><strong>${progress}% funded</strong><span>${money(fund.raisedAmount)} raised · ${money(fund.targetAmount)} goal</span></div></div><dl class="community-card-meta"><div><dt>Contributors</dt><dd>${escapeHtml(contributorCopy)}</dd></div><div><dt>Deadline</dt><dd>${escapeHtml(readableDate(fund.contribution_deadline))}</dd></div></dl><a class="button button-outline" href="${escapeHtml(fund.detailUrl)}">View fund</a></div></article>`;
   }
 
   function bindImageFallbacks(root) {
@@ -237,7 +244,7 @@
       const savedNotice = new URL(window.location.href).searchParams.get("created") === "1"
         ? '<div class="fund-safety-ready community-saved-notice" role="status"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4 7v5c0 4.5 3.4 7.9 8 9 4.6-1.1 8-4.5 8-9V7l-8-4Z"/><path d="m8.5 12 2.2 2.2 4.8-5"/></svg><div><strong>Fund request saved</strong><span>This public URL is ready to share. Contributions remain disabled while setup is pending.</span></div></div>'
         : "";
-      root.innerHTML = `${savedNotice}<nav class="detail-breadcrumb" aria-label="Breadcrumb"><a href="/community-funds">Community Funds</a><span aria-hidden="true">/</span><span>${escapeHtml(fund.title)}</span></nav><header class="request-detail-header"><div><span class="status ${statusClass(fund.status)}"><span></span>${escapeHtml(fund.status)}</span><h1>${escapeHtml(fund.title)}</h1><p>${escapeHtml(fund.location)} · ${escapeHtml(fund.category)}</p></div><div class="request-goal"><span>Target</span><strong>${money(fund.targetAmount)}</strong><small>${money(fund.raisedAmount)} raised · ${fund.contributorsCount} contributors</small></div></header><div class="terms-boundary request-setup-boundary"><strong>This is a saved fund request, not an active treasury.</strong><p>Contributions, payment requests, and votes are disabled until isolated accounting and approval rules are configured. Individual fund treasuries and broader member governance are planned for a future release.</p></div>${detailTabs(fund)}`;
+      root.innerHTML = `${savedNotice}<nav class="detail-breadcrumb" aria-label="Breadcrumb"><a href="/community-funds">Community Funds</a><span aria-hidden="true">/</span><span>${escapeHtml(fund.title)}</span></nav><header class="request-detail-header"><div><span class="status ${statusClass(fund.status)}"><span></span>${escapeHtml(displayStatus(fund.status))}</span><h1>${escapeHtml(fund.title)}</h1><p>${escapeHtml(fund.location)} · ${escapeHtml(fund.category)}</p></div><div class="request-goal"><span>Goal</span><strong>${money(fund.targetAmount)}</strong><small>${money(fund.raisedAmount)} raised · ${fund.contributorsCount} contributors</small></div></header><div class="terms-boundary request-setup-boundary"><strong>This is a saved fund request, not an active treasury.</strong><p>Contributions, payment requests, and votes are disabled until isolated accounting and approval rules are configured. Individual fund treasuries and broader member governance are planned for a future release.</p></div>${detailTabs(fund)}`;
       const tabs = Array.from(root.querySelectorAll("[data-request-tab]"));
       const activate = (button, focus = false) => {
         tabs.forEach((tab) => {

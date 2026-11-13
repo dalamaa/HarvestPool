@@ -327,7 +327,7 @@
     const progressBasisPoints = Number((contributed * 10_000n) / target > 10_000n
       ? 10_000n
       : (contributed * 10_000n) / target);
-    const status = contributed >= target ? "Goal Reached" : "Open for Contributions";
+    const status = contributed >= target ? "Goal reached" : "Open for contributions";
     return {
       contributed: contributed.toString(),
       target: target.toString(),

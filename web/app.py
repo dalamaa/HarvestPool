@@ -160,17 +160,17 @@ COMMUNITY_GARDEN_DAO_ID = "harvestpool-community-garden.sputnikv2.testnet"
 COMMUNITY_GARDEN_GOAL = {
     "configured": True,
     "title": "Community Garden",
-    "purpose": "Build a separate, member-governed Testnet USDC fund for community garden supplies and shared growing needs.",
+    "purpose": "Help fund community garden supplies and shared growing needs.",
     "contributionTerms": (
-        "Contributions are public Testnet USDC transfers to this DAO treasury and cannot be "
+        "Contributions are public Testnet transfers to this fund and cannot be "
         "personally withdrawn or automatically refunded. HarvestPool stops contributions at the "
-        "0.10 USDC target in the app; the DAO and token contracts do not enforce that limit."
+        "$100 goal in the app; the blockchain contracts do not enforce that limit."
     ),
     "recipient": "harvestpool-farmer-1.testnet",
     "currency": "USDC",
     "decimals": 6,
     "tokenId": CANONICAL_USDC_TOKEN_ID,
-    "targetUnits": "100000",
+    "targetUnits": "100000000",
     "targetYocto": "",
     "configurationError": "",
     "uiContributionCap": True,
@@ -1053,9 +1053,9 @@ def _verified_fund_directory_item(fund):
     if contributed is None:
         status = "In Progress"
     elif contributed >= target:
-        status = "Fully Funded"
+        status = "Goal reached"
     else:
-        status = "Open for Contributions"
+        status = "Open for contributions"
     decimals = int(goal.get("decimals", 6))
     amount = None if contributed is None else f"{Decimal(contributed) / (Decimal(10) ** decimals):.2f}"
     target_amount = f"{Decimal(target) / (Decimal(10) ** decimals):.2f}"
