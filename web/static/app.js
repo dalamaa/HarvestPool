@@ -206,6 +206,7 @@
   const ACTIVE_ISSUE_STATES = new Set(["Open", "NeedsGroupDecision"]);
   const ACTIVE_DECISION_STATES = new Set(["Open", "AwaitingSupplier"]);
   const ACCOUNT_DATA_PAGES = new Set(["dashboard", "farmer", "decisions", "details", "agreement", "issue_form", "supplier_invitation"]);
+  const DIRECT_PURCHASE_PAGES = new Set(["agreement", "issue_form", "supplier_invitation"]);
   const CREATE_SUBMITTED_KEY = "harvestpool:create-submitted:v1";
   let exploreRefreshTimer = null;
   let actionCenterRefreshTimer = null;
@@ -1483,7 +1484,35 @@
     }
   }
 
-  async function loadPublicPurchaseDataOnce({ background = false } = {}) {
+  async function loadDirectPurchaseDataOnce(purchaseId) {
+    walletStateRun = null;
+    state.purchaseDiscoveryStatus = "loading";
+    try {
+      const [config, purchase] = await Promise.all([
+        view("get_config"),
+        view("get_purchase", { purchase_id: String(purchaseId) }),
+      ]);
+      if (!purchase) throw new Error("That purchase does not exist on the current contract.");
+      state.config = config;
+      state.members = [];
+      state.suppliers = [];
+      state.purchases = [purchase];
+      state.currentPurchase = purchase;
+      state.dataLoaded = true;
+      state.purchaseDiscoveryStatus = "ready";
+      state.publicSnapshotHydrated = false;
+      state.liveDataError = null;
+      state.lastVerifiedRefreshAt = Date.now();
+      return purchase;
+    } catch (error) {
+      state.liveDataError = error;
+      state.purchaseDiscoveryStatus = state.dataLoaded ? "ready" : "error";
+      throw error;
+    }
+  }
+
+  async function loadPublicPurchaseDataOnce({ background = false, purchaseId = null } = {}) {
+    if (purchaseId !== null && purchaseId !== undefined) return loadDirectPurchaseDataOnce(purchaseId);
     walletStateRun = null;
     const hydrated = hydratePublicSnapshot();
     const firstLoad = !state.dataLoaded;
@@ -1581,9 +1610,9 @@
     }
   }
 
-  async function loadPublicPurchaseData({ background = false } = {}) {
+  async function loadPublicPurchaseData({ background = false, purchaseId = null } = {}) {
     if (publicPurchaseDataRun) return publicPurchaseDataRun;
-    publicPurchaseDataRun = loadPublicPurchaseDataOnce({ background });
+    publicPurchaseDataRun = loadPublicPurchaseDataOnce({ background, purchaseId });
     try {
       return await publicPurchaseDataRun;
     } finally {
@@ -1594,17 +1623,26 @@
   function pageBaseDataOptions({ background = false } = {}) {
     return {
       background,
-      loadWallet: ["dashboard", "farmer", "decisions"].includes(appConfig.page),
-      loadGovernance: ["decisions"].includes(appConfig.page),
+      purchaseId: DIRECT_PURCHASE_PAGES.has(appConfig.page) ? appConfig.purchaseId : null,
+      loadWallet: ACCOUNT_DATA_PAGES.has(appConfig.page),
+      loadGovernance: ["decisions", "issue_form"].includes(appConfig.page),
     };
   }
 
   async function loadBaseData(options = {}) {
     const selected = { ...pageBaseDataOptions(options), ...options };
-    await loadPublicPurchaseData({ background: Boolean(selected.background) });
+    await loadPublicPurchaseData({
+      background: Boolean(selected.background),
+      purchaseId: selected.purchaseId,
+    });
     const reads = [];
     if (selected.loadWallet !== false) reads.push(loadWalletState({ strict: Boolean(selected.strictWallet) }));
-    if (selected.loadGovernance !== false) reads.push(loadV3Data({ background: Boolean(selected.background) }));
+    if (selected.loadGovernance !== false) {
+      reads.push(loadV3Data({
+        background: Boolean(selected.background),
+        purchaseId: selected.purchaseId ?? null,
+      }));
+    }
     await Promise.all(reads);
   }
 
@@ -4962,6 +5000,18 @@
 
   async function handleSupplierRequestAction(button, purchase, decision) {
     if (!purchase || !["accept", "decline"].includes(decision)) return null;
+    const freshPurchase = await loadPurchase(purchase.id).catch((error) => {
+      showToast(`The latest supplier proposal could not be verified. No transaction was submitted. ${String(error?.message || "")}`.trim(), "error");
+      return null;
+    });
+    if (!freshPurchase
+      || freshPurchase.state !== "AwaitingSupplier"
+      || String(freshPurchase.supplier_id) !== String(state.accountId)
+      || !accountAuthorityReady()) {
+      showToast("The latest supplier proposal or wallet authority could not be verified. No transaction was submitted. Refresh and try again.", "error");
+      return null;
+    }
+    purchase = freshPurchase;
     const accepting = decision === "accept";
     const methodName = accepting ? "accept_supplier_request" : "decline_supplier_request";
     const reviewed = await reviewTransaction({

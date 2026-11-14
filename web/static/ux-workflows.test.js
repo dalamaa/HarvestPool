@@ -119,13 +119,28 @@ test("deal navigation keeps dashboard context and names the three time concepts"
 
 test("Explore renders public purchases before wallet and governance enrichment finishes", () => {
   assert.match(templateSource, /id="purchase-grid"[^>]*aria-busy="true"[\s\S]*Loading Group Deals/);
-  assert.match(appSource, /async function loadPublicPurchaseData\(\{ background = false \} = \{\}\)/);
+  assert.match(appSource, /async function loadPublicPurchaseDataOnce\(\{ background = false, purchaseId = null \} = \{\}\)/);
   assert.match(appSource, /state\.dataLoaded = true;[\s\S]*state\.purchaseDiscoveryStatus = "ready";[\s\S]*renderExplore\(\);/);
   assert.match(appSource, /function pageBaseDataOptions\(\{ background = false \} = \{\}\)/);
-  assert.match(appSource, /loadWallet: \["dashboard", "farmer", "decisions"\]\.includes\(appConfig\.page\)/);
-  assert.match(appSource, /loadGovernance: \["decisions"\]\.includes\(appConfig\.page\)/);
+  assert.match(appSource, /loadWallet: ACCOUNT_DATA_PAGES\.has\(appConfig\.page\)/);
+  assert.match(appSource, /loadGovernance: \["decisions", "issue_form"\]\.includes\(appConfig\.page\)/);
   assert.match(appSource, /appConfig\.page === "decisions" \|\| appConfig\.page === "explore"/);
   assert.match(appSource, /harvestpoolFirstPurchaseCardMs/);
+});
+
+test("direct account pages use one authoritative purchase read before wallet authority", () => {
+  assert.match(appSource, /const DIRECT_PURCHASE_PAGES = new Set\(\["agreement", "issue_form", "supplier_invitation"\]\)/);
+  assert.match(appSource, /async function loadDirectPurchaseDataOnce\(purchaseId\)/);
+  assert.match(appSource, /purchaseId: DIRECT_PURCHASE_PAGES\.has\(appConfig\.page\) \? appConfig\.purchaseId : null/);
+  assert.match(appSource, /loadPublicPurchaseData\(\{[\s\S]*purchaseId: selected\.purchaseId[\s\S]*\}\);[\s\S]*loadWalletState/);
+  const directLoader = appSource.slice(
+    appSource.indexOf("async function loadDirectPurchaseDataOnce"),
+    appSource.indexOf("async function loadPublicPurchaseDataOnce"),
+  );
+  assert.doesNotMatch(directLoader, /get_purchase_count/);
+  assert.match(appSource, /const freshPurchase = await loadPurchase\(purchase\.id\)/);
+  assert.match(appSource, /freshPurchase\.state !== "AwaitingSupplier"/);
+  assert.match(appSource, /No transaction was submitted\. Refresh and try again\./);
 });
 
 test("Create loads the public supplier directory without waiting for Meteor", () => {
