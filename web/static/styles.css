@@ -1021,6 +1021,7 @@ h3 { margin-bottom: 10px; font-size: 21px; line-height: 1.1; }
 .community-card-meta > div { padding: 12px; border-radius: 8px; background: var(--mist); }
 .community-card-meta dt { color: var(--muted); font-size: 11px; }
 .community-card-meta dd { margin: 4px 0 0; color: var(--pine); font-size: 13px; font-weight: 600; }
+.community-directory-status { grid-column: 1 / -1; justify-content: flex-start; }
 .community-empty { grid-column: 1 / -1; }
 .community-how { padding-top: 46px; padding-bottom: 82px; border-top: 1px solid var(--line); }
 .community-how-steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; margin: 30px 0 0; padding: 1px; border: 1px solid var(--line); border-radius: 12px; background: var(--line); list-style: none; overflow: hidden; }

@@ -75,10 +75,7 @@
     const progressAttributes = progress === null
       ? 'aria-label="Funding progress is being verified" aria-busy="true"'
       : `role="progressbar" aria-label="Amount raised toward goal" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progress}"`;
-    const retry = fund.verificationState === "error"
-      ? `<button class="button button-outline button-small" type="button" data-retry-fund-verification="${escapeHtml(fund.slug)}">Retry verification</button>`
-      : "";
-    return `<article class="community-directory-card">${image}<div class="community-card-body"><div class="community-card-top"><span class="status ${statusClass(fund.status)}"><span></span>${escapeHtml(displayStatus(fund.status))}</span>${fund.isVerifiedFund ? '<span class="verified-label">Verified Testnet fund</span>' : ""}</div><h3>${escapeHtml(fund.title)}</h3><p class="community-card-location">${escapeHtml(fund.location)}</p><p class="community-card-description">${escapeHtml(fund.description)}</p><div class="community-card-progress"><div class="goal-progress" ${progressAttributes}><span style="width:${progress ?? 0}%"></span></div><div><strong>${escapeHtml(progressLabel)}</strong><span>${escapeHtml(raisedCopy)} · ${money(fund.targetAmount)} goal</span><small class="community-verification-copy">${escapeHtml(verificationCopy)}</small>${retry}</div></div><dl class="community-card-meta"><div><dt>Contributors</dt><dd>${escapeHtml(contributorCopy)}</dd></div><div><dt>Deadline</dt><dd>${escapeHtml(readableDate(fund.contribution_deadline))}</dd></div></dl><a class="button button-outline" href="${escapeHtml(fund.detailUrl)}">View fund</a></div></article>`;
+    return `<article class="community-directory-card">${image}<div class="community-card-body"><div class="community-card-top"><span class="status ${statusClass(fund.status)}"><span></span>${escapeHtml(displayStatus(fund.status))}</span>${fund.isVerifiedFund ? '<span class="verified-label">Verified Testnet fund</span>' : ""}</div><h3>${escapeHtml(fund.title)}</h3><p class="community-card-location">${escapeHtml(fund.location)}</p><p class="community-card-description">${escapeHtml(fund.description)}</p><div class="community-card-progress"><div class="goal-progress" ${progressAttributes}><span style="width:${progress ?? 0}%"></span></div><div><strong>${escapeHtml(progressLabel)}</strong><span>${escapeHtml(raisedCopy)} · ${money(fund.targetAmount)} goal</span><small class="community-verification-copy">${escapeHtml(verificationCopy)}</small></div></div><dl class="community-card-meta"><div><dt>Contributors</dt><dd>${escapeHtml(contributorCopy)}</dd></div><div><dt>Deadline</dt><dd>${escapeHtml(readableDate(fund.contribution_deadline))}</dd></div></dl><a class="button button-outline" href="${escapeHtml(fund.detailUrl)}">View fund</a></div></article>`;
   }
 
   function applyVerifiedActivity(fund, activity, verificationState = null) {
@@ -131,7 +128,7 @@
     );
   }
 
-  async function hydrateVerifiedFund(fund, render, { force = false } = {}) {
+  async function hydrateVerifiedFund(fund, render, { force = false, onVerified = null } = {}) {
     if (fund.verificationPromise) return fund.verificationPromise;
     fund.verificationPromise = (async () => {
       try {
@@ -142,11 +139,14 @@
         if (!response.ok) throw new Error(activity.error || "Verified activity is unavailable.");
         if (!applyVerifiedActivity(fund, activity)) throw new Error("Verified activity was incomplete.");
         writeVerifiedCache(fund.slug, activity);
+        if (typeof onVerified === "function") onVerified(fund);
         render();
+        return true;
       } catch (error) {
         fund.verificationError = String(error?.message || error);
         if (fund.raisedAmount === null || fund.raisedAmount === undefined) fund.verificationState = "error";
         render();
+        return false;
       } finally {
         fund.verificationPromise = null;
       }
@@ -154,10 +154,15 @@
     return fund.verificationPromise;
   }
 
-  async function hydrateVerifiedFunds(funds, render) {
+  async function hydrateVerifiedFunds(funds, render, options = {}) {
+    let verified = 0;
+    let failures = 0;
     for (const fund of funds.filter((item) => item.isVerifiedFund && item.activityUrl)) {
-      await hydrateVerifiedFund(fund, render, { force: true }).catch(() => null);
+      const succeeded = await hydrateVerifiedFund(fund, render, { force: true, onVerified: options.onVerified }).catch(() => false);
+      if (succeeded) verified += 1;
+      else failures += 1;
     }
+    return { verified, failures };
   }
 
   function bindImageFallbacks(root) {
@@ -174,9 +179,20 @@
     let funds = [];
     let active = "all";
     let accountId = "";
+    let phase = "loading";
+    let refreshError = false;
+    let lastVerifiedAt = 0;
+    let refreshPromise = null;
+    const relativeRefreshTime = (timestamp) => {
+      const ageSeconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+      if (ageSeconds < 5) return "just now";
+      if (ageSeconds < 60) return `${ageSeconds} seconds ago`;
+      const minutes = Math.floor(ageSeconds / 60);
+      return `${minutes} minute${minutes === 1 ? "" : "s"} ago`;
+    };
     const emptyCopy = () => {
       const verificationPending = funds.some((fund) => fund.isVerifiedFund && ["pending", undefined].includes(fund.verificationState));
-      if (verificationPending && ["open", "mine"].includes(active)) return ["Verifying fund activity", "This view will update as finalized fund activity arrives."];
+      if (verificationPending) return ["Checking verified fund activity", "This view will update as finalized contribution evidence arrives."];
       if (active === "vote") return accountId
         ? ["No verified votes need your action", `No pending fund decision is verified for ${accountId}.`]
         : ["Connect a wallet to check votes", "Vote eligibility comes from each configured fund’s verified governance policy."];
@@ -187,22 +203,34 @@
       if (active === "open") return ["No funds are open for contributions", "Try All Funds to see requests and goal-reached funds."];
       return ["No Community Funds are available", "Start a fund request for your community."];
     };
+    const statusMarkup = () => {
+      if (phase === "loading") {
+        return `<div class="community-directory-status wallet-empty-state data-loading-state" role="status" aria-live="polite"><span class="loading-label"><span class="loading-spinner" aria-hidden="true"></span><strong>Loading community funds…</strong></span><span>Checking verified contribution history.</span><span class="loading-bar short" aria-hidden="true"></span></div>`;
+      }
+      if (phase === "error") {
+        return `<div class="community-directory-status error-card" role="status"><h2>Community funds are unavailable</h2><p>We could not load the fund directory. Try again when the network is ready.</p><button class="button button-outline" type="button" data-community-directory-refresh>Retry</button></div>`;
+      }
+      if (refreshError) {
+        return `<div class="community-directory-status live-read-warning" role="status" aria-live="polite"><strong>Community funds need a retry.</strong><span>Showing the last verified fund records while the latest activity is unavailable.</span><button class="button button-outline button-small" type="button" data-community-directory-refresh>Retry</button></div>`;
+      }
+      if (lastVerifiedAt) {
+        return `<div class="community-directory-status live-refresh-status" role="status" aria-live="polite"><span>Updated ${escapeHtml(relativeRefreshTime(lastVerifiedAt))}${phase === "refreshing" ? " · Checking for updates…" : ""}</span><button class="button button-outline button-small" type="button" data-community-directory-refresh ${phase === "refreshing" ? "disabled" : ""}>${phase === "refreshing" ? "Checking…" : "Refresh"}</button></div>`;
+      }
+      return `<div class="community-directory-status live-refresh-status" role="status" aria-live="polite"><span>Community funds loaded</span><button class="button button-outline button-small" type="button" data-community-directory-refresh ${phase === "refreshing" ? "disabled" : ""}>${phase === "refreshing" ? "Checking…" : "Refresh"}</button></div>`;
+    };
     const render = () => {
       const visible = funds.filter((fund) => directoryTools.matchesFilter(fund, active, { accountId }));
       const [emptyTitle, emptyMessage] = emptyCopy();
-      root.innerHTML = visible.length
+      const content = visible.length
         ? visible.map(fundCard).join("")
         : `<div class="empty-state community-empty"><h2>${escapeHtml(emptyTitle)}</h2><p>${escapeHtml(emptyMessage)}</p>${active === "all" ? '<a class="button button-outline" href="/community-funds/start">Start a Community Fund</a>' : ""}</div>`;
+      root.innerHTML = `${statusMarkup()}${content}`;
       bindImageFallbacks(root);
     };
     root.addEventListener("click", (event) => {
-      const button = event.target.closest("[data-retry-fund-verification]");
-      if (!button) return;
-      const fund = funds.find((item) => item.slug === button.dataset.retryFundVerification);
-      if (!fund || fund.verificationPromise) return;
-      fund.verificationState = "pending";
-      render();
-      hydrateVerifiedFund(fund, render, { force: true }).catch(() => null);
+      const button = event.target.closest("[data-community-directory-refresh]");
+      if (!button || refreshPromise) return;
+      loadDirectory({ force: true }).catch(() => null);
     });
     window.addEventListener("harvestpool:wallet-account", (event) => {
       accountId = String(event.detail?.accountId || "");
@@ -217,17 +245,43 @@
       });
       render();
     }));
-    try {
-      const response = await fetch("/api/community-funds", { headers: { Accept: "application/json", "X-HarvestPool-Owner-Token": ownerToken() } });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error || "Community funds could not be loaded.");
-      funds = payload.funds || [];
-      funds.filter((fund) => fund.isVerifiedFund && ["pending", undefined].includes(fund.verificationState)).forEach(applyCachedActivity);
+    async function loadDirectory({ force = false, initial = false } = {}) {
+      if (refreshPromise) return refreshPromise;
+      phase = initial ? "loading" : "refreshing";
+      refreshError = false;
       render();
-      hydrateVerifiedFunds(funds, render).catch(() => null);
-    } catch (error) {
-      root.innerHTML = `<div class="error-card"><h2>Community funds are unavailable</h2><p>${escapeHtml(error.message)}</p><button class="button button-outline" type="button" onclick="window.location.reload()">Retry</button></div>`;
+      refreshPromise = (async () => {
+        try {
+          const response = await fetch("/api/community-funds", { headers: { Accept: "application/json", "X-HarvestPool-Owner-Token": ownerToken() } });
+          const payload = await response.json();
+          if (!response.ok) throw new Error("Community funds could not be loaded.");
+          funds = payload.funds || [];
+          funds.filter((fund) => fund.isVerifiedFund && ["pending", undefined].includes(fund.verificationState)).forEach((fund) => {
+            if (applyCachedActivity(fund)) {
+              const savedAt = Number(readVerifiedCache()[fund.slug]?.savedAt || 0);
+              if (savedAt > lastVerifiedAt) lastVerifiedAt = savedAt;
+            }
+          });
+          phase = lastVerifiedAt ? "refreshing" : "loading";
+          render();
+          const result = await hydrateVerifiedFunds(funds, render, {
+            force,
+            onVerified: () => { lastVerifiedAt = Date.now(); },
+          });
+          phase = "ready";
+          refreshError = result.failures > 0;
+          render();
+        } catch (_error) {
+          phase = funds.length ? "ready" : "error";
+          refreshError = Boolean(funds.length);
+          render();
+        } finally {
+          refreshPromise = null;
+        }
+      })();
+      return refreshPromise;
     }
+    loadDirectory({ initial: true }).catch(() => null);
   }
 
   function clearFieldErrors(form) {

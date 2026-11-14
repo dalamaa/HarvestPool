@@ -774,6 +774,7 @@
       AwaitingSupplier: "Awaiting supplier confirmation",
       Declined: "Supplier declined",
       Open: "Open for contributions",
+      FullyReserved: "Fully reserved",
       Funded: "Funded · awaiting fulfillment",
       FulfillmentPending: "Fulfillment review",
       FulfillmentApproved: "Fulfillment approved",
@@ -793,6 +794,7 @@
     if (status === "Proposed" || status === "AwaitingSupplier") return "status-proposed";
     if (["Declined", "Failed", "Canceled", "Cancelled", "Expired"].includes(status)) return "status-failed";
     if (status === "Open") return "status-open";
+    if (status === "FullyReserved") return "status-pending";
     if (status === "Failed") return "status-failed";
     if (status === "PaymentPending" || status === "FulfillmentPending" || status === "DeadlinePassed") return "status-pending";
     return "status-funded";
@@ -853,6 +855,11 @@
 
   function availableCapacity(purchase) {
     return Math.max(0, Number(purchase.max_quantity || 0) - Number(purchase.total_quantity || 0));
+  }
+
+  function purchaseDisplayState(purchase) {
+    const state = presentationState(purchase);
+    return state === "Open" && availableCapacity(purchase) === 0 ? "FullyReserved" : state;
   }
 
   function spotLabel(count) {
@@ -1439,7 +1446,7 @@
         : null;
       state.dataLoaded = true;
       state.purchaseDiscoveryStatus = "ready";
-      state.lastVerifiedRefreshAt = Date.now();
+      if (count === 0 || freshPurchases.length > 0) state.lastVerifiedRefreshAt = Date.now();
       const currentId = appConfig.purchaseId === null || appConfig.purchaseId === undefined ? null : String(appConfig.purchaseId);
       const currentPurchase = currentId === null ? null : state.purchases.find((purchase) => String(purchase.id) === currentId);
       if (currentPurchase) state.currentPurchase = currentPurchase;
@@ -2973,7 +2980,7 @@
   }
 
   function accountDataUnavailableMarkup(message) {
-    return `<div class="issues-unavailable" role="status"><strong>Live account data is temporarily unavailable.</strong><p>${escapeHtml(message)}</p><button class="button button-outline button-small" type="button" data-action="retry-live-data">Retry live data</button></div>`;
+    return `<div class="issues-unavailable" role="status"><strong>Live account data is temporarily unavailable.</strong><p>${escapeHtml(message)}</p><button class="button button-outline button-small" type="button" data-action="retry-live-data">Retry</button></div>`;
   }
 
   function accountAuthorityReady() {
@@ -2995,15 +3002,16 @@
     return `<div class="live-refresh-status" role="status" aria-live="polite"><span>Updated ${escapeHtml(relativeRefreshTime(state.lastVerifiedRefreshAt))} · Checking for updates…</span><button class="button button-outline button-small" type="button" data-action="retry-live-data">Refresh</button></div>`;
   }
 
-  function accountReadWarningMarkup() {
-    if (!state.accountDataError) return "";
-    return `<div class="live-read-warning" role="status"><strong>Couldn't check the latest wallet data.</strong><span>Showing the last verified account records. Restricted actions stay disabled until the wallet state is verified.</span><button class="button button-outline button-small" type="button" data-action="retry-live-data">Refresh</button></div>`;
-  }
-
-  function purchaseReadWarningMarkup() {
-    return state.liveDataError
-      ? `<div class="live-read-warning" role="status"><strong>Couldn't check for updates.</strong><span>Showing the last verified deals. Restricted actions remain disabled until fresh authoritative state is available.</span><button class="button button-outline button-small" type="button" data-action="retry-live-data">Refresh</button></div>`
-      : "";
+  function liveReadWarningMarkup() {
+    if (!state.liveDataError && !state.accountDataError) return "";
+    const bothFailed = state.liveDataError && state.accountDataError;
+    const message = bothFailed
+      ? "Showing the last verified deal and wallet records. Restricted actions stay disabled until the latest authoritative reads succeed."
+      : state.accountDataError
+        ? "Showing the last verified account records. Restricted actions stay disabled until wallet state is verified."
+        : "Showing the last verified deals. Restricted actions stay disabled until fresh authoritative state is available.";
+    const retry = state.lastVerifiedRefreshAt ? "" : '<button class="button button-outline button-small" type="button" data-action="retry-live-data">Retry</button>';
+    return `<div class="live-read-warning" role="status"><strong>Some latest data needs a retry.</strong><span>${message}</span>${retry}</div>`;
   }
 
   function renderRecoveredCreateSuccess(purchase) {
@@ -3107,7 +3115,7 @@
         : purchase.state === "Declined"
           ? `<p class="deal-outcome deal-outcome-failed"><strong>Supplier declined.</strong> The organizer can revise the terms and send a new proposal.</p>`
           : terminalOutcomeMarkup(purchase);
-    return `<article class="purchase-card purchase-card-live" data-status="${escapeHtml(presentationState(purchase))}"><div class="purchase-card-main"><div class="purchase-card-top">${statusPill(presentationState(purchase))}<span class="section-kicker">Deal #${escapeHtml(purchase.id)}</span></div><h2>${escapeHtml(livePurchaseTitle(purchase))}</h2><p class="purchase-description">${escapeHtml(livePurchaseDescription(purchase))}</p>${outcome}${packageContentsMarkup(purchase)}<p class="purchase-supplier">${escapeHtml(supplier)}</p><div class="purchase-card-price"><strong>${price ? escapeHtml(price) : escapeHtml(paymentLabel(purchase, purchase.price_per_unit))}</strong><span>per ${escapeHtml(unit)}</span>${price && !isV5(purchase) ? `<small>Wallet contribution: ${escapeHtml(paymentLabel(purchase, purchase.price_per_unit))} per ${escapeHtml(unit)}</small>` : ""}</div><div class="progress-label"><span>${quantityLabel(purchase, total)} of ${quantityLabel(purchase, max)} reserved</span><span>${participantCount(purchase)} ${participantCount(purchase) === 1 ? "buyer" : "buyers"}</span></div><div class="progress-track"><span style="width: ${progress}%"></span></div></div><div class="purchase-card-actions"><span>${presentationState(purchase) === "DeadlinePassed" ? "Closed · final result pending" : `Join by ${escapeHtml(formatDate(purchase.deadline_ns))}`}</span><div>${primaryAction}<button class="card-share-link" type="button" data-action="share-purchase" data-purchase-id="${escapeHtml(purchase.id)}">Share</button></div></div></article>`;
+    return `<article class="purchase-card purchase-card-live" data-status="${escapeHtml(presentationState(purchase))}"><div class="purchase-card-main"><div class="purchase-card-top">${statusPill(purchaseDisplayState(purchase))}<span class="section-kicker">Deal #${escapeHtml(purchase.id)}</span></div><h2>${escapeHtml(livePurchaseTitle(purchase))}</h2><p class="purchase-description">${escapeHtml(livePurchaseDescription(purchase))}</p>${outcome}${packageContentsMarkup(purchase)}<p class="purchase-supplier">${escapeHtml(supplier)}</p><div class="purchase-card-price"><strong>${price ? escapeHtml(price) : escapeHtml(paymentLabel(purchase, purchase.price_per_unit))}</strong><span>per ${escapeHtml(unit)}</span>${price && !isV5(purchase) ? `<small>Wallet contribution: ${escapeHtml(paymentLabel(purchase, purchase.price_per_unit))} per ${escapeHtml(unit)}</small>` : ""}</div><div class="progress-label"><span>${quantityLabel(purchase, total)} of ${quantityLabel(purchase, max)} reserved</span><span>${participantCount(purchase)} ${participantCount(purchase) === 1 ? "buyer" : "buyers"}</span></div><div class="progress-track"><span style="width: ${progress}%"></span></div></div><div class="purchase-card-actions"><span>${presentationState(purchase) === "DeadlinePassed" ? "Closed · final result pending" : `Join by ${escapeHtml(formatDate(purchase.deadline_ns))}`}</span><div>${primaryAction}<button class="card-share-link" type="button" data-action="share-purchase" data-purchase-id="${escapeHtml(purchase.id)}">Share</button></div></div></article>`;
   }
 
   function renderExplore() {
@@ -3141,10 +3149,7 @@
       ? liveVisible.length ? liveVisible.map(renderPurchaseCard).join("") : `<div class="lane-empty"><h3>No ${escapeHtml(filterLabel)} yet.</h3><p>When a purchase is open, its terms and contribution action will appear here.</p>${activeFilter === "available" ? '<a class="button button-outline button-small" href="/deals?filter=all">View all deals</a> ' : ""}<a class="button button-outline button-small" href="/create">Start a purchase</a></div>`
       : "";
     const totalVisible = visiblePurchases.length;
-    const degraded = state.liveDataError
-      ? `<div class="live-read-warning" role="status"><strong>Couldn't check for updates.</strong><span>Showing the last verified deals. Some records may be temporarily unavailable.</span><button class="button button-outline button-small" type="button" data-action="retry-live-data">Retry</button></div>`
-      : "";
-    grid.innerHTML = `<section class="purchase-source live-source">${degraded}${liveRefreshStatusMarkup()}<div class="source-heading source-heading-compact"><strong>${totalVisible} ${totalVisible === 1 ? "deal" : "deals"}</strong><span class="live-source-label"><span class="live-pulse"></span>Authoritative Testnet state</span></div><div class="purchase-grid purchase-grid-live">${liveContent}</div></section>`;
+    grid.innerHTML = `<section class="purchase-source live-source">${liveReadWarningMarkup()}${liveRefreshStatusMarkup()}<div class="source-heading source-heading-compact"><strong>${totalVisible} ${totalVisible === 1 ? "deal" : "deals"}</strong><span class="live-source-label"><span class="live-pulse"></span>Authoritative Testnet state</span></div><div class="purchase-grid purchase-grid-live">${liveContent}</div></section>`;
     grid.setAttribute("aria-busy", "false");
     if (liveVisible.length && !document.documentElement.dataset.harvestpoolFirstPurchaseCardMs) {
       document.documentElement.dataset.harvestpoolFirstPurchaseCardMs = performance.now().toFixed(1);
@@ -3349,6 +3354,13 @@
     root.innerHTML = `<div class="details-top"><div><p class="eyebrow">Group Deal #${escapeHtml(purchase.id)}</p><h1>${escapeHtml(livePurchaseTitle(purchase))}</h1><p class="supplier-line">From <strong>${escapeHtml(supplierName(purchase))}</strong> · ${escapeHtml(purchase.supplier_location || "Location not listed")}</p></div><div class="details-actions"><button class="share-button" type="button" data-action="share-purchase" data-purchase-id="${escapeHtml(purchase.id)}">${icon("link")}Share Group Deal</button>${action}</div></div>${actionAlertsMarkup(relevantTasks, "This deal needs your attention")}${refundNoticeMarkup(purchase)}${deadlineGuidance}
       <div class="details-layout"><div><section class="detail-panel funding-panel">${statusPill(presentationState(purchase))}<h2>${escapeHtml(listed)} per ${escapeHtml(unit)}</h2><p class="funding-description">${escapeHtml(livePurchaseDescription(purchase))}</p>${failed}<div class="funding-big"><strong>${total} / ${max}</strong><span>${escapeHtml(pluralUnit(unit, max))} reserved</span></div><div class="progress-label"><span>${participantCount(purchase)} ${participantCount(purchase) === 1 ? "buyer participated" : "buyers participated"}</span><span>${quantityLabel(purchase, availableCapacity(purchase))} available</span></div><div class="progress-track"><span style="width: ${progress}%"></span></div><div class="funding-meta"><div><strong>${quantityLabel(purchase, purchase.min_quantity)}</strong><span>minimum needed</span></div><div><strong>Maximum ${quantityLabel(purchase, purchase.max_quantity_per_household)}</strong><span>per buyer</span></div><div><strong>${escapeHtml(formatDate(purchase.deadline_ns))}</strong><span>last day to join or cancel</span></div><div><strong>${escapeHtml(formatDate(purchase.fulfillment_evidence_deadline_ns))}</strong><span>fulfillment due</span></div></div></section><section class="detail-panel" style="margin-top:18px"><span class="section-kicker">Pickup or delivery</span><h2>How members receive the order</h2><p>${escapeHtml(purchase.pickup_or_delivery)}</p><p><strong>Contact the supplier:</strong> ${escapeHtml(purchase.supplier_public_contact)}</p></section></div>
       <aside><section class="detail-panel detail-panel-dark"><span class="section-kicker">Deal Terms</span><h2>What everyone agreed to</h2><dl class="term-list"><div class="term-row"><dt>You receive</dt><dd>${escapeHtml(purchase.description)}${unitDetails(purchase).contents ? ` · ${escapeHtml(unitDetails(purchase).contents)}` : ""}</dd></div><div class="term-row"><dt>Listed price</dt><dd>${escapeHtml(listed)} per ${escapeHtml(unit)}</dd></div><div class="term-row"><dt>Payment details</dt><dd>${isV5(purchase) ? `${escapeHtml(listed)} per ${escapeHtml(unit)}, settled as exactly ${escapeHtml(paymentLabel(purchase, purchase.price_per_unit))} on Testnet. Test tokens are not a real USD card charge and are not promised to be redeemable for dollars.` : `${escapeHtml(paymentLabel(purchase, purchase.price_per_unit))} per ${escapeHtml(unit)}`}</dd></div><div class="term-row"><dt>Group target</dt><dd>At least ${quantityLabel(purchase, purchase.min_quantity)} by ${escapeHtml(formatDate(purchase.deadline_ns, true))}</dd></div><div class="term-row"><dt>Buyer limit</dt><dd>Maximum ${quantityLabel(purchase, purchase.max_quantity_per_household)} per buyer</dd></div><div class="term-row"><dt>Voluntary cancellation</dt><dd>Available until the same group closing time</dd></div><div class="term-row"><dt>If the order fails</dt><dd>${escapeHtml(purchase.cancellation_and_refund_terms)}</dd></div><div class="term-row"><dt>${isV5(purchase) ? "Testnet fulfillment test" : "Delivery and payment"}</dt><dd>${isV5(purchase) ? "For this smoke test, the supplier submits a simulation reference and funded buyers approve only that Testnet evidence. This does not claim physical delivery. The contract still uses its fulfillment and payment methods." : "The supplier submits a delivery reference. Funded buyers confirm fulfillment before payment can be released."}</dd></div></dl>${detailsEligibility(purchase)}<details class="technical-details"><summary>Agreement record</summary><p>Supplier wallet: ${escapeHtml(purchase.supplier_id)}</p><p>Terms fingerprint: <code>${escapeHtml(purchase.terms_hash)}</code></p>${agreement ? `<p>Accepted on ${escapeHtml(formatDate(agreement.accepted_at_ns, true))}.</p>` : "<p>The named supplier has not accepted these terms.</p>"}</details></section></aside></div>`;
+    if (purchaseDisplayState(purchase) === "FullyReserved") {
+      const status = $(".funding-panel .status", root);
+      if (status) {
+        status.className = "status status-pending";
+        status.innerHTML = "<span></span>Fully reserved";
+      }
+    }
   }
 
   function renderV4Agreement(root, purchase) {
@@ -3643,12 +3655,13 @@
             : `<p class="organizer-result is-accepted"><strong>Supplier accepted.</strong> The deal is published and its link is ready to share.</p>`;
       return `<article class="member-purchase-card"><div class="purchase-card-top">${statusPill(presentationState(purchase))}<span class="section-kicker">Deal #${escapeHtml(purchase.id)}</span></div><h3>${escapeHtml(livePurchaseTitle(purchase))}</h3><p class="purchase-supplier">Supplier: ${escapeHtml(supplierName(purchase))}</p>${workflowResult}${purchase.state === "Failed" ? `<p class="deal-state-explanation"><strong>Why it failed:</strong> ${escapeHtml(failureReason(purchase))}</p>` : ""}<div class="member-card-meta"><span><strong>${quantityLabel(purchase, purchase.total_quantity)} of ${quantityLabel(purchase, purchase.min_quantity)}</strong> reserved</span><span><strong>${quantityLabel(purchase, availableCapacity(purchase))}</strong> available</span><span><strong>${participantCount(purchase)}</strong> buyers participated</span><span><strong>${escapeHtml(formatDate(purchase.deadline_ns))}</strong> deal closes</span></div><div class="card-actions"><a class="button button-outline button-small" href="/deals/${encodeURIComponent(purchase.id)}">View Group Deal</a>${invitation}</div></article>`;
     };
-    const joinedSection = joinedDeals.length ? `<section class="dashboard-group"><div class="section-heading-inline"><div><span class="section-kicker">Deals you joined</span><h2>Your secured group buys</h2></div></div><div class="dashboard-grid">${joinedDeals.map(joinedCard).join("")}</div></section>` : state.liveDataError ? `<section class="dashboard-group"><div class="dashboard-empty"><h2>Some joined deals need a retry.</h2><p>HarvestPool could not verify every purchase record, so it is not claiming that your list is empty.</p></div></section>` : `<section class="dashboard-group"><div class="dashboard-empty"><h2>No joined deals yet.</h2><p>When a contribution is confirmed, your quantity, supplier, progress, and deadlines will appear here.</p><a class="button button-primary" href="/deals">Explore Deals</a></div></section>`;
-    const createdSection = createdDeals.length ? `<section class="dashboard-group"><div class="section-heading-inline"><div><span class="section-kicker">Deals you created</span><h2>Your posted Group Deals</h2></div></div><div class="dashboard-grid">${createdDeals.map(createdCard).join("")}</div></section>` : state.liveDataError ? `<section class="dashboard-group"><div class="dashboard-empty"><h2>Some posted deals need a retry.</h2><p>HarvestPool could not verify every purchase record, so it is not claiming that your list is empty.</p></div></section>` : `<section class="dashboard-group"><div class="dashboard-empty"><h2>No posted deals yet.</h2><p>Post a Group Deal when you are ready to organize an order or publish a supplier offer.</p><a class="button button-outline" href="/create">Post a Group Deal</a></div></section>`;
+    const accountRecordsUnavailable = state.liveDataError || state.accountDataError;
+    const joinedSection = joinedDeals.length ? `<section class="dashboard-group"><div class="section-heading-inline"><div><span class="section-kicker">Deals you joined</span><h2>Your secured group buys</h2></div></div><div class="dashboard-grid">${joinedDeals.map(joinedCard).join("")}</div></section>` : accountRecordsUnavailable ? `<section class="dashboard-group"><div class="dashboard-empty"><h2>Some joined deals need a retry.</h2><p>HarvestPool could not verify every purchase record, so it is not claiming that your list is empty.</p></div></section>` : `<section class="dashboard-group"><div class="dashboard-empty"><h2>No joined deals yet.</h2><p>When a contribution is confirmed, your quantity, supplier, progress, and deadlines will appear here.</p><a class="button button-primary" href="/deals">Explore Deals</a></div></section>`;
+    const createdSection = createdDeals.length ? `<section class="dashboard-group"><div class="section-heading-inline"><div><span class="section-kicker">Deals you created</span><h2>Your posted Group Deals</h2></div></div><div class="dashboard-grid">${createdDeals.map(createdCard).join("")}</div></section>` : accountRecordsUnavailable ? `<section class="dashboard-group"><div class="dashboard-empty"><h2>Some posted deals need a retry.</h2><p>HarvestPool could not verify every purchase record, so it is not claiming that your list is empty.</p></div></section>` : `<section class="dashboard-group"><div class="dashboard-empty"><h2>No posted deals yet.</h2><p>Post a Group Deal when you are ready to organize an order or publish a supplier offer.</p><a class="button button-outline" href="/create">Post a Group Deal</a></div></section>`;
     const relevantTasks = actionCenterTasks().filter((task) => task.kind !== "supplier-consent");
     const filterLabels = [["all", "All"], ["active", "Active"], ["completed", "Completed"], ["unsuccessful", "Unsuccessful"]];
     const filters = `<div class="dashboard-filters filter-tabs" role="group" aria-label="Filter My Group Buys">${filterLabels.map(([value, label]) => `<button class="filter-tab ${activeDashboardFilter === value ? "active" : ""}" type="button" data-dashboard-filter="${value}" aria-pressed="${activeDashboardFilter === value}">${label}</button>`).join("")}</div>`;
-    root.innerHTML = `<div class="dashboard-toolbar"><div><span class="section-kicker">Connected wallet</span><h2>My Group Buys</h2></div><span class="wallet-caption">${escapeHtml(shortAccount(state.accountId))}</span></div>${purchaseReadWarningMarkup()}${accountReadWarningMarkup()}${liveRefreshStatusMarkup()}${filters}${actionAlertsMarkup(relevantTasks)}${joinedSection}${createdSection}`;
+    root.innerHTML = `<div class="dashboard-toolbar"><div><span class="section-kicker">Connected wallet</span><h2>My Group Buys</h2></div><span class="wallet-caption">${escapeHtml(shortAccount(state.accountId))}</span></div>${liveReadWarningMarkup()}${liveRefreshStatusMarkup()}${filters}${actionAlertsMarkup(relevantTasks)}${joinedSection}${createdSection}`;
   }
 
   function renderDecisionCard(purchase, type) {
@@ -3849,7 +3862,7 @@
       ? `<section class="action-center-active" aria-labelledby="archived-actions-heading"><div class="section-heading-inline"><div><span class="section-kicker">Archived</span><h2 id="archived-actions-heading">${archivedCards.length} hidden ${archivedCards.length === 1 ? "alert" : "alerts"}</h2></div></div><div class="decision-grid">${archivedCards.join("")}</div></section>`
       : `<section class="action-center-section action-center-empty"><div class="empty-icon">${icon("shield")}</div><h2>No archived alerts</h2><p>Archived unresolved alerts remain here while automatic verification continues.</p></section>`;
     const activeTab = actionCenterTabFromHash();
-    root.innerHTML = `<p class="sr-only" role="status" aria-live="polite" data-action-center-announcement></p>${purchaseReadWarningMarkup()}${accountReadWarningMarkup()}${liveRefreshStatusMarkup()}${actionCenterTabsMarkup(activeTab, cards.length, archivedCards.length)}${actionCenterPanelMarkup("active", activeTab, active)}${actionCenterPanelMarkup("archived", activeTab, archived)}${actionCenterPanelMarkup("history", activeTab, renderDecisionHistory(state.purchases))}${actionCenterPanelMarkup("issues", activeTab, renderV3Dashboard())}`;
+    root.innerHTML = `<p class="sr-only" role="status" aria-live="polite" data-action-center-announcement></p>${liveReadWarningMarkup()}${liveRefreshStatusMarkup()}${actionCenterTabsMarkup(activeTab, cards.length, archivedCards.length)}${actionCenterPanelMarkup("active", activeTab, active)}${actionCenterPanelMarkup("archived", activeTab, archived)}${actionCenterPanelMarkup("history", activeTab, renderDecisionHistory(state.purchases))}${actionCenterPanelMarkup("issues", activeTab, renderV3Dashboard())}`;
   }
 
   function renderIssueFormPage() {
@@ -3903,7 +3916,7 @@
     const financialPurchases = state.purchases.filter((purchase) => isV5(purchase) && ["FulfillmentApproved", "Completed"].includes(purchase.state));
     const canReviewFinancialOperations = Boolean(state.accountId && financialPurchases.length);
     if (!ownPurchases.length && !canReviewFinancialOperations) {
-      root.innerHTML = `<div class="dashboard-toolbar"><div><span class="section-kicker">Connected wallet</span><h2>${escapeHtml(shortAccount(state.accountId))}</h2></div><span class="wallet-caption">Named supplier</span></div>${state.liveDataError ? accountDataUnavailableMarkup("HarvestPool could not verify every purchase record, so it is not claiming that this wallet has no sales.") : `<div class="dashboard-empty"><div class="empty-icon">${icon("leaf")}</div><h2>No assigned purchases yet.</h2><p>Purchases appear here when this wallet is the named supplier.</p></div>`}`;
+      root.innerHTML = `<div class="dashboard-toolbar"><div><span class="section-kicker">Connected wallet</span><h2>${escapeHtml(shortAccount(state.accountId))}</h2></div><span class="wallet-caption">Named supplier</span></div>${state.liveDataError || state.accountDataError ? accountDataUnavailableMarkup("HarvestPool could not verify every purchase record, so it is not claiming that this wallet has no sales.") : `<div class="dashboard-empty"><div class="empty-icon">${icon("leaf")}</div><h2>No assigned purchases yet.</h2><p>Purchases appear here when this wallet is the named supplier.</p></div>`}`;
       return;
     }
     const supplierTasks = actionCenterTasks().filter((task) => ["supplier-invitation", "supplier-consent", "pending-transaction"].includes(task.kind));
@@ -3928,7 +3941,7 @@
       return `<article class="farmer-card"><div class="purchase-card-top">${statusPill(presentationState(purchase))}<span class="section-kicker">#${escapeHtml(purchase.id)}</span></div><h3>${escapeHtml(livePurchaseTitle(purchase))}</h3><p>${quantityLabel(purchase, purchase.total_quantity)} of ${quantityLabel(purchase, purchase.max_quantity)} reserved · fulfillment evidence due ${escapeHtml(formatDate(purchase.fulfillment_evidence_deadline_ns))}</p>${packageContentsMarkup(purchase)}${simulated ? `<div class="eligibility-callout warning"><span><strong>Testnet simulation</strong><br>Submit a simulation reference only. This demo does not claim physical delivery.</span></div>` : ""}${evidence}<a class="text-link" style="margin-top: 18px" href="/deals/${encodeURIComponent(purchase.id)}">Review Group Deal <span aria-hidden="true">↗</span></a></article>`;
     }).join("");
     const ordersSection = `<section class="supplier-work-group"><div class="section-heading-inline"><div><span class="section-kicker">Accepted deals</span><h2>Orders and fulfillment</h2></div><span class="meta-label">${orders.length} deals</span></div>${orderCards ? `<div class="farmer-grid">${orderCards}</div>` : '<div class="dashboard-empty compact"><p>No accepted orders yet.</p></div>'}</section>`;
-    root.innerHTML = `<div class="dashboard-toolbar"><div><span class="section-kicker">Connected supplier wallet</span><h2>My Sales</h2></div><span class="wallet-caption">${escapeHtml(shortAccount(state.accountId))}</span></div>${purchaseReadWarningMarkup()}${accountReadWarningMarkup()}${liveRefreshStatusMarkup()}${actionAlertsMarkup(supplierTasks)}${invitationSection}${ordersSection}${operations}`;
+    root.innerHTML = `<div class="dashboard-toolbar"><div><span class="section-kicker">Connected supplier wallet</span><h2>My Sales</h2></div><span class="wallet-caption">${escapeHtml(shortAccount(state.accountId))}</span></div>${liveReadWarningMarkup()}${liveRefreshStatusMarkup()}${actionAlertsMarkup(supplierTasks)}${invitationSection}${ordersSection}${operations}`;
     if (state.openFinancialOperationsId && String(state.currentPurchase?.id) === String(state.openFinancialOperationsId)) {
       const target = $("#financial-operations-root", root);
       if (target) target.innerHTML = financialReadinessMarkup(state.currentPurchase);

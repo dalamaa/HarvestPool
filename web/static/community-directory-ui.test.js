@@ -24,11 +24,20 @@ test("verified fund cards render first and hydrate finalized activity independen
   assert.match(source, /verificationPromise/);
 });
 
-test("failed verification shows an explicit bounded retry action", () => {
-  assert.match(source, /data-retry-fund-verification/);
-  assert.match(source, /Retry verification/);
+test("failed verification keeps cards visible behind one bounded page retry", () => {
+  assert.match(source, /data-community-directory-refresh/);
+  assert.match(source, /Showing the last verified fund records/);
+  assert.match(source, /<button class="button button-outline button-small" type="button" data-community-directory-refresh>Retry<\/button>/);
+  assert.doesNotMatch(source, /data-retry-fund-verification/);
   assert.match(source, /refresh=1/);
   assert.match(source, /verificationState = "error"/);
+});
+
+test("directory exposes an explicit first-load state and verified freshness", () => {
+  assert.match(source, /Loading community funds…/);
+  assert.match(source, /lastVerifiedAt/);
+  assert.match(source, /Updated \$\{escapeHtml\(relativeRefreshTime\(lastVerifiedAt\)\)\}/);
+  assert.match(source, /Checking for updates…/);
 });
 
 test("directory never presents unavailable verification as a zero balance", () => {

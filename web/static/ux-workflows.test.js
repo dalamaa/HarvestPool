@@ -87,8 +87,17 @@ test("Explore distinguishes first-load failure from a degraded refresh", () => {
   assert.match(appSource, /const initialLoadFailed = state\.purchaseDiscoveryStatus === "error" && !state\.dataLoaded/);
   assert.match(appSource, /We couldn't load the deals/);
   assert.match(appSource, /if \(chainRead\) chainRead\.hidden = true/);
-  assert.match(appSource, /Couldn't check for updates/);
+  assert.match(appSource, /Some latest data needs a retry/);
+  assert.match(appSource, /Showing the last verified deals/);
   assert.doesNotMatch(appSource, /Purchases are temporarily unavailable/);
+});
+
+test("account pages share one readable refresh status without false empty records", () => {
+  assert.match(appSource, /function liveReadWarningMarkup\(\)/);
+  assert.doesNotMatch(appSource, /function accountReadWarningMarkup\(\)/);
+  assert.doesNotMatch(appSource, /function purchaseReadWarningMarkup\(\)/);
+  assert.match(appSource, /const accountRecordsUnavailable = state\.liveDataError \|\| state\.accountDataError/);
+  assert.match(appSource, /\$\{liveReadWarningMarkup\(\)\}\$\{liveRefreshStatusMarkup\(\)\}/);
 });
 
 test("confirmed actions refresh affected state and make a verified vote non-repeatable", () => {
@@ -135,6 +144,13 @@ test("Direct deals render before strict wallet and governance enrichment", () =>
   assert.match(appSource, /state\.dataLoaded = true;[\s\S]*if \(render\) renderCurrentPage\(\);[\s\S]*loadWalletState\(\{ strict: true \}\)/);
   assert.match(appSource, /detailAuthorityReady/);
   assert.match(appSource, /appConfig\.page === "details"[\s\S]*Boolean\(state\.accountId\)/);
+});
+
+test("fully reserved open deals use the same display label on cards and detail pages", () => {
+  assert.match(appSource, /FullyReserved: "Fully reserved"/);
+  assert.match(appSource, /state === "Open" && availableCapacity\(purchase\) === 0 \? "FullyReserved"/);
+  assert.match(appSource, /statusPill\(purchaseDisplayState\(purchase\)\)/);
+  assert.match(appSource, /\.funding-panel \.status/);
 });
 
 test("Community-only pending actions do not reload unrelated purchase directories", () => {
