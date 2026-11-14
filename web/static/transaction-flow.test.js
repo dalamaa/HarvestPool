@@ -73,6 +73,19 @@ test("reconciliation recovery accepts only a matching callback snapshot newer th
   assert.match(appSource, /changedFromBaseline \|\| newerThanAction/);
 });
 
+test("confirmed reconciliation reloads readiness before rendering payout controls", () => {
+  const reconcileStart = appSource.indexOf("async function handleReconcile");
+  const branchStart = appSource.indexOf('if (result?.state === "confirmed") {', reconcileStart);
+  const branchEnd = appSource.indexOf("\n  }\n\n  function payoutSafetyState", branchStart);
+  assert.ok(reconcileStart >= 0);
+  assert.ok(branchStart > reconcileStart);
+  assert.ok(branchEnd > branchStart);
+  const branch = appSource.slice(branchStart, branchEnd);
+  assert.match(branch, /await loadPurchase\(freshPurchase\.id\)/);
+  assert.match(branch, /await loadFinancialReadiness\(reconciledPurchase \|\| freshPurchase\)/);
+  assert.ok(branch.indexOf("await loadFinancialReadiness") < branch.indexOf("renderCurrentPage"));
+});
+
 test("shared recovery reloads affected purchase context without an out-of-scope loop variable", () => {
   assert.match(appSource, /const affectedPurchaseIds = new Set\(\)/);
   assert.match(appSource, /const purchaseId = \[\.\.\.affectedPurchaseIds\]\[0\]/);

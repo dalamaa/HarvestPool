@@ -4064,7 +4064,10 @@
       failureMessage: "Reconciliation was not confirmed. No payout was submitted.",
     });
     if (result?.state === "confirmed") {
-      await loadPurchase(freshPurchase.id).catch(() => null);
+      const reconciledPurchase = await loadPurchase(freshPurchase.id).catch(() => null);
+      await loadFinancialReadiness(reconciledPurchase || freshPurchase).catch(() => {
+        state.financialReadiness = { error: true };
+      });
       renderCurrentPage();
     }
   }
