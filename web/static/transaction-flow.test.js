@@ -151,7 +151,9 @@ test("reconciliation has a durable success state and a complete pre-wallet revie
   assert.match(appSource, /Observed balance:/);
   assert.match(appSource, /Next action: review supplier payment/);
   assert.match(appSource, /const successMarkup = reconciliation\.matches/);
-  assert.match(appSource, /Post-payment escrow is recorded at zero balance and zero liability/);
+  assert.match(appSource, /Supplier payment completed\. The supplier received \$\{customerPaymentLabel\(purchase, purchase\.total_funded_amount\)\}\./);
+  assert.match(appSource, /Remaining funds and outstanding obligations are shown below/);
+  assert.doesNotMatch(appSource, /Post-payment escrow is recorded at zero balance and zero liability/);
   assert.match(appSource, /title: `Reconcile Deal #\$\{freshPurchase\.id\} escrow`/);
   assert.match(appSource, /method: "reconcile_token_balance"/);
   assert.match(appSource, /gas: "50 Tgas \(50000000000000 gas\)"/);

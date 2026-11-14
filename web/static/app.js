@@ -3525,7 +3525,7 @@
         ? "balanced · snapshot is stale; reconcile again"
         : `${accounting.reconciliation_status || "not-reconciled"} · fresh matching snapshot required`;
     const reconciliationNext = purchase.state === "Completed"
-      ? "Post-payment escrow is recorded at zero balance and zero liability."
+      ? `Supplier payment completed. The supplier received ${customerPaymentLabel(purchase, purchase.total_funded_amount)}. Remaining funds and outstanding obligations are shown below.`
       : reconciliation.fresh
         ? "Next action: review supplier payment. No payment has been submitted."
         : "This confirmed snapshot is stale for payment authorization; reconcile again before payment.";
