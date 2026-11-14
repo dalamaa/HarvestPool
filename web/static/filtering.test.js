@@ -90,6 +90,12 @@ test("confirmed finalization places success in progress and failure in closed", 
   assert.equal(marketplaceCategory({ state: "Completed" }, { nowNs: NOW_NS }), "closed");
 });
 
+test("terminal legacy outcomes remain visible under Closed", () => {
+  ["Canceled", "Cancelled", "Expired", "Refunded"].forEach((state) => {
+    assert.equal(marketplaceCategory({ state }, { nowNs: NOW_NS }), "closed");
+  });
+});
+
 test("worker delay keeps an expired Open deal closed-pending until authoritative finalization", () => {
   const expired = {
     state: "Open",

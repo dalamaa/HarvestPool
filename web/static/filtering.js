@@ -11,7 +11,18 @@
     "fulfillmentapproved",
     "paymentpending",
   ]);
-  const FINAL_STATUSES = new Set(["completed", "failed", "declined"]);
+  // Keep terminal outcomes together under Closed. The current V5 contract uses
+  // Completed, Failed, and Declined; the additional labels preserve accurate
+  // grouping for older records and future-compatible public reads.
+  const FINAL_STATUSES = new Set([
+    "completed",
+    "failed",
+    "declined",
+    "cancelled",
+    "canceled",
+    "expired",
+    "refunded",
+  ]);
   const FINALIZATION_ELIGIBLE_STATUSES = new Set(["open", "awaitingsupplier"]);
 
   function normalizeFilter(value) {

@@ -230,6 +230,7 @@ def render_page(
     return render_template(
         "index.html",
         page=page,
+        navigation_context=request.args.get("from", ""),
         purchase_id=purchase_id,
         share_mode=share_mode,
         network=NETWORK,

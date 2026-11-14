@@ -92,9 +92,13 @@ test("authoritative recovery clears only the draft attached to the confirmed act
   assert.doesNotMatch(appSource, /localStorage\.clear\(/);
 });
 
-test("financial operations are absent from public deal rendering and owner-gated in management", () => {
+test("financial operations stay off public deals and remain behind fresh reads", () => {
   assert.match(appSource, /Contract-wide escrow controls intentionally stay off public purchase pages/);
-  assert.match(appSource, /state\.config\?\.owner_id/);
+  assert.match(appSource, /canReviewFinancialOperations/);
+  assert.match(appSource, /Connect a wallet before reviewing financial operations/);
+  assert.match(appSource, /Fresh balance, liability, supplier-registration, and duplicate-operation checks still gate every payout/);
+  assert.match(appSource, /function hasBlockingPurchaseOperation\(readiness, purchase\)/);
+  assert.match(appSource, /RegistrationPending.*TransferPending.*ReconciliationRequired/s);
   assert.match(appSource, /data-action="open-financial-operations"/);
 });
 

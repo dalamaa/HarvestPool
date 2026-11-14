@@ -65,10 +65,47 @@ test("Explore uses only the four customer-facing marketplace filters", () => {
   assert.match(templateSource, /data-filter="in-progress"[^>]*>In Progress/);
   assert.match(templateSource, /data-filter="closed"[^>]*>Closed/);
   assert.match(templateSource, /data-filter="all"[^>]*>All/);
-  assert.match(templateSource, /data-filter="all"[^>]*aria-pressed="true"/);
+  assert.match(templateSource, /data-filter="available"[^>]*aria-pressed="true"/);
   assert.doesNotMatch(templateSource, /data-filter="(?:live|open|funded|completed)"/);
   assert.doesNotMatch(appSource, /dataset\.filter = "live"/);
   assert.match(appSource, /Authoritative Testnet state/);
+  assert.match(appSource, /filter=all/);
+  assert.match(appSource, /history.replaceState/);
+});
+
+test("failed refreshes preserve verified records and never authorize from stale wallet state", () => {
+  assert.match(appSource, /lastVerifiedRefreshAt: 0/);
+  assert.match(appSource, /invalid JSON-RPC response/);
+  assert.match(appSource, /Previously confirmed records were retained/);
+  assert.match(appSource, /Showing the last verified deals/);
+  assert.match(appSource, /accountDataVerified: false/);
+  assert.match(appSource, /Restricted actions remain disabled until Refresh succeeds/);
+  assert.match(appSource, /const accountVerified = accountAuthorityReady()/);
+});
+
+test("Explore distinguishes first-load failure from a degraded refresh", () => {
+  assert.match(appSource, /const initialLoadFailed = state\.purchaseDiscoveryStatus === "error" && !state\.dataLoaded/);
+  assert.match(appSource, /We couldn't load the deals/);
+  assert.match(appSource, /if \(chainRead\) chainRead\.hidden = true/);
+  assert.match(appSource, /Couldn't check for updates/);
+  assert.doesNotMatch(appSource, /Purchases are temporarily unavailable/);
+});
+
+test("confirmed actions refresh affected state and make a verified vote non-repeatable", () => {
+  assert.match(appSource, /async function refreshAffectedAction\(action\)/);
+  assert.match(appSource, /refreshAffectedAction\(submittedAction\)/);
+  assert.match(appSource, /voteButton\.textContent = voteButton === button && args\.approve \? "Approved" : "Recorded"/);
+  assert.match(appSource, /ACTION_CENTER_REFRESH_INTERVAL_MS = 30_000/);
+  assert.match(appSource, /scheduleActionCenterRefresh/);
+});
+
+test("deal navigation keeps dashboard context and names the three time concepts", () => {
+  assert.match(flaskSource, /navigation_context=request.args.get\("from", ""\)/);
+  assert.match(templateSource, /navigation_context == 'dashboard'/);
+  assert.match(appSource, /url.searchParams.set\("from", "dashboard"\)/);
+  assert.match(appSource, /Joining deadline/);
+  assert.match(appSource, /Fulfillment deadline/);
+  assert.match(appSource, /Pickup or delivery time/);
 });
 
 test("Explore renders public purchases before wallet and governance enrichment finishes", () => {
@@ -78,6 +115,74 @@ test("Explore renders public purchases before wallet and governance enrichment f
   assert.match(appSource, /async function loadBaseData\(\) \{\s*await loadPublicPurchaseData\(\);\s*await Promise\.all\(\[loadWalletState\(\), loadV3Data\(\)\]\);/);
   assert.match(appSource, /appConfig\.page === "decisions" \|\| appConfig\.page === "explore"/);
   assert.match(appSource, /harvestpoolFirstPurchaseCardMs/);
+});
+
+test("Create loads the public supplier directory without waiting for Meteor", () => {
+  assert.match(appSource, /async function loadCreatePublicData\(\)/);
+  assert.match(appSource, /const config = await view\("get_config"\);[\s\S]*view\("get_suppliers"\)/);
+  assert.match(appSource, /appConfig\.page === "create"[\s\S]*loadCreatePublicData\(\), loadNearPrice\(\), walletPromise/);
+  assert.match(appSource, /harvestpoolSupplierReadyMs/);
+});
+
+test("Explore retains supplier roles without making the directory block first cards", () => {
+  assert.match(appSource, /const supplierPromise = isV4[\s\S]*view\("get_suppliers"\)/);
+  assert.match(appSource, /if \(appConfig\.page !== "explore"\) await supplierPromise/);
+  assert.match(appSource, /state\.suppliers\.some[\s\S]*state\.purchases\.some\(\(purchase\) => String\(supplierAccount\(purchase\)\)/);
+});
+
+test("Direct deals render before strict wallet and governance enrichment", () => {
+  assert.match(appSource, /async function loadDetailData\(purchaseId, \{ render = true, walletReady = null \} = \{\}/);
+  assert.match(appSource, /state\.dataLoaded = true;[\s\S]*if \(render\) renderCurrentPage\(\);[\s\S]*loadWalletState\(\{ strict: true \}\)/);
+  assert.match(appSource, /detailAuthorityReady/);
+  assert.match(appSource, /appConfig\.page === "details"[\s\S]*Boolean\(state\.accountId\)/);
+});
+
+test("Community-only pending actions do not reload unrelated purchase directories", () => {
+  assert.match(appSource, /const requiresPurchaseRefresh = pending\.some\(\(action\) => action\.methodName !== "community_contribute_usdc"\)/);
+  assert.match(appSource, /requiresPurchaseRefresh \? loadBaseData\(\) : Promise\.resolve\(\)/);
+  assert.match(appSource, /methodName === "community_contribute_usdc"[\s\S]*appConfig\.page === "community_fund"/);
+});
+
+test("Public reads are bounded, deduplicated, and retain confirmed records on partial failure", () => {
+  assert.match(appSource, /async function readIndexedRecords\(readRecord, count, concurrency = 8\)/);
+  assert.match(appSource, /Math\.min\(count, concurrency\)/);
+  assert.match(appSource, /function mergeIndexedRecords\(previous, reads\)/);
+  assert.match(appSource, /Previously confirmed records were retained/);
+  assert.match(appSource, /if \(publicPurchaseDataRun\) return publicPurchaseDataRun/);
+  assert.match(appSource, /if \(v3DataRun\) return v3DataRun/);
+});
+
+test("Account views do not turn unavailable reads into false empty states", () => {
+  assert.match(appSource, /function accountDataLoadingMarkup\(title, message\)/);
+  assert.match(appSource, /No empty account result is being shown/);
+  assert.match(appSource, /No empty sales result is being shown/);
+  assert.match(appSource, /Some joined deals need a retry/);
+  assert.match(appSource, /Loading decisions is temporarily unavailable/);
+  assert.match(appSource, /Latest issue and decision data could not be refreshed/);
+});
+
+test("Expired supplier fulfillment does not offer a contract-rejected evidence submission", () => {
+  assert.match(appSource, /const fulfillmentExpired = purchase\.state === "Funded" && deadlineHasPassed/);
+  assert.match(appSource, /The contract will reject new evidence/);
+  assert.match(appSource, /data-action="expire-unfulfilled"/);
+});
+
+test("Stale supplier wallet reads disable supplier-only controls", () => {
+  assert.match(appSource, /purchase\.state === "AwaitingSupplier" && namedWallet && accountAuthorityReady\(\)/);
+  assert.match(appSource, /Supplier wallet state is still being verified/);
+  assert.match(appSource, /!accountAuthorityReady\(\)\s*\? `<div class="eligibility-callout warning"/);
+});
+
+test("Pending wallet handoff status is cleared into a durable unresolved state on reload", () => {
+  assert.match(appSource, /action\.phase === "wallet" \? "unresolved"/);
+  assert.match(appSource, /phase: !action\.transactionHash && action\.phase === "wallet-unresponsive"/);
+  assert.match(appSource, /No action is complete until the deal record confirms it/);
+});
+
+test("Targeted refreshes avoid a duplicate purchase read after the public directory load", () => {
+  assert.match(appSource, /!state\.currentPurchase \|\| String\(state\.currentPurchase\.id\) !== String\(purchaseId\)/);
+  assert.match(appSource, /await loadPurchase\(purchaseId\)\.catch\(\(\) => null\)/);
+  assert.match(appSource, /if \(id && !state\.currentPurchase\) await loadPurchase\(id\)/);
 });
 
 test("Explore polls authoritative state so delayed finalization moves cards without a manual refresh", () => {
