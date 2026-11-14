@@ -1109,12 +1109,17 @@ def _cached_community_activity(
             known_evidence = _known_community_activity(
                 dao_id, token_id, selected_goal, selected_evidence
             )
-            try:
-                indexed = _community_activity(dao_id, token_id)
-            except (OSError, URLError, RuntimeError, ValueError, TypeError, json.JSONDecodeError):
+            if known_evidence.get("complete") and not force:
+                # The configured evidence is already a complete, exact receipt boundary. Public
+                # pages should not wait on optional historical discovery before showing it.
                 payload = known_evidence
             else:
-                payload = _merge_community_activity(known_evidence, indexed)
+                try:
+                    indexed = _community_activity(dao_id, token_id)
+                except (OSError, URLError, RuntimeError, ValueError, TypeError, json.JSONDecodeError):
+                    payload = known_evidence
+                else:
+                    payload = _merge_community_activity(known_evidence, indexed)
         else:
             payload = _community_activity(dao_id, token_id)
     except (OSError, URLError, RuntimeError, ValueError, TypeError, json.JSONDecodeError):

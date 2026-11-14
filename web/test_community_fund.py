@@ -202,6 +202,38 @@ class CommunityFundActivityTests(unittest.TestCase):
         self.assertTrue(preserved["stale"])
         self.assertEqual(preserved["proposalTransactions"]["1"][0]["transfers"][0]["receiptId"], "paid")
 
+    def test_complete_known_evidence_does_not_block_cold_activity_on_indexer_discovery(self):
+        known = {
+            "complete": True,
+            "boundedEvidence": True,
+            "contributions": [{"transactionHash": "known"}],
+            "proposalTransactions": {"1": [{"transactionHash": "paid"}]},
+            "stale": False,
+        }
+        indexed = {
+            **known,
+            "complete": True,
+            "contributions": [*known["contributions"], {"transactionHash": "new"}],
+        }
+        with (
+            patch.object(web_app, "_known_community_activity", return_value=known),
+            patch.object(web_app, "_community_activity", return_value=indexed) as indexer,
+        ):
+            first = web_app._cached_community_activity(
+                "community.testnet", "usdc.testnet", goal={"currency": "USDC"}, evidence={"known": True}
+            )
+            refreshed = web_app._cached_community_activity(
+                "community.testnet", "usdc.testnet", force=True,
+                goal={"currency": "USDC"}, evidence={"known": True},
+            )
+
+        self.assertEqual(first["contributions"], known["contributions"])
+        indexer.assert_called_once_with("community.testnet", "usdc.testnet")
+        self.assertEqual(
+            {item["transactionHash"] for item in refreshed["contributions"]},
+            {"known", "new"},
+        )
+
     def test_community_page_exposes_separate_dao_configuration(self):
         goal = {
             "configured": True,
