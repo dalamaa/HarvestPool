@@ -364,7 +364,13 @@ def _community_rpc(method, params):
                     raise ValueError("NEAR RPC response exceeded the 2 MB safety limit")
                 payload = json.loads(body.decode("utf-8"))
             if payload.get("error"):
-                raise ValueError("NEAR RPC rejected the evidence lookup")
+                error = payload.get("error") or {}
+                cause = error.get("cause") or {}
+                raise CommunityRpcError(
+                    "NEAR RPC rejected the evidence lookup",
+                    code=error.get("code"),
+                    name=cause.get("name"),
+                )
             if "result" not in payload:
                 raise ValueError("NEAR RPC returned no result")
             return payload["result"]
@@ -378,6 +384,15 @@ def _community_rpc(method, params):
                 delay = 0.5 * (attempt + 1)
             time.sleep(delay)
     raise RuntimeError("NEAR RPC retry limit reached")
+
+
+class CommunityRpcError(ValueError):
+    """A structured read-only RPC error, without exposing request identifiers."""
+
+    def __init__(self, message, *, code=None, name=None):
+        super().__init__(message)
+        self.code = code
+        self.name = name
 
 
 def _successful_execution(result):
@@ -460,6 +475,10 @@ def _successful_nep141_transfer(result, token_id, old_owner, new_owner, amount, 
 
 
 def _transaction_timestamp(result):
+    transaction_outcome = result.get("transaction_outcome") or {}
+    indexed_timestamp = str(transaction_outcome.get("block_timestamp") or "")
+    if indexed_timestamp.isdigit() and int(indexed_timestamp) > 0:
+        return indexed_timestamp
     block_hash = str(result.get("transaction_outcome", {}).get("block_hash") or "")
     if not block_hash:
         raise ValueError("Evidence transaction has no finalized block")
@@ -468,6 +487,77 @@ def _transaction_timestamp(result):
     if not timestamp.isdigit() or int(timestamp) <= 0:
         raise ValueError("Evidence block has no valid timestamp")
     return timestamp
+
+
+def _fastnear_finalized_transaction(transaction_hash):
+    """Adapt one exact historical FastNEAR record to the strict RPC result shape.
+
+    The direct Testnet RPC may prune older blocks while FastNEAR retains finalized history. This
+    helper remains display evidence only: callers still verify the exact transaction identity,
+    action arguments, successful execution, and matching NEP-141 receipt before using it.
+    """
+    payload = _fastnear_json("/v0/transactions", {"tx_hashes": [transaction_hash]})
+    matches = [
+        item for item in payload.get("transactions") or []
+        if isinstance(item, dict)
+        and (item.get("transaction") or {}).get("hash") == transaction_hash
+    ]
+    if len(matches) != 1:
+        raise ValueError("FastNEAR did not return exactly one historical evidence transaction")
+    item = matches[0]
+    transaction = item.get("transaction") or {}
+    execution = item.get("execution_outcome") or {}
+    outcome = execution.get("outcome") or {}
+    status = outcome.get("status") or {}
+    block_hash = str(execution.get("block_hash") or "")
+    block_timestamp = str(execution.get("block_timestamp") or "")
+    if (
+        not block_hash
+        or not block_timestamp.isdigit()
+        or int(block_timestamp) <= 0
+        or not any(str(key).startswith("Success") for key in status)
+    ):
+        raise ValueError("FastNEAR historical evidence was not a finalized successful transaction")
+
+    receipts_outcome = []
+    for item_receipt in item.get("receipts") or []:
+        receipt = item_receipt.get("receipt") or {}
+        receipt_outcome = (item_receipt.get("execution_outcome") or {}).get("outcome") or {}
+        receipt_id = str(receipt.get("receipt_id") or "")
+        if receipt_id and receipt_outcome:
+            receipts_outcome.append({"id": receipt_id, "outcome": receipt_outcome})
+    if not receipts_outcome:
+        raise ValueError("FastNEAR historical evidence contained no receipt outcomes")
+
+    return {
+        "final_execution_status": "FINAL",
+        "status": status,
+        "transaction": transaction,
+        "transaction_outcome": {
+            "block_hash": block_hash,
+            "block_timestamp": block_timestamp,
+        },
+        "receipts_outcome": receipts_outcome,
+        "_evidence_source": "FastNEAR finalized Testnet transaction history",
+    }
+
+
+def _known_evidence_transaction(transaction_hash, signer_id):
+    """Read a known transaction without waiting on an unknown historical RPC hash."""
+    try:
+        result = _community_rpc(
+            "tx",
+            {
+                "tx_hash": transaction_hash,
+                "sender_account_id": signer_id,
+                "wait_until": "NONE",
+            },
+        )
+    except CommunityRpcError as error:
+        if error.name != "UNKNOWN_TRANSACTION":
+            raise
+        result = _fastnear_finalized_transaction(transaction_hash)
+    return result, bool(result.get("_evidence_source"))
 
 
 def _finalized_ft_balance(token_id, account_id):
@@ -652,13 +742,8 @@ def _known_community_activity(dao_id, token_id, goal, evidence):
     if not token_id or goal.get("currency") != "USDC":
         raise ValueError("Known Community Goal evidence requires the configured USDC token")
 
-    contribution = _community_rpc(
-        "tx",
-        {
-            "tx_hash": evidence["contributionHash"],
-            "sender_account_id": evidence["contributor"],
-            "wait_until": "FINAL",
-        },
+    contribution, contribution_from_history = _known_evidence_transaction(
+        evidence["contributionHash"], evidence["contributor"]
     )
     if not _successful_execution(contribution):
         raise ValueError("Configured contribution transaction did not finalize successfully")
@@ -698,14 +783,10 @@ def _known_community_activity(dao_id, token_id, goal, evidence):
         raise ValueError("Configured payment evidence was incomplete")
     has_payment = all(evidence.get(key) for key in payment_keys)
     proposal_transactions = {}
+    payment_from_history = False
     if has_payment:
-        payment = _community_rpc(
-            "tx",
-            {
-                "tx_hash": evidence["paymentHash"],
-                "sender_account_id": evidence["paymentSigner"],
-                "wait_until": "FINAL",
-            },
+        payment, payment_from_history = _known_evidence_transaction(
+            evidence["paymentHash"], evidence["paymentSigner"]
         )
         if not _successful_execution(payment):
             raise ValueError("Configured payment transaction did not finalize successfully")
@@ -755,6 +836,11 @@ def _known_community_activity(dao_id, token_id, goal, evidence):
         ],
         "proposalTransactions": proposal_transactions,
         "source": "Finalized NEAR Testnet RPC evidence",
+        "verificationSource": (
+            "Finalized NEAR Testnet RPC evidence"
+            if not (contribution_from_history or payment_from_history)
+            else "Finalized FastNEAR Testnet transaction history with exact receipt checks"
+        ),
         "sourceUrl": f"https://testnet.nearblocks.io/address/{dao_id}",
         "tokenId": token_id,
         "verifiedAt": datetime.now(timezone.utc).isoformat(),
@@ -1001,6 +1087,7 @@ def _merge_community_activity(evidence, indexed):
         "contributions": list(contributions.values()),
         "proposalTransactions": proposal_transactions,
         "source": "Finalized NEAR RPC evidence + NearBlocks Testnet API",
+        "verificationSource": evidence.get("verificationSource"),
         "sourceUrl": indexed.get("sourceUrl") or evidence.get("sourceUrl"),
         "stale": not indexed_complete,
     }

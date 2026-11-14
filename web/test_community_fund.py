@@ -651,6 +651,113 @@ class CommunityFundActivityTests(unittest.TestCase):
         self.assertEqual(transfer["receiptId"], evidence["paymentReceiptId"])
         self.assertEqual(transfer["amount"], "800000")
 
+    def test_known_evidence_uses_exact_fastnear_history_when_rpc_prunes_transaction(self):
+        token_id = web_app.CANONICAL_USDC_TOKEN_ID
+        dao_id = "community.sputnikv2.testnet"
+        evidence = {
+            "contributionHash": "A" * 44,
+            "contributor": "alice.testnet",
+            "contributionAmount": "1000000",
+        }
+        args = base64.b64encode(json.dumps({
+            "receiver_id": dao_id,
+            "amount": evidence["contributionAmount"],
+            "memo": "Contribution toward Community Goal",
+        }).encode()).decode()
+        receipt_id = "B" * 44
+        history_record = {
+            "transaction": {
+                "hash": evidence["contributionHash"],
+                "signer_id": evidence["contributor"],
+                "receiver_id": token_id,
+                "actions": [{"FunctionCall": {
+                    "method_name": "ft_transfer", "args": args, "deposit": "1",
+                }}],
+            },
+            "execution_outcome": {
+                "block_hash": "history-block",
+                "block_timestamp": 1794430000000000000,
+                "outcome": {
+                    "executor_id": evidence["contributor"],
+                    "status": {"SuccessReceiptId": receipt_id},
+                    "logs": [],
+                },
+            },
+            "receipts": [{
+                "receipt": {"receipt_id": receipt_id},
+                "execution_outcome": {
+                    "outcome": {
+                        "executor_id": token_id,
+                        "status": {"SuccessValue": ""},
+                        "logs": ["EVENT_JSON:" + json.dumps({
+                            "standard": "nep141",
+                            "event": "ft_transfer",
+                            "data": [{
+                                "old_owner_id": evidence["contributor"],
+                                "new_owner_id": dao_id,
+                                "amount": evidence["contributionAmount"],
+                            }],
+                        })],
+                    },
+                },
+            }],
+        }
+
+        with (
+            patch.object(
+                web_app,
+                "_community_rpc",
+                side_effect=web_app.CommunityRpcError(
+                    "unknown", code=-32000, name="UNKNOWN_TRANSACTION"
+                ),
+            ) as rpc,
+            patch.object(
+                web_app,
+                "_fastnear_json",
+                return_value={"transactions": [history_record]},
+            ) as history,
+        ):
+            result = web_app._known_community_activity(
+                dao_id,
+                token_id,
+                {"currency": "USDC", "recipient": "recipient.testnet"},
+                evidence,
+            )
+
+        self.assertFalse(result["complete"])
+        self.assertEqual(result["contributions"][0]["receiptId"], receipt_id)
+        self.assertEqual(result["contributions"][0]["timestamp"], "1794430000000000000")
+        self.assertIn("FastNEAR", result["verificationSource"])
+        self.assertEqual(rpc.call_args.args[1]["wait_until"], "NONE")
+        history.assert_called_once_with(
+            "/v0/transactions", {"tx_hashes": [evidence["contributionHash"]]}
+        )
+
+    def test_pruned_history_fallback_does_not_promote_pending_rpc_transaction(self):
+        token_id = web_app.CANONICAL_USDC_TOKEN_ID
+        evidence = {
+            "contributionHash": "A" * 44,
+            "contributor": "alice.testnet",
+            "contributionAmount": "1000000",
+        }
+        pending = {
+            "final_execution_status": "EXECUTED_OPTIMISTIC",
+            "status": {"SuccessReceiptId": "B" * 44},
+            "transaction": {"hash": evidence["contributionHash"]},
+        }
+        with (
+            patch.object(web_app, "_community_rpc", return_value=pending),
+            patch.object(web_app, "_fastnear_json") as history,
+        ):
+            with self.assertRaisesRegex(ValueError, "did not finalize successfully"):
+                web_app._known_community_activity(
+                    "community.sputnikv2.testnet",
+                    token_id,
+                    {"currency": "USDC", "recipient": "recipient.testnet"},
+                    evidence,
+                )
+        history.assert_not_called()
+
     def test_known_usdc_evidence_rejects_wrong_payment_receipt(self):
         result = {
             "receipts_outcome": [{
