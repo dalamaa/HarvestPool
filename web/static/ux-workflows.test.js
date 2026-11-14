@@ -101,8 +101,8 @@ test("account pages share one readable refresh status without false empty record
 });
 
 test("confirmed actions refresh affected state and make a verified vote non-repeatable", () => {
-  assert.match(appSource, /async function refreshAffectedAction\(action\)/);
-  assert.match(appSource, /refreshAffectedAction\(submittedAction\)/);
+  assert.match(appSource, /async function refreshAffectedAction\(action, \{ verifiedRecord = null \} = \{\}\)/);
+  assert.match(appSource, /refreshAffectedAction\(submittedAction, \{ verifiedRecord: result\.record \}\)/);
   assert.match(appSource, /voteButton\.textContent = voteButton === button && args\.approve \? "Approved" : "Recorded"/);
   assert.match(appSource, /ACTION_CENTER_REFRESH_INTERVAL_MS = 30_000/);
   assert.match(appSource, /scheduleActionCenterRefresh/);
@@ -119,9 +119,11 @@ test("deal navigation keeps dashboard context and names the three time concepts"
 
 test("Explore renders public purchases before wallet and governance enrichment finishes", () => {
   assert.match(templateSource, /id="purchase-grid"[^>]*aria-busy="true"[\s\S]*Loading Group Deals/);
-  assert.match(appSource, /async function loadPublicPurchaseData\(\)/);
+  assert.match(appSource, /async function loadPublicPurchaseData\(\{ background = false \} = \{\}\)/);
   assert.match(appSource, /state\.dataLoaded = true;[\s\S]*state\.purchaseDiscoveryStatus = "ready";[\s\S]*renderExplore\(\);/);
-  assert.match(appSource, /async function loadBaseData\(\) \{\s*await loadPublicPurchaseData\(\);\s*await Promise\.all\(\[loadWalletState\(\), loadV3Data\(\)\]\);/);
+  assert.match(appSource, /function pageBaseDataOptions\(\{ background = false \} = \{\}\)/);
+  assert.match(appSource, /loadWallet: \["dashboard", "farmer", "decisions"\]\.includes\(appConfig\.page\)/);
+  assert.match(appSource, /loadGovernance: \["decisions"\]\.includes\(appConfig\.page\)/);
   assert.match(appSource, /appConfig\.page === "decisions" \|\| appConfig\.page === "explore"/);
   assert.match(appSource, /harvestpoolFirstPurchaseCardMs/);
 });
@@ -134,8 +136,8 @@ test("Create loads the public supplier directory without waiting for Meteor", ()
 });
 
 test("Explore retains supplier roles without making the directory block first cards", () => {
-  assert.match(appSource, /const supplierPromise = isV4[\s\S]*view\("get_suppliers"\)/);
-  assert.match(appSource, /if \(appConfig\.page !== "explore"\) await supplierPromise/);
+  assert.match(appSource, /const needsSupplierDirectory = isV4 && \(!background \|\| appConfig\.page === "create"\)/);
+  assert.match(appSource, /if \(needsSupplierDirectory\)[\s\S]*view\("get_suppliers"\)/);
   assert.match(appSource, /state\.suppliers\.some[\s\S]*state\.purchases\.some\(\(purchase\) => String\(supplierAccount\(purchase\)\)/);
 });
 
@@ -155,17 +157,20 @@ test("fully reserved open deals use the same display label on cards and detail p
 
 test("Community-only pending actions do not reload unrelated purchase directories", () => {
   assert.match(appSource, /const requiresPurchaseRefresh = pending\.some\(\(action\) => action\.methodName !== "community_contribute_usdc"\)/);
-  assert.match(appSource, /requiresPurchaseRefresh \? loadBaseData\(\) : Promise\.resolve\(\)/);
+  assert.match(appSource, /requiresPurchaseRefresh\s*\?\s*Promise\.all\(affectedActions\.map\(\(action\) => refreshAffectedAction\(action\)\)\)\s*:\s*Promise\.resolve\(\)/);
   assert.match(appSource, /methodName === "community_contribute_usdc"[\s\S]*appConfig\.page === "community_fund"/);
 });
 
 test("Public reads are bounded, deduplicated, and retain confirmed records on partial failure", () => {
-  assert.match(appSource, /async function readIndexedRecords\(readRecord, count, concurrency = 8\)/);
-  assert.match(appSource, /Math\.min\(count, concurrency\)/);
+  assert.match(appSource, /async function readIndexedRecords\(readRecord, countOrIds, concurrency = 8\)/);
+  assert.match(appSource, /Math\.min\(ids\.length, concurrency\)/);
   assert.match(appSource, /function mergeIndexedRecords\(previous, reads\)/);
   assert.match(appSource, /Previously confirmed records were retained/);
   assert.match(appSource, /if \(publicPurchaseDataRun\) return publicPurchaseDataRun/);
   assert.match(appSource, /if \(v3DataRun\) return v3DataRun/);
+  assert.match(appSource, /const TERMINAL_PURCHASE_STATES = new Set/);
+  assert.match(appSource, /state\.publicFailedPurchaseIds\.forEach/);
+  assert.match(appSource, /PUBLIC_SNAPSHOT_KEY/);
 });
 
 test("Account views do not turn unavailable reads into false empty states", () => {
@@ -202,13 +207,14 @@ test("Targeted refreshes avoid a duplicate purchase read after the public direct
 });
 
 test("Explore polls authoritative state so delayed finalization moves cards without a manual refresh", () => {
-  assert.match(appSource, /const EXPLORE_REFRESH_INTERVAL_MS = 15_000/);
+  assert.match(appSource, /const EXPLORE_REFRESH_INTERVAL_MS = 30_000/);
   assert.match(appSource, /function scheduleExploreRefresh\(\)/);
   assert.match(appSource, /refreshLiveData\(\{ force: true \}\)/);
   assert.match(appSource, /function stopExploreRefresh\(\)/);
   assert.match(appSource, /document\.visibilityState !== "visible"/);
   assert.match(appSource, /if \(state\.refreshingLiveData\) return state\.refreshingLiveData/);
   assert.match(appSource, /scheduleExploreRefresh\(\);/);
+  assert.match(appSource, /await loadBaseData\(\{ background: true \}\)/);
 });
 
 test("create forms start empty and offer explicit draft restoration", () => {

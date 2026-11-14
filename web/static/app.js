@@ -105,6 +105,9 @@
     suppliers: [],
     config: null,
     purchases: [],
+    publicPurchaseCount: 0,
+    publicSnapshotHydrated: false,
+    publicFailedPurchaseIds: new Set(),
     memberStatus: null,
     fundedMembership: new Map(),
     dataLoaded: false,
@@ -120,8 +123,14 @@
     recordedVotes: new Map(),
     issues: [],
     decisions: [],
+    v3IssueCount: 0,
+    v3DecisionCount: 0,
+    v3HistoryBaselineReady: false,
+    v3FailedIssueIds: new Set(),
+    v3FailedDecisionIds: new Set(),
     v3Config: null,
     v3Available: false,
+    v3DataVerified: false,
     v3Error: null,
     detailAuthorityReady: true,
     pendingTransactions: new Set(),
@@ -188,8 +197,15 @@
   const RECONCILIATION_MAX_AGE_MS = 5 * 60_000;
   const TRANSACTION_BUNDLE_VERSION = "2026-11-13.6";
   const WALLET_RESULT_TIMEOUT_MS = 15_000;
-  const EXPLORE_REFRESH_INTERVAL_MS = 15_000;
+  const EXPLORE_REFRESH_INTERVAL_MS = 30_000;
   const ACTION_CENTER_REFRESH_INTERVAL_MS = 30_000;
+  const PUBLIC_SNAPSHOT_MAX_AGE_MS = 24 * 60 * 60_000;
+  const PUBLIC_SNAPSHOT_KEY = `harvestpool:public-purchases:v2:${appConfig.contractId}`;
+  const TERMINAL_PURCHASE_STATES = new Set(["Completed", "Failed", "Canceled", "Cancelled", "Expired", "Refunded", "Declined"]);
+  const ACTIVE_PURCHASE_STATES = new Set(["Proposed", "AwaitingSupplier", "Open", "FullyReserved", "Funded", "FulfillmentPending", "FulfillmentApproved", "PaymentPending"]);
+  const ACTIVE_ISSUE_STATES = new Set(["Open", "NeedsGroupDecision"]);
+  const ACTIVE_DECISION_STATES = new Set(["Open", "AwaitingSupplier"]);
+  const ACCOUNT_DATA_PAGES = new Set(["dashboard", "farmer", "decisions", "details", "agreement", "issue_form", "supplier_invitation"]);
   const CREATE_SUBMITTED_KEY = "harvestpool:create-submitted:v1";
   let exploreRefreshTimer = null;
   let actionCenterRefreshTimer = null;
@@ -1035,7 +1051,7 @@
 
   async function setupNear() {
     const attempt = ++walletInitializationAttempt;
-    state.near = { networkId: "testnet", nodeUrl: "https://test.rpc.fastnear.com" };
+    state.near = { networkId: "testnet", nodeUrl: "https://rpc.testnet.fastnear.com" };
     state.walletStatus = "initializing";
     state.walletError = null;
     updateWalletUi();
@@ -1104,7 +1120,7 @@
       detail: { accountId: state.accountId },
     }));
     if (appConfig.page === "decisions" && !state.dataLoaded) renderDecisions();
-    if (state.dataLoaded) {
+    if (state.dataLoaded && ACCOUNT_DATA_PAGES.has(appConfig.page)) {
       await loadWalletState({ strict: appConfig.page === "details" });
       updateWalletUi();
       const accountChanged = String(previousAccountId || "") !== String(state.accountId || "");
@@ -1149,7 +1165,7 @@
         method: "query",
         params: { request_type: "call_function", finality: "final", account_id: contractId, method_name: methodName, args_base64: encodeArgs(args) },
       }),
-    }, { retryPayload: rpcReadTools.transientRpcPayload });
+    }, { retryPayload: rpcReadTools.transientRpcPayload, metricLabel: appConfig.page });
     if (!payload || typeof payload !== "object" || payload.error || !payload.result || !Array.isArray(payload.result.result)) {
       throw new Error(payload?.error?.message || "The testnet returned an invalid JSON-RPC response.");
     }
@@ -1163,7 +1179,7 @@
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ jsonrpc: "2.0", id: "harvestpool-community-fund", method, params }),
-    }, { retryPayload: rpcReadTools.transientRpcPayload });
+    }, { retryPayload: rpcReadTools.transientRpcPayload, metricLabel: appConfig.page });
     if (!payload || typeof payload !== "object" || payload.error || !Object.prototype.hasOwnProperty.call(payload, "result")) {
       throw new Error(payload?.error?.message || "The testnet returned an invalid JSON-RPC response.");
     }
@@ -1335,21 +1351,22 @@
     return viewOnContract(appConfig.v3ContractId, methodName, args);
   }
 
-  async function readIndexedRecords(readRecord, count, concurrency = 8) {
-    const results = Array.from({ length: count });
+  async function readIndexedRecords(readRecord, countOrIds, concurrency = 8) {
+    const ids = Array.isArray(countOrIds) ? countOrIds : rangeIds(0, countOrIds);
+    const results = Array.from({ length: ids.length });
     let nextIndex = 0;
     const worker = async () => {
-      while (nextIndex < count) {
+      while (nextIndex < ids.length) {
         const index = nextIndex;
         nextIndex += 1;
         try {
-          results[index] = { status: "fulfilled", value: await readRecord(index) };
+          results[index] = { status: "fulfilled", value: await readRecord(ids[index]) };
         } catch (reason) {
           results[index] = { status: "rejected", reason };
         }
       }
     };
-    await Promise.all(Array.from({ length: Math.min(count, concurrency) }, worker));
+    await Promise.all(Array.from({ length: Math.min(ids.length, concurrency) }, worker));
     return results;
   }
 
@@ -1365,6 +1382,73 @@
       else if (result?.status === "rejected") failed += 1;
     });
     return { records: [...records.values()], failed };
+  }
+
+  function readLocalSnapshot(key) {
+    try {
+      const value = JSON.parse(window.localStorage.getItem(key) || "null");
+      return value && typeof value === "object" ? value : null;
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  function writeLocalSnapshot(key, value) {
+    try { window.localStorage.setItem(key, JSON.stringify(value)); }
+    catch (_error) { /* Display remains safe when storage is unavailable. */ }
+  }
+
+  function hydratePublicSnapshot() {
+    if (state.dataLoaded) return false;
+    const snapshot = readLocalSnapshot(PUBLIC_SNAPSHOT_KEY);
+    if (!Array.isArray(snapshot?.purchases) || !snapshot.purchases.length) return false;
+    const verifiedAt = Number(snapshot.verifiedAt || 0);
+    if (!verifiedAt || Date.now() - verifiedAt > PUBLIC_SNAPSHOT_MAX_AGE_MS) return false;
+    state.purchases = snapshot.purchases.filter((purchase) => purchase && purchase.id !== undefined);
+    state.config = snapshot.config || state.config;
+    state.members = Array.isArray(snapshot.members) ? snapshot.members : state.members;
+    state.suppliers = Array.isArray(snapshot.suppliers) ? snapshot.suppliers : state.suppliers;
+    state.publicPurchaseCount = Number(snapshot.purchaseCount || state.purchases.length);
+    state.publicSnapshotHydrated = true;
+    state.dataLoaded = true;
+    state.purchaseDiscoveryStatus = "ready";
+    state.lastVerifiedRefreshAt = verifiedAt;
+    state.liveDataError = new Error("The latest public records have not been checked yet.");
+    return true;
+  }
+
+  function persistPublicSnapshot() {
+    if (!state.purchases.length || !state.publicPurchaseCount) return;
+    writeLocalSnapshot(PUBLIC_SNAPSHOT_KEY, {
+      version: 2,
+      contractId: appConfig.contractId,
+      purchaseCount: state.publicPurchaseCount,
+      purchases: state.purchases.slice(0, 500),
+      config: state.config,
+      members: state.members,
+      suppliers: state.suppliers,
+      verifiedAt: state.lastVerifiedRefreshAt || Date.now(),
+    });
+  }
+
+  function activePurchaseIds() {
+    return state.purchases
+      .filter((purchase) => !TERMINAL_PURCHASE_STATES.has(String(purchase?.state || ""))
+        && ACTIVE_PURCHASE_STATES.has(String(purchase?.state || "")))
+      .map((purchase) => Number(purchase.id))
+      .filter((id) => Number.isInteger(id) && id >= 0);
+  }
+
+  function rangeIds(start, end) {
+    const first = Math.max(0, Number(start) || 0);
+    const last = Math.max(first, Number(end) || 0);
+    return Array.from({ length: Math.max(0, last - first) }, (_, offset) => first + offset);
+  }
+
+  function accountPurchaseNeedsVote(purchase, version) {
+    if (!ACTIVE_PURCHASE_STATES.has(String(purchase?.state || ""))) return false;
+    if (String(version || "").toUpperCase() === "V5") return purchase.state === "FulfillmentPending";
+    return ["Proposed", "FulfillmentPending"].includes(purchase.state);
   }
 
   function applySupplierData(suppliers) {
@@ -1399,54 +1483,87 @@
     }
   }
 
-  async function loadPublicPurchaseDataOnce() {
+  async function loadPublicPurchaseDataOnce({ background = false } = {}) {
     walletStateRun = null;
+    const hydrated = hydratePublicSnapshot();
     const firstLoad = !state.dataLoaded;
     if (firstLoad) {
       state.purchaseDiscoveryStatus = "loading";
       if (appConfig.page === "explore" || ["dashboard", "farmer", "decisions"].includes(appConfig.page)) renderCurrentPage();
+    } else if (hydrated && appConfig.page === "explore") {
+      renderExplore();
     }
     try {
-      const config = await view("get_config");
-      const isV4 = ["V4", "V5"].includes(String(config.version || "").toUpperCase());
-      state.config = config;
-      const previousSuppliers = state.suppliers;
-      const supplierPromise = isV4
-        ? view("get_suppliers")
-          .then((suppliers) => {
-            applySupplierData(suppliers);
-            return suppliers;
-          })
-          .catch((error) => {
-            state.suppliers = previousSuppliers;
-            updateWalletUi();
-            console.warn("Supplier directory is temporarily unavailable.", error);
-            return [];
-          })
-        : Promise.resolve([]);
-      const [members, countValue] = await Promise.all([
-        isV4 ? Promise.resolve([]) : view("get_members"),
-        view("get_purchase_count"),
-      ]);
-      if (!Array.isArray(members)) throw new Error("The member directory returned an invalid JSON-RPC result.");
-      state.members = members;
-      if (appConfig.page !== "explore") await supplierPromise;
+      let config = state.config;
+      let isV4 = ["V4", "V5"].includes(String(config?.version || "").toUpperCase());
+      if (!config || !background || !state.publicPurchaseCount) {
+        config = await view("get_config");
+        isV4 = ["V4", "V5"].includes(String(config.version || "").toUpperCase());
+        state.config = config;
+      }
+      const needsSupplierDirectory = isV4 && (!background || appConfig.page === "create");
+      let supplierPromise = Promise.resolve();
+      if (needsSupplierDirectory) {
+        const previousSuppliers = state.suppliers;
+        supplierPromise = view("get_suppliers").then((suppliers) => {
+          applySupplierData(suppliers);
+        }).catch((error) => {
+          state.suppliers = previousSuppliers;
+          updateWalletUi();
+          console.warn("Supplier directory is temporarily unavailable.", error);
+        });
+        if (appConfig.page !== "explore") await supplierPromise;
+      }
+      if (!background && !isV4 && !state.members.length && appConfig.page === "decisions") {
+        const members = await view("get_members");
+        if (!Array.isArray(members)) throw new Error("The member directory returned an invalid JSON-RPC result.");
+        state.members = members;
+      }
+      const countValue = await view("get_purchase_count");
       const countNumber = Number(countValue);
       if (!Number.isInteger(countNumber) || countNumber < 0) throw new Error("The purchase count returned an invalid JSON-RPC result.");
       const count = Math.min(countNumber, 500);
-      const purchaseReads = await readIndexedRecords((id) => view("get_purchase", { purchase_id: String(id) }), count);
-      const merged = mergeIndexedRecords(state.purchases, purchaseReads);
-      const freshPurchases = purchaseReads.filter((result) => result?.status === "fulfilled" && result.value).map((result) => result.value);
+      const knownCount = Number(state.publicPurchaseCount || 0);
+      const ids = new Set(
+        firstLoad
+          ? rangeIds(0, count)
+        : [...rangeIds(Math.min(knownCount, count), count), ...activePurchaseIds()],
+      );
+      state.publicFailedPurchaseIds.forEach((id) => ids.add(id));
+      const purchaseReads = await readIndexedRecords(
+        (id) => view("get_purchase", { purchase_id: String(id) }),
+        [...ids],
+        4,
+      );
+      const readIds = [...ids];
+      const normalizedReads = purchaseReads.map((result, index) => ({
+        ...result,
+        value: result?.status === "fulfilled" && result.value
+          ? result.value
+          : result?.value,
+        id: readIds[index],
+      }));
+      normalizedReads.forEach((result) => {
+        if (result?.status === "rejected") state.publicFailedPurchaseIds.add(result.id);
+        else state.publicFailedPurchaseIds.delete(result.id);
+      });
+      const merged = mergeIndexedRecords(state.purchases, normalizedReads);
+      const freshPurchases = normalizedReads
+        .filter((result) => result?.status === "fulfilled" && result.value)
+        .map((result) => result.value);
       if (count > 0 && freshPurchases.length === 0 && state.purchases.length === 0) {
-        throw purchaseReads.find((result) => result?.status === "rejected")?.reason || new Error("Purchase reads failed.");
+        throw normalizedReads.find((result) => result?.status === "rejected")?.reason || new Error("Purchase reads failed.");
       }
+      state.publicPurchaseCount = Math.max(knownCount, count);
       state.purchases = merged.records.sort((left, right) => Number(right.id) - Number(left.id));
       state.liveDataError = merged.failed
         ? new Error(`${merged.failed} deal ${merged.failed === 1 ? "record is" : "records are"} temporarily unavailable. Previously confirmed records were retained.`)
         : null;
       state.dataLoaded = true;
       state.purchaseDiscoveryStatus = "ready";
-      if (count === 0 || freshPurchases.length > 0) state.lastVerifiedRefreshAt = Date.now();
+      state.publicSnapshotHydrated = false;
+      if (count === 0 || freshPurchases.length > 0 || !ids.size) state.lastVerifiedRefreshAt = Date.now();
+      persistPublicSnapshot();
       const currentId = appConfig.purchaseId === null || appConfig.purchaseId === undefined ? null : String(appConfig.purchaseId);
       const currentPurchase = currentId === null ? null : state.purchases.find((purchase) => String(purchase.id) === currentId);
       if (currentPurchase) state.currentPurchase = currentPurchase;
@@ -1464,9 +1581,9 @@
     }
   }
 
-  async function loadPublicPurchaseData() {
+  async function loadPublicPurchaseData({ background = false } = {}) {
     if (publicPurchaseDataRun) return publicPurchaseDataRun;
-    publicPurchaseDataRun = loadPublicPurchaseDataOnce();
+    publicPurchaseDataRun = loadPublicPurchaseDataOnce({ background });
     try {
       return await publicPurchaseDataRun;
     } finally {
@@ -1474,9 +1591,21 @@
     }
   }
 
-  async function loadBaseData() {
-    await loadPublicPurchaseData();
-    await Promise.all([loadWalletState(), loadV3Data()]);
+  function pageBaseDataOptions({ background = false } = {}) {
+    return {
+      background,
+      loadWallet: ["dashboard", "farmer", "decisions"].includes(appConfig.page),
+      loadGovernance: ["decisions"].includes(appConfig.page),
+    };
+  }
+
+  async function loadBaseData(options = {}) {
+    const selected = { ...pageBaseDataOptions(options), ...options };
+    await loadPublicPurchaseData({ background: Boolean(selected.background) });
+    const reads = [];
+    if (selected.loadWallet !== false) reads.push(loadWalletState({ strict: Boolean(selected.strictWallet) }));
+    if (selected.loadGovernance !== false) reads.push(loadV3Data({ background: Boolean(selected.background) }));
+    await Promise.all(reads);
   }
 
   function pagePurchaseId() {
@@ -1510,7 +1639,7 @@
     state.detailAuthorityReady = Boolean(walletVerified && (walletSessionReady || ["disconnected", "unavailable"].includes(state.walletStatus)));
     if (render) renderCurrentPage();
 
-    await loadV3Data();
+    await loadV3Data({ background: true, purchaseId: id });
     if (render) renderCurrentPage();
     return purchase;
   }
@@ -1530,7 +1659,7 @@
       if (appConfig.page === "details" && purchaseId !== null) {
         await loadDetailData(purchaseId, { render: false });
       } else {
-        await loadBaseData();
+        await loadBaseData({ background: true });
       }
       if (["agreement", "issue_form", "supplier_invitation"].includes(appConfig.page)
         && purchaseId !== null
@@ -1579,7 +1708,7 @@
     }, ACTION_CENTER_REFRESH_INTERVAL_MS);
   }
 
-  async function refreshAffectedAction(action) {
+  async function refreshAffectedAction(action, { verifiedRecord = null } = {}) {
     const methodName = action.methodName;
     const purchaseId = action.args?.purchase_id
       ?? action.context?.purchaseId
@@ -1589,7 +1718,7 @@
       || ["raise_issue", "request_group_vote", "vote_on_decision", "agree_to_decision", "decline_decision", "expire_decision"].includes(methodName);
 
     if (createsPurchase) {
-      await loadBaseData();
+      await loadBaseData({ background: true });
       return;
     }
     if (appConfig.page === "details" && purchaseId !== null && purchaseId !== undefined) {
@@ -1597,40 +1726,117 @@
       return;
     }
     if (purchaseId !== null && purchaseId !== undefined && state.dataLoaded) {
-      await loadPurchase(purchaseId);
+      if (verifiedRecord && Array.isArray(verifiedRecord.commitments)
+        && String(verifiedRecord.id) === String(purchaseId)) {
+        applyVerifiedPurchase(verifiedRecord);
+      } else {
+        await loadPurchase(purchaseId);
+      }
       if (state.accountId) await loadWalletState();
     }
-    if (isGovernanceAction) await loadV3Data();
-    if (!purchaseId && !isGovernanceAction) await loadBaseData();
+    if (isGovernanceAction) {
+      await loadV3Data({
+        background: true,
+        purchaseId,
+        issueId: action.args?.issue_id ?? null,
+        decisionId: action.args?.decision_id ?? null,
+      });
+    }
+    if (!purchaseId && !isGovernanceAction) await loadBaseData({ background: true });
   }
 
-  async function loadV3DataOnce() {
+  async function loadV3DataOnce({ background = false, purchaseId = null, issueId = null, decisionId = null } = {}) {
     if (!appConfig.v3ContractId) return false;
     const hadVerifiedData = state.v3Available;
     try {
       state.v3Error = null;
-      const [config, issueCountValue, decisionCountValue] = await Promise.all([
-        viewV3("get_config"),
-        viewV3("get_issue_count"),
-        viewV3("get_decision_count"),
-      ]);
+      const config = state.v3Config || await viewV3("get_config");
       if (!["V3", "V3-V5"].includes(String(config.version || "")) || String(config.v2_contract_id || "") !== String(appConfig.contractId)) {
         throw new Error("The configured member-decision contract is linked to a different purchase contract.");
       }
-      const issueCount = Math.min(Number(issueCountValue || 0), 500);
-      const decisionCount = Math.min(Number(decisionCountValue || 0), 500);
-      const [issueReads, decisionReads] = await Promise.all([
-        readIndexedRecords((id) => viewV3("get_issue", { issue_id: String(id) }), issueCount),
-        readIndexedRecords((id) => viewV3("get_decision", { decision_id: String(id) }), decisionCount),
-      ]);
+      let issueReads = [];
+      let decisionReads = [];
+      let issueReadIds = [];
+      let decisionReadIds = [];
+      let issueCount = Number(state.v3IssueCount || 0);
+      let decisionCount = Number(state.v3DecisionCount || 0);
+      const targeted = purchaseId !== null || issueId !== null || decisionId !== null;
+      if (purchaseId !== null) {
+        const records = await viewV3("get_issues_for_purchase", { purchase_id: String(purchaseId) });
+        if (!Array.isArray(records)) throw new Error("The selected deal's issue records were invalid.");
+        issueReads = records.map((record) => ({ status: "fulfilled", value: record }));
+        const decisionIds = new Set(records
+          .map((record) => record?.active_decision_id)
+          .filter((id) => id !== null && id !== undefined)
+          .map((id) => String(id)));
+        state.decisions.filter((record) => String(record?.purchase_id) === String(purchaseId) && ACTIVE_DECISION_STATES.has(record?.state))
+          .forEach((record) => decisionIds.add(String(record.id)));
+        decisionReadIds = [...decisionIds];
+        decisionReads = await readIndexedRecords((id) => viewV3("get_decision", { decision_id: String(id) }), decisionReadIds, 4);
+      } else if (issueId !== null) {
+        const issue = await viewV3("get_issue", { issue_id: String(issueId) });
+        issueReads = issue ? [{ status: "fulfilled", value: issue }] : [];
+        if (issue?.active_decision_id !== null && issue?.active_decision_id !== undefined) {
+          const decision = await viewV3("get_decision", { decision_id: String(issue.active_decision_id) });
+          decisionReads = decision ? [{ status: "fulfilled", value: decision }] : [];
+        }
+      } else if (decisionId !== null) {
+        const decision = await viewV3("get_decision", { decision_id: String(decisionId) });
+        decisionReads = decision ? [{ status: "fulfilled", value: decision }] : [];
+      } else {
+        const [issueCountValue, decisionCountValue] = await Promise.all([
+          viewV3("get_issue_count"),
+          viewV3("get_decision_count"),
+        ]);
+        issueCount = Math.min(Number(issueCountValue || 0), 500);
+        decisionCount = Math.min(Number(decisionCountValue || 0), 500);
+        const knownIssueCount = Number(state.v3IssueCount || 0);
+        const knownDecisionCount = Number(state.v3DecisionCount || 0);
+        const issueIds = new Set(
+          !state.v3HistoryBaselineReady
+            ? rangeIds(0, issueCount)
+            : [...rangeIds(Math.min(knownIssueCount, issueCount), issueCount), ...state.issues
+              .filter((record) => ACTIVE_ISSUE_STATES.has(record?.state))
+              .map((record) => Number(record.id))],
+        );
+        state.v3FailedIssueIds.forEach((id) => issueIds.add(id));
+        const decisionIds = new Set(
+          !state.v3HistoryBaselineReady
+            ? rangeIds(0, decisionCount)
+            : [...rangeIds(Math.min(knownDecisionCount, decisionCount), decisionCount), ...state.decisions
+              .filter((record) => ACTIVE_DECISION_STATES.has(record?.state))
+              .map((record) => Number(record.id))],
+        );
+        state.v3FailedDecisionIds.forEach((id) => decisionIds.add(id));
+        issueReadIds = [...issueIds];
+        decisionReadIds = [...decisionIds];
+        issueReads = await readIndexedRecords((id) => viewV3("get_issue", { issue_id: String(id) }), issueReadIds, 4);
+        decisionReads = await readIndexedRecords((id) => viewV3("get_decision", { decision_id: String(id) }), decisionReadIds, 4);
+      }
+      issueReads.forEach((result, index) => {
+        const id = issueReadIds[index];
+        if (id === undefined) return;
+        if (result?.status === "rejected") state.v3FailedIssueIds.add(id);
+        else state.v3FailedIssueIds.delete(id);
+      });
+      decisionReads.forEach((result, index) => {
+        const id = decisionReadIds[index];
+        if (id === undefined) return;
+        if (result?.status === "rejected") state.v3FailedDecisionIds.add(id);
+        else state.v3FailedDecisionIds.delete(id);
+      });
       const mergedIssues = mergeIndexedRecords(state.issues, issueReads);
       const mergedDecisions = mergeIndexedRecords(state.decisions, decisionReads);
-      if (issueCount > 0 && mergedIssues.records.length === 0 && !state.issues.length) throw new Error("Issue reads failed.");
-      if (decisionCount > 0 && mergedDecisions.records.length === 0 && !state.decisions.length) throw new Error("Decision reads failed.");
+      if (!targeted && issueCount > 0 && mergedIssues.records.length === 0 && !state.issues.length) throw new Error("Issue reads failed.");
+      if (!targeted && decisionCount > 0 && mergedDecisions.records.length === 0 && !state.decisions.length) throw new Error("Decision reads failed.");
       state.v3Config = config;
+      state.v3IssueCount = Math.max(Number(state.v3IssueCount || 0), issueCount);
+      state.v3DecisionCount = Math.max(Number(state.v3DecisionCount || 0), decisionCount);
       state.issues = mergedIssues.records.sort((left, right) => Number(right.id) - Number(left.id));
       state.decisions = mergedDecisions.records.sort((left, right) => Number(right.id) - Number(left.id));
       state.v3Available = true;
+      state.v3DataVerified = true;
+      if (!targeted) state.v3HistoryBaselineReady = true;
       const failed = mergedIssues.failed + mergedDecisions.failed;
       state.v3Error = failed ? new Error(`${failed} issue or decision read${failed === 1 ? " is" : "s are"} temporarily unavailable. Previously confirmed records were retained.`) : null;
       state.lastVerifiedRefreshAt = Date.now();
@@ -1638,13 +1844,14 @@
     } catch (error) {
       state.v3Error = error;
       state.v3Available = hadVerifiedData;
+      state.v3DataVerified = hadVerifiedData;
       return false;
     }
   }
 
-  async function loadV3Data() {
+  async function loadV3Data(options = {}) {
     if (v3DataRun) return v3DataRun;
-    v3DataRun = loadV3DataOnce();
+    v3DataRun = loadV3DataOnce(options);
     try {
       return await v3DataRun;
     } finally {
@@ -1652,10 +1859,10 @@
     }
   }
 
-  async function waitForV3Record(predicate) {
+  async function waitForV3Record(predicate, options = {}) {
     return confirmationTools.waitForState(
       async () => {
-        const refreshed = await loadV3Data();
+        const refreshed = await loadV3Data(options);
         return refreshed ? { issues: state.issues, decisions: state.decisions } : null;
       },
       (snapshot) => snapshot && predicate(snapshot.issues, snapshot.decisions),
@@ -1663,13 +1870,13 @@
     );
   }
 
-  async function waitForV3RecordWithLock(button, predicate) {
+  async function waitForV3RecordWithLock(button, predicate, options = {}) {
     if (button) {
       state.pendingTransactions.add(button);
       setBusy(button, true, "Verifying on-chain state…");
     }
     try {
-      return await waitForV3Record(predicate);
+      return await waitForV3Record(predicate, options);
     } finally {
       setBusy(button, false);
       if (button) state.pendingTransactions.delete(button);
@@ -1798,7 +2005,7 @@
         return { state: issue?.state === "Resolved" ? "confirmed" : "uncertain", record: issue };
       }
       if (methodName === "raise_issue") {
-        await loadV3Data();
+        await loadV3Data({ background: true, purchaseId: args.purchase_id });
         const record = state.issues.find((issue) => issueMatches(issue, {
           purchaseId: args.purchase_id,
           requesterId: signerId,
@@ -1809,7 +2016,7 @@
         return { state: record ? "confirmed" : "uncertain", record };
       }
       if (methodName === "request_group_vote") {
-        await loadV3Data();
+        await loadV3Data({ background: true, issueId: args.issue_id });
         const record = state.decisions.find((decision) => decisionMatches(decision, {
           issueId: args.issue_id,
           proposal: args.proposal,
@@ -1842,8 +2049,15 @@
     }
     if (["create_purchase", "create_open_purchase", "create_supplier_offer", "create_purchase_request"].includes(methodName)) {
       const count = Number(await view("get_purchase_count"));
-      const purchases = await Promise.all(Array.from({ length: Math.min(count, 100) }, (_, id) => view("get_purchase", { purchase_id: String(id) })));
       const minimumId = Number(action.context?.minimumPurchaseId ?? 0);
+      const purchaseReads = await readIndexedRecords(
+        (id) => view("get_purchase", { purchase_id: String(id) }),
+        rangeIds(Math.max(0, minimumId), Math.min(count, 500)),
+        4,
+      );
+      const purchases = purchaseReads
+        .filter((result) => result?.status === "fulfilled")
+        .map((result) => result.value);
       const record = purchases.find((purchase) => Number(purchase?.id) >= minimumId && samePurchaseInput(purchase, args, signerId));
       return { state: record ? "confirmed" : "uncertain", record };
     }
@@ -1954,11 +2168,8 @@
     state.reconcilingPending = true;
     const pending = pendingActionStore.list(state.accountId);
     const remaining = [];
-    const affectedPurchaseIds = new Set();
     try {
       for (const action of pending) {
-        const purchaseId = action.context?.purchaseId ?? action.args?.purchase_id;
-        if (purchaseId !== null && purchaseId !== undefined) affectedPurchaseIds.add(String(purchaseId));
         const result = poll ? await waitForActionConfirmation(action) : await readActionConfirmation(action).catch(() => ({ state: "uncertain" }));
         if (result?.state === "confirmed") {
           savePersonalContributionOutcome(action, result);
@@ -1988,14 +2199,14 @@
         }
       }
       if (pending.length) {
-        const purchaseId = [...affectedPurchaseIds][0] ?? state.currentPurchase?.id ?? $("[data-purchase-id]")?.dataset.purchaseId;
         const requiresPurchaseRefresh = pending.some((action) => action.methodName !== "community_contribute_usdc");
+        const affectedActions = pending.filter((action) => action.methodName !== "community_contribute_usdc");
         await Promise.allSettled([
           appConfig.page === "community_fund"
             ? fetchCommunityActivity(false).then((activity) => applyCommunityActivity(activity))
-            : requiresPurchaseRefresh && appConfig.page === "details" && purchaseId !== null && purchaseId !== undefined
-              ? loadDetailData(purchaseId, { render: false })
-              : requiresPurchaseRefresh ? loadBaseData() : Promise.resolve(),
+            : requiresPurchaseRefresh
+              ? Promise.all(affectedActions.map((action) => refreshAffectedAction(action)))
+              : Promise.resolve(),
         ]);
         renderCurrentPage();
       }
@@ -2154,31 +2365,38 @@
         const version = String(state.config?.version || "").toUpperCase();
         const usesOpenMembership = ["V4", "V5"].includes(version);
         state.memberStatus = usesOpenMembership ? true : Boolean(await view("is_member", { account_id: accountId }));
-        const fundedEntries = await Promise.all(state.purchases.map(async (purchase) => {
-          try {
-            const funded = await view("is_funded_member", { purchase_id: String(purchase.id), account_id: accountId });
-            return [String(purchase.id), Boolean(funded)];
-          } catch (error) {
-            accountReadFailed = true;
-            if (options.strict) throw error;
-            return [String(purchase.id), Boolean(commitmentFor(purchase)?.state === "Active")];
-          }
-        }));
+        // get_purchase already contains the account's public commitment. Reusing that
+        // verified record avoids one is_funded_member RPC per historical deal. Financial
+        // and permission-sensitive actions still reread the exact purchase immediately
+        // before authorization.
+        const fundedEntries = state.purchases.map((purchase) => [
+          String(purchase.id),
+          Boolean(commitmentFor(purchase)?.state === "Active"),
+        ]);
         if (String(state.accountId || "") !== accountId) return false;
         state.fundedMembership = new Map(fundedEntries);
         const voteTypes = usesOpenMembership ? [["fulfillment", "get_fulfillment_vote"]] : [["offer", "get_offer_vote"], ["fulfillment", "get_fulfillment_vote"]];
-        const voteEntries = await Promise.all(state.purchases.flatMap((purchase) => voteTypes.map(async ([type, methodName]) => {
+        const voteRequests = state.purchases
+          .filter((purchase) => accountPurchaseNeedsVote(purchase, version))
+          .flatMap((purchase) => voteTypes
+            .filter(([type]) => type === "offer" ? purchase.state === "Proposed" : purchase.state === "FulfillmentPending")
+            .map(([type, methodName]) => ({ purchase, type, methodName })));
+        const voteReads = await readIndexedRecords(async ({ purchase, type, methodName }) => {
           try {
             const vote = await view(methodName, { purchase_id: String(purchase.id), account_id: accountId });
-            return [voteStateKey(purchase.id, type), vote === null ? null : { approve: Boolean(vote) }];
+            return { key: voteStateKey(purchase.id, type), vote: vote === null ? null : { approve: Boolean(vote) } };
           } catch (error) {
             accountReadFailed = true;
             if (options.strict) throw error;
             // Older deployed V2 accounts may not expose the additive per-voter view yet.
-            const key = voteStateKey(purchase.id, type);
-            return [key, previousVotes.get(key) || null];
+            return { key: voteStateKey(purchase.id, type), vote: previousVotes.get(voteStateKey(purchase.id, type)) || null };
           }
-        })));
+        }, voteRequests, 4);
+        const strictVoteFailure = voteReads.find((result) => result?.status === "rejected");
+        if (strictVoteFailure) throw strictVoteFailure.reason;
+        const voteEntries = voteReads
+          .filter((result) => result?.status === "fulfilled" && result.value)
+          .map((result) => [result.value.key, result.value.vote]);
         if (String(state.accountId || "") !== accountId) return false;
         voteEntries.forEach(([key, vote]) => {
           if (vote) state.recordedVotes.set(key, vote);
@@ -2207,16 +2425,23 @@
     return await promise;
   }
 
-  async function loadPurchase(purchaseId) {
-    if (!state.dataLoaded) await loadBaseData();
-    const purchase = await view("get_purchase", { purchase_id: String(purchaseId) });
-    if (!purchase) throw new Error("That purchase does not exist on the current contract.");
+  function applyVerifiedPurchase(purchase) {
+    if (!purchase || purchase.id === undefined || purchase.id === null) return false;
     state.currentPurchase = purchase;
     const index = state.purchases.findIndex((item) => String(item.id) === String(purchase.id));
     if (index >= 0) state.purchases[index] = purchase;
     else state.purchases.unshift(purchase);
     state.lastVerifiedRefreshAt = Date.now();
+    persistPublicSnapshot();
     walletStateRun = null;
+    return true;
+  }
+
+  async function loadPurchase(purchaseId) {
+    if (!state.dataLoaded) await loadBaseData();
+    const purchase = await view("get_purchase", { purchase_id: String(purchaseId) });
+    if (!purchase) throw new Error("That purchase does not exist on the current contract.");
+    applyVerifiedPurchase(purchase);
     return purchase;
   }
 
@@ -3834,7 +4059,7 @@
           : isContribution && !task.transactionHash
             ? "No submitted transaction is identifiable yet. Checking status never sends another payment."
             : "HarvestPool is checking the exact saved transaction. Checking status never resubmits it.";
-        const status = archived ? "Archived alert" : isContribution ? "Checking your payment" : "Checking status";
+        const status = archived ? "Archived alert" : isContribution ? "Checking your payment" : "Checking transaction confirmation";
         const heading = isContribution ? `Your contribution: ${amount}` : "Saved action under verification";
         const archiveButton = archived
           ? ""
@@ -4020,7 +4245,11 @@
     const purchaseId = button.dataset.purchaseId;
     const method = button.dataset.voteType === "offer" ? "vote_on_offer" : "vote_on_fulfillment";
     const approve = button.dataset.approve === "true";
-    const purchase = state.purchases.find((item) => String(item.id) === String(purchaseId));
+    const purchase = await loadPurchase(purchaseId).catch((error) => {
+      showToast(`The latest deal state could not be verified. No vote was submitted. ${String(error?.message || "")}`.trim(), "error");
+      return null;
+    });
+    if (!purchase) return null;
     if (method === "vote_on_fulfillment" && isV5(purchase)) {
       const choice = approve ? "approve" : "reject";
       const reviewed = await reviewTransaction({
@@ -4216,9 +4445,10 @@
     const confirmation = await performVerifiedAction(button, confirmationMethod, contributionArgs, "You’re in! Your spot is secured.", contributionOptions);
     if (!confirmation || confirmation.state !== "confirmed") return;
     try {
-      await loadBaseData();
-      await loadPurchase(purchaseId);
-      const confirmedPurchase = state.currentPurchase;
+      // performVerifiedAction already refreshes the exact affected purchase and wallet
+      // state after confirmation. Do not follow it with a directory/governance scan.
+      const confirmedPurchase = state.purchases.find((item) => String(item.id) === String(purchaseId))
+        || await loadPurchase(purchaseId);
       const confirmedCommitment = commitmentFor(confirmedPurchase);
       const confirmed = Boolean(
         confirmedCommitment
@@ -4290,7 +4520,8 @@
     });
     if (!confirmation || confirmation.state !== "confirmed") return;
     try {
-      await loadBaseData();
+      // The confirmation path already reread this purchase. Keep the supplier page
+      // independent from the public directory and historical governance records.
       const purchase = state.purchases.find((item) => String(item.id) === String(form.dataset.purchaseId));
       if (purchase?.fulfillment_evidence_hash !== evidence) {
         showFormTransactionError(form, "The wallet returned, but fulfillment evidence is not confirmed yet. Your draft is safe. Refresh before trying again.");
@@ -4363,7 +4594,7 @@
           subject: String(values.get("subject") || "").trim(),
           description: String(values.get("description") || "").trim(),
           suggestedSolution: String(values.get("suggested_solution") || "").trim(),
-        })));
+        })), { background: true, purchaseId: String(values.get("purchase_id") || "") });
         if (issue) {
           completeIssueConfirmation(form, issue, requesterId);
           return;
@@ -4377,7 +4608,7 @@
           proposal: String(values.get("proposal") || "").trim(),
           options,
           voteType,
-        })));
+        })), { background: true, issueId: form.dataset.issueId });
         if (decision) {
           completeDecisionConfirmation(form, decision, requesterId);
           return;
@@ -4415,8 +4646,8 @@
       return;
     }
     const requesterId = String(state.accountId);
-    const liveV3 = await loadV3Data();
-    if (!liveV3) {
+    const liveV3 = await loadV3Data({ background: true, purchaseId });
+    if (!liveV3 || state.v3Error) {
       setIssueError("We couldn't verify the latest issue state. Your draft is safe. Please try again.");
       return;
     }
@@ -4478,9 +4709,9 @@
       return;
     }
     const requesterId = String(state.accountId);
-    const liveV3 = await loadV3Data();
+    const liveV3 = await loadV3Data({ background: true, issueId });
     const liveIssue = liveV3 ? state.issues.find((item) => String(item.id) === issueId) : null;
-    if (!liveIssue) {
+    if (!liveV3 || state.v3Error || !liveIssue) {
       showFormTransactionError(form, "The referenced issue is not confirmed on-chain. Your draft is safe; no vote request was submitted.");
       return;
     }
@@ -4549,7 +4780,7 @@
       if (methodName === "community_contribute_usdc") {
         if (appConfig.page === "community_fund") await loadCommunityFundData({ refreshActivity: false });
       } else {
-        const [refreshResult] = await Promise.allSettled([refreshAffectedAction(action)]);
+        const [refreshResult] = await Promise.allSettled([refreshAffectedAction(action, { verifiedRecord: existing.record })]);
         if (refreshResult.status === "rejected") state.liveDataError = refreshResult.reason;
       }
       renderCurrentPage();
@@ -4661,7 +4892,7 @@
           .then(() => renderCurrentPage())
           .catch(() => null);
       } else {
-        const [refreshResult] = await Promise.allSettled([refreshAffectedAction(submittedAction)]);
+        const [refreshResult] = await Promise.allSettled([refreshAffectedAction(submittedAction, { verifiedRecord: result.record })]);
         if (refreshResult.status === "rejected") state.liveDataError = refreshResult.reason;
       }
       renderCurrentPage();
@@ -4698,6 +4929,18 @@
   }
 
   async function handleV3Action(button, methodName, args, successMessage) {
+    try {
+      if (args?.decision_id !== undefined) {
+        const decision = await viewV3("get_decision", { decision_id: String(args.decision_id) });
+        if (!decision) throw new Error("That group decision is no longer available on the current contract.");
+      } else if (args?.issue_id !== undefined) {
+        const issue = await viewV3("get_issue", { issue_id: String(args.issue_id) });
+        if (!issue) throw new Error("That issue is no longer available on the current contract.");
+      }
+    } catch (error) {
+      showToast(`The latest decision state could not be verified. No action was submitted. ${String(error?.message || "")}`.trim(), "error");
+      return null;
+    }
     return performVerifiedAction(button, methodName, args, successMessage, {
       receiverId: appConfig.v3ContractId,
       failureMessage: methodName === "vote_on_decision"
@@ -4707,6 +4950,13 @@
   }
 
   async function handleSimpleAction(button, methodName, args, successMessage) {
+    if (args?.purchase_id !== undefined) {
+      const freshPurchase = await loadPurchase(args.purchase_id).catch((error) => {
+        showToast(`The latest deal state could not be verified. No transaction was submitted. ${String(error?.message || "")}`.trim(), "error");
+        return null;
+      });
+      if (!freshPurchase) return null;
+    }
     return performVerifiedAction(button, methodName, args, successMessage);
   }
 
@@ -5178,7 +5428,7 @@
     if (!confirmation || confirmation.state !== "confirmed") return;
     try {
       const id = confirmation.record?.id;
-      await loadBaseData();
+      await loadBaseData({ background: true });
       const created = id !== null && id !== undefined
         && state.purchases.some((purchase) => String(purchase.id) === String(id));
       if (!created) {

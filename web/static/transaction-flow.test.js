@@ -37,7 +37,8 @@ test("confirmed issue replaces the form with durable success details and next ac
 test("lost callbacks and refresh recovery retain the pending lock and reconcile authoritative state", () => {
   assert.match(appSource, /captureWalletCallbackHash\(\)/);
   assert.match(appSource, /pendingForWalletCallback\(pending\)/);
-  assert.match(appSource, /affectedPurchaseIds/);
+  assert.match(appSource, /const affectedActions = pending\.filter/);
+  assert.match(appSource, /refreshAffectedAction\(action\)/);
   assert.match(appSource, /action\.methodName === "raise_issue".*state\.confirmedIssueId/s);
   assert.match(appSource, /We haven't confirmed the result yet\. Please don't submit again while we check\./);
 });
@@ -87,8 +88,8 @@ test("confirmed reconciliation reloads readiness before rendering payout control
 });
 
 test("shared recovery reloads affected purchase context without an out-of-scope loop variable", () => {
-  assert.match(appSource, /const affectedPurchaseIds = new Set\(\)/);
-  assert.match(appSource, /const purchaseId = \[\.\.\.affectedPurchaseIds\]\[0\]/);
+  assert.match(appSource, /const affectedActions = pending\.filter/);
+  assert.match(appSource, /Promise\.all\(affectedActions\.map\(\(action\) => refreshAffectedAction\(action\)\)\)/);
   assert.doesNotMatch(appSource, /const purchaseId = action\.context\?\.purchaseId \?\? state\.currentPurchase/);
 });
 
@@ -180,6 +181,6 @@ test("financial success waits for the outbound callback operation, not only purc
 
 test("reconciliation refresh recovery reloads the affected purchase from pending context", () => {
   assert.match(appSource, /context: \{ previousReconciledAt:.*purchaseId: String\(freshPurchase\.id\)/s);
-  assert.match(appSource, /action\.context\?\.purchaseId \?\?/);
+  assert.match(appSource, /action\.args\?\.purchase_id[\s\S]*action\.context\?\.purchaseId/);
   assert.match(appSource, /await refreshLiveData\(\{ force: true \}\)/);
 });
